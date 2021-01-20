@@ -1,0 +1,8 @@
+[package]
+name = "stealth-paint"
+version = "0.1.0"
+authors = ["Andreas Molzer <andreas.molzer@gmx.de>"]
+edition = "2018"
+
+[dependencies]
+wgpu = "0.6.2"
