@@ -6,3 +6,6 @@ edition = "2018"
 
 [dependencies]
 wgpu = "0.6.2"
+
+[build-dependencies]
+shaderc = "0.7"

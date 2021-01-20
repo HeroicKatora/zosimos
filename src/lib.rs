@@ -14,3 +14,4 @@ mod command;
 mod pool;
 mod program;
 mod run;
+mod shaders;
