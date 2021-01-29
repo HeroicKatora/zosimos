@@ -10,8 +10,10 @@
 //! For steps 3 and 6, input and output, you might find the `image` and `image-canvas` crates
 //! quite helpful for dealing with image formats and describing pre-existing buffers.
 
-mod command;
-mod pool;
+pub mod buffer;
+pub mod command;
+pub mod pool;
 mod program;
 mod run;
 mod shaders;
+

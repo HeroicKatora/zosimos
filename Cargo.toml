@@ -5,6 +5,8 @@ authors = ["Andreas Molzer <andreas.molzer@gmx.de>"]
 edition = "2018"
 
 [dependencies]
+image-canvas = { path = "../image-canvas" }
+slotmap = "1"
 wgpu = "0.6.2"
 
 [build-dependencies]
