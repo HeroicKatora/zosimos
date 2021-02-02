@@ -8,8 +8,14 @@ pub struct Program {
 
 /// Low level instruction.
 /// Can be scheduled/ran directly on a machine state.
-enum Low {
+pub enum Low {
+    BeginCommands,
+    BeginRenderPass(RenderPassDescriptor),
+    EndCommands,
+    EndRenderPass,
 }
+
+pub(crate) struct RenderPassDescriptor;
 
 /// Cost planning data.
 ///

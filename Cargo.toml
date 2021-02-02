@@ -3,11 +3,12 @@ name = "stealth-paint"
 version = "0.1.0"
 authors = ["Andreas Molzer <andreas.molzer@gmx.de>"]
 edition = "2018"
+license = "MPL-2.0"
 
 [dependencies]
 image-canvas = { path = "../image-canvas" }
 slotmap = "1"
-wgpu = "0.6.2"
+wgpu = "0.7"
 
 [build-dependencies]
 shaderc = "0.7"
