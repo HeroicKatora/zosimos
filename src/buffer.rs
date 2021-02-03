@@ -38,13 +38,19 @@ pub struct Texel {
     pub color: Color,
 }
 
+#[non_exhaustive]
 pub enum Block {
     /// Each texel is a single pixel.
     Pixel,
+    /// Each texel refers to two pixels across width.
     Sub1x2,
+    /// Each texel refers to four pixels across width.
     Sub1x4,
+    /// Each texel refers to a two-by-two block.
     Sub2x2,
+    /// Each texel refers to a two-by-four block.
     Sub2x4,
+    /// Each texel refers to a four-by-four block.
     Sub4x4,
 }
 
@@ -57,6 +63,7 @@ pub struct Samples {
 }
 
 /// Describes which values are present in a texel.
+#[non_exhaustive]
 pub enum SampleParts {
     A,
     Rgb,
@@ -72,6 +79,7 @@ pub enum SampleParts {
     Yuv,
 }
 
+#[non_exhaustive]
 pub enum SampleBits {
     /// A single 8-bit integer.
     Int8,
@@ -105,6 +113,7 @@ pub enum SampleBits {
     Float32x4,
 }
 
+#[non_exhaustive]
 pub enum Color {
     /// A common model based on the CIE 1931 XYZ observer.
     Xyz {

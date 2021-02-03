@@ -12,6 +12,7 @@ pub struct Execution {
     descriptors: Descriptors,
     command_encoder: Option<wgpu::CommandEncoder>,
     command_buffers: Vec<wgpu::CommandBuffer>,
+    render_pipelines: Vec<wgpu::RenderPipeline>,
     buffers: Pool,
 }
 
