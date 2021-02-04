@@ -31,13 +31,11 @@ enum Op {
         desc: Descriptor,
     },
     /// out(src)
-    /// where type(src) = desc
     ///
     /// WIP: and is_cpu_type(desc)
     /// for the eventuality of gpu-only buffer layouts.
     Output { 
         src: Register,
-        desc: Descriptor,
     },
     /// i := op()
     /// where type(i) = desc
@@ -73,12 +71,18 @@ enum UnaryOp {
     /// Op(color)[T] = T[.color=color]
     /// And color needs to be 'color compatible' with the prior T (see module).
     ColorConvert(Color),
+    /// Op(T) = T[.color=select(channel, color)]
+    Extract { channel: usize },
 }
 
 enum BinaryOp {
     /// Op[T, U] = T
     /// where T = U
     Inscribe,
+    /// Replace a channel T with U itself.
+    /// Op[T, U] = T
+    /// where select(channel, T.color) = U.color
+    Inject { channel: usize }
 }
 
 /// A rectangle in `u32` space.

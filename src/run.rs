@@ -1,5 +1,5 @@
 use crate::pool::Pool;
-use crate::program::{Low, RenderPassDescriptor};
+use crate::program::{Low, RenderPassDescriptor, RenderPipelineDescriptor};
 
 use wgpu::{Device, Queue};
 
@@ -11,12 +11,13 @@ pub struct Execution {
     gpu: Gpu,
     descriptors: Descriptors,
     command_encoder: Option<wgpu::CommandEncoder>,
-    command_buffers: Vec<wgpu::CommandBuffer>,
-    render_pipelines: Vec<wgpu::RenderPipeline>,
     buffers: Pool,
 }
 
 struct Descriptors {
+    command_buffers: Vec<wgpu::CommandBuffer>,
+    render_pipelines: Vec<wgpu::RenderPipeline>,
+    bind_groups: Vec<wgpu::BindGroup>,
 }
 
 struct Gpu {
@@ -73,7 +74,7 @@ impl Execution {
                 match self.command_encoder.take() {
                     None => Err(StepError::InvalidInstruction),
                     Some(encoder) => {
-                        self.command_buffers.push(encoder.finish());
+                        self.descriptors.command_buffers.push(encoder.finish());
                         Ok(SyncPoint::NO_SYNC)
                     }
                 }
@@ -96,6 +97,12 @@ impl Execution {
 impl Descriptors {
     fn render_pass(&self, _: &RenderPassDescriptor)
         -> Result<wgpu::RenderPassDescriptor<'_, '_>, StepError>
+    {
+        todo!()
+    }
+
+    fn pipeline(&self, _: &RenderPipelineDescriptor)
+        -> Result<wgpu::RenderPipelineDescriptor<'_>, StepError>
     {
         todo!()
     }
