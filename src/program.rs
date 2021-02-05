@@ -1,4 +1,3 @@
-use crate::buffer::Texel;
 use crate::pool::Pool;
 use crate::run::{Execution, LaunchError};
 
@@ -19,10 +18,22 @@ pub struct Program {
 ///
 /// Currently, resources are never deleted until the end of the program. All commands reference a
 /// particular selected device/queue that is implicit global context.
-pub enum Low {
+pub(crate) enum Low {
+    /// Create (and store) a bind group layout.
+    BindGroupLayout(BindGroupLayoutDescriptor),
+    /// Create (and store) a bind group, referencing one of the layouts.
+    BindGroup(BindGroupDescriptor),
+    /// Create (and store) a new buffer.
+    Buffer(BufferDescriptor),
+    /// Create (and store) a new sampler.
+    Sampler(SamplerDescriptor),
+    /// Create (and store) a new texture .
+    Texture(TextureDescriptor),
+    /// Create (and store) a view on a texture .
+    /// Due to internal restrictions this isn't really helpful.
+    TextureView(TextureViewDescriptor),
     /// Create (and store) a render pipeline with specified parameters.
     RenderPipeline(RenderPipelineDescriptor),
-    BindGroup(BindGroupDescriptor),
 
     /// Start a new command recording.  It reaches until `EndCommands` but can be interleaved with
     /// arbitrary other commands.
@@ -39,12 +50,12 @@ pub enum Low {
 /// Create a bind group.
 pub(crate) struct BindGroupDescriptor {
     /// Select the nth layout.
-    layout_idx: usize,
+    pub layout_idx: usize,
     /// All entries at their natural position.
-    entries: Vec<BindingResource>,
+    pub entries: Vec<BindingResource>,
 }
 
-enum BindingResource {
+pub(crate) enum BindingResource {
     Buffer {
         buffer_idx: usize,
         offset: wgpu::BufferAddress,
@@ -56,52 +67,52 @@ enum BindingResource {
 
 /// Describe a bind group.
 pub(crate) struct BindGroupLayoutDescriptor {
-    entries: Vec<wgpu::BindGroupLayoutEntry>,
+    pub entries: Vec<wgpu::BindGroupLayoutEntry>,
 }
 
 /// Create a render pass.
 pub(crate) struct RenderPassDescriptor {
-    color_attachments: Vec<ColorAttachmentDescriptor>,
-    depth_stencil: Option<DepthStencilDescriptor>,
+    pub color_attachments: Vec<ColorAttachmentDescriptor>,
+    pub depth_stencil: Option<DepthStencilDescriptor>,
 }
 
-struct ColorAttachmentDescriptor {
-    texture_view: usize,
-    ops: wgpu::Operations<wgpu::Color>,
+pub(crate) struct ColorAttachmentDescriptor {
+    pub texture_view: usize,
+    pub ops: wgpu::Operations<wgpu::Color>,
 }
 
-struct DepthStencilDescriptor {
-    texture_view: usize,
-    depth_ops: Option<wgpu::Operations<f32>>,
-    stencil_ops: Option<wgpu::Operations<u32>>,
+pub(crate) struct DepthStencilDescriptor {
+    pub texture_view: usize,
+    pub depth_ops: Option<wgpu::Operations<f32>>,
+    pub stencil_ops: Option<wgpu::Operations<u32>>,
 }
 
 /// The vertex+fragment shaders, primitive mode, layout and stencils.
 /// Ignore multi sampling.
 pub(crate) struct RenderPipelineDescriptor {
-    layout: usize,
-    vertex: VertexState,
-    fragment: FragmentState,
+    pub layout: usize,
+    pub vertex: VertexState,
+    pub fragment: FragmentState,
 }
 
-struct VertexState {
-    vertex_module: usize,
-    entry_point: usize,
+pub(crate) struct VertexState {
+    pub vertex_module: usize,
+    pub entry_point: usize,
 }
 
-struct FragmentState {
-    fragment_module: usize,
-    entry_point: usize,
-    targets: Vec<wgpu::ColorTargetState>,
+pub(crate) struct FragmentState {
+    pub fragment_module: usize,
+    pub entry_point: usize,
+    pub targets: Vec<wgpu::ColorTargetState>,
 }
 
 /// For constructing a new buffer, of anonymous memory.
 pub(crate) struct BufferDescriptor {
-    size: wgpu::BufferAddress,
-    usage: BufferUsage,
+    pub size: wgpu::BufferAddress,
+    pub usage: BufferUsage,
 }
 
-enum BufferUsage {
+pub(crate) enum BufferUsage {
     /// Map Write + Vertex
     InVertices,
     /// Map Write + Storage + Copy Src
@@ -117,12 +128,12 @@ enum BufferUsage {
 /// For constructing a new texture.
 /// Ignores mip level, sample count, and some usages.
 pub(crate) struct TextureDescriptor {
-    size: (u32, u32),
-    format: wgpu::TextureFormat,
-    usage: TextureUsage,
+    pub size: (u32, u32),
+    pub format: wgpu::TextureFormat,
+    pub usage: TextureUsage,
 }
 
-enum TextureUsage {
+pub(crate) enum TextureUsage {
     /// Copy Dst + Sampled
     DataIn,
     /// Copy Src + Render Attachment
@@ -130,6 +141,10 @@ enum TextureUsage {
     /// A storage texture
     /// Copy Src/Dst + Sampled + Render Attachment
     Storage,
+}
+
+pub(crate) struct TextureViewDescriptor {
+    pub texture: usize,
 }
 
 // FIXME: useless at the moment of writing, for our purposes.
@@ -141,11 +156,11 @@ enum TextureUsage {
 /// Ignores lod attributes
 pub(crate) struct SamplerDescriptor {
     /// In all directions.
-    address_mode: wgpu::AddressMode,
-    resize_filter: wgpu::FilterMode,
+    pub address_mode: wgpu::AddressMode,
+    pub resize_filter: wgpu::FilterMode,
     // TODO: evaluate if necessary or beneficial
     // compare: Option<wgpu::CompareFunction>,
-    border_color: Option<wgpu::SamplerBorderColor>,
+    pub border_color: Option<wgpu::SamplerBorderColor>,
 }
 
 /// Cost planning data.
