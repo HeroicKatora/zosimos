@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use crate::pool::Pool;
 use crate::run::{Execution, LaunchError};
 
@@ -27,6 +28,8 @@ pub(crate) enum Low {
     Buffer(BufferDescriptor),
     /// Create (and store) a new sampler.
     Sampler(SamplerDescriptor),
+    /// Upload (and store) a new shader.
+    Shader(ShaderDescriptor),
     /// Create (and store) a new texture .
     Texture(TextureDescriptor),
     /// Create (and store) a view on a texture .
@@ -92,17 +95,23 @@ pub(crate) struct DepthStencilDescriptor {
 pub(crate) struct RenderPipelineDescriptor {
     pub layout: usize,
     pub vertex: VertexState,
+    pub primitive: PrimitiveState,
     pub fragment: FragmentState,
 }
 
 pub(crate) struct VertexState {
     pub vertex_module: usize,
-    pub entry_point: usize,
+    pub entry_point: &'static str,
+    pub targets: Vec<wgpu::ColorTargetState>,
+}
+
+pub(crate) enum PrimitiveState {
+    SoleQuad,
 }
 
 pub(crate) struct FragmentState {
     pub fragment_module: usize,
-    pub entry_point: usize,
+    pub entry_point: &'static str,
     pub targets: Vec<wgpu::ColorTargetState>,
 }
 
@@ -110,6 +119,12 @@ pub(crate) struct FragmentState {
 pub(crate) struct BufferDescriptor {
     pub size: wgpu::BufferAddress,
     pub usage: BufferUsage,
+}
+
+pub(crate) struct ShaderDescriptor {
+    pub name: &'static str,
+    pub source_spirv: Cow<'static, [u32]>,
+    pub flags: wgpu::ShaderFlags,
 }
 
 pub(crate) enum BufferUsage {

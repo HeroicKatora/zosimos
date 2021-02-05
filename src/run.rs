@@ -19,6 +19,8 @@ struct Descriptors {
     bind_group_layouts: Vec<wgpu::BindGroupLayout>,
     buffers: Vec<wgpu::Buffer>,
     command_buffers: Vec<wgpu::CommandBuffer>,
+    modules: Vec<wgpu::ShaderModule>,
+    pipeline_layouts: Vec<wgpu::PipelineLayout>,
     render_pipelines: Vec<wgpu::RenderPipeline>,
     sampler: Vec<wgpu::Sampler>,
     textures: Vec<wgpu::Texture>,
@@ -28,11 +30,11 @@ struct Descriptors {
 struct Gpu {
     device: Device,
     queue: Queue,
+    modules: Vec<wgpu::ShaderModule>,
 }
 
 pub struct SyncPoint<'a> {
     marker: core::marker::PhantomData<&'a mut Execution>,
-    _private: u8,
 }
 
 struct Machine {
@@ -84,6 +86,17 @@ impl Execution {
                 };
                 let buffer = self.gpu.device.create_buffer(&desc);
                 self.descriptors.buffers.push(buffer);
+                Ok(SyncPoint::NO_SYNC)
+            }
+            Low::Shader(desc) => {
+                let desc = wgpu::ShaderModuleDescriptor {
+                    label: Some(desc.name),
+                    source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
+                    flags: desc.flags,
+                };
+
+                let module = self.gpu.device.create_shader_module(&desc);
+                self.descriptors.modules.push(module);
                 Ok(SyncPoint::NO_SYNC)
             }
             Low::Sampler(desc) => {
@@ -149,7 +162,10 @@ impl Execution {
                 Ok(SyncPoint::NO_SYNC)
             }
             Low::RenderPipeline(desc) => {
-                let pipeline = self.descriptors.pipeline(desc)?;
+                let mut vertex_buffers = vec![];
+                let mut fragments = vec![];
+
+                let pipeline = self.descriptors.pipeline(desc, &mut vertex_buffers, &mut fragments)?;
                 let pipeline = self.gpu.device.create_render_pipeline(&pipeline);
                 self.descriptors.render_pipelines.push(pipeline);
                 Ok(SyncPoint::NO_SYNC)
@@ -302,10 +318,65 @@ impl Descriptors {
         })
     }
 
-    fn pipeline(&self, _: &program::RenderPipelineDescriptor)
-        -> Result<wgpu::RenderPipelineDescriptor<'_>, StepError>
-    {
-        todo!()
+    fn pipeline<'set>(
+        &'set self,
+        desc: &program::RenderPipelineDescriptor,
+        vertex_buffers: &'set mut Vec<wgpu::VertexBufferLayout<'set>>,
+        fragments: &'set mut Vec<wgpu::ColorTargetState>,
+    ) -> Result<wgpu::RenderPipelineDescriptor<'set>, StepError> {
+        Ok(wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: self.pipeline_layouts
+                .get(desc.layout),
+            vertex: self.vertex_state(&desc.vertex, vertex_buffers)?,
+            primitive: match desc.primitive {
+                program::PrimitiveState::SoleQuad => wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: wgpu::CullMode::None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                }
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(self.fragment_state(&desc.fragment, fragments)?),
+        })
+    }
+
+    fn vertex_state<'set>(
+        &'set self,
+        desc: &program::VertexState,
+        buf: &'set mut Vec<wgpu::VertexBufferLayout<'set>>,
+    ) -> Result<wgpu::VertexState<'set>, StepError> {
+        buf.clear();
+        Ok(wgpu::VertexState {
+            module: self.modules
+                .get(desc.vertex_module)
+                .ok_or_else(|| StepError::InvalidInstruction)?,
+            entry_point: desc.entry_point,
+            buffers: buf,
+        })
+    }
+
+    fn fragment_state<'set>(
+        &'set self,
+        desc: &program::FragmentState,
+        buf: &'set mut Vec<wgpu::ColorTargetState>,
+    ) -> Result<wgpu::FragmentState<'_>, StepError> {
+        buf.clear();
+        buf.extend_from_slice(&desc.targets);
+        Ok(wgpu::FragmentState {
+            module: self.modules
+                .get(desc.fragment_module)
+                .ok_or_else(|| StepError::InvalidInstruction)?,
+            entry_point: desc.entry_point,
+            targets: buf,
+        })
     }
 }
 
@@ -331,5 +402,5 @@ impl Machine {
 }
 
 impl SyncPoint<'_> {
-    const NO_SYNC: Self = SyncPoint { marker: core::marker::PhantomData, _private: 0 };
+    const NO_SYNC: Self = SyncPoint { marker: core::marker::PhantomData };
 }
