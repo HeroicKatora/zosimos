@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use crate::command::High;
 use crate::buffer::BufferLayout;
 use crate::pool::{Pool, PoolKey};
 use crate::run::{Execution, LaunchError};
@@ -9,7 +10,7 @@ use crate::run::{Execution, LaunchError};
 /// This is selected based on the available device and its capabilities, which is performed during
 /// launch.
 pub struct Program {
-    _todo: u8,
+    ops: Vec<High>,
 }
 
 /// Low level instruction.

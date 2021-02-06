@@ -1,7 +1,9 @@
-use crate::program::{CompileError, Program};
 use crate::buffer::{Color, Descriptor};
+use crate::program::{CompileError, Program};
+use crate::pool::PoolImage;
 
 /// A reference to one particular value.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Register(usize);
 
 /// One linear sequence of instructions.
@@ -21,6 +23,7 @@ pub struct Register(usize);
 /// The strict typing and SSA-liveness analysis allows for a clean analysis of required temporary
 /// resources, re-usage of those as an internal optimization, and in general simple analysis and
 /// verification.
+#[derive(Default)]
 pub struct CommandBuffer {
     ops: Vec<Op>,
 }
@@ -48,6 +51,7 @@ enum Op {
     Unary {
         src: Register,
         op: UnaryOp,
+        desc: Descriptor,
     },
     /// i := binary(lhs, rhs)
     /// where type(i) =? Op[type(lhs), type(rhs)]
@@ -55,12 +59,19 @@ enum Op {
         lhs: Register,
         rhs: Register,
         op: BinaryOp,
+        desc: Descriptor,
     },
 }
 
 enum ConstructOp {
     // TODO: can optimize this repr for the common case.
     Solid(Vec<u8>),
+}
+
+/// A high-level, device independent, translation of ops.
+/// The main difference to Op is that this is no longer in SSA-form, and it may reinterpret and
+/// reuse resources. In particular it will ran after the initial liveness analysis.
+pub(crate) enum High {
 }
 
 enum UnaryOp {
@@ -72,7 +83,7 @@ enum UnaryOp {
     /// And color needs to be 'color compatible' with the prior T (see module).
     ColorConvert(Color),
     /// Op(T) = T[.color=select(channel, color)]
-    Extract { channel: usize },
+    Extract { channel: ColorChannel },
 }
 
 enum BinaryOp {
@@ -82,7 +93,7 @@ enum BinaryOp {
     /// Replace a channel T with U itself.
     /// Op[T, U] = T
     /// where select(channel, T.color) = U.color
-    Inject { channel: usize }
+    Inject { channel: ColorChannel }
 }
 
 /// A rectangle in `u32` space.
@@ -106,6 +117,14 @@ pub struct Affine {
     transformation: [f32; 9],
 }
 
+/// Describes a single channel from an image.
+/// Note that it must match the descriptor when used in `extract` and `inject`.
+pub enum ColorChannel {
+    R,
+    G,
+    B,
+}
+
 pub struct CommandError {
     type_err: bool,
 }
@@ -118,59 +137,155 @@ impl CommandBuffer {
         todo!()
     }
 
+    pub fn input_from(&mut self, img: PoolImage)
+        -> Result<Register, CommandError>
+    {
+        let descriptor = img.descriptor().ok_or(CommandError::OTHER)?;
+        Ok(self.input(descriptor))
+    }
+
     /// Select a rectangular part of an image.
     pub fn crop(&mut self, src: Register, rect: Rectangle)
         -> Result<Register, CommandError>
     {
-        todo!()
+        let desc = self.describe_reg(src)?.clone();
+        Ok(self.push(Op::Unary {
+            src,
+            op: UnaryOp::Crop(rect),
+            desc,
+        }))
     }
 
     /// Create an image with different color encoding.
     pub fn color_convert(&mut self, src: Register, color: Color)
         -> Result<Register, CommandError>
     {
-        todo!()
+        let desc = todo!("Check for convertibility");
+        Ok(self.push(Op::Unary {
+            src,
+            op: UnaryOp::ColorConvert(color),
+            desc,
+        }))
     }
 
     /// Embed this image as part of a larger one.
-    pub fn inscribe(&mut self, below: Register, _: Rectangle, above: Register)
+    pub fn inscribe(&mut self, below: Register, rect: Rectangle, above: Register)
         -> Result<Register, CommandError>
     {
-        todo!()
+        let desc_below = self.describe_reg(below)?;
+        let desc_above = self.describe_reg(above)?;
+
+        if desc_above != desc_above {
+            return Err(CommandError::TYPE_ERR);
+        }
+
+        Ok(self.push(Op::Binary {
+            lhs: below,
+            rhs: above,
+            op: BinaryOp::Inscribe,
+            desc: desc_below.clone(),
+        }))
+    }
+
+    /// Extract some channels from an image data into a new view.
+    pub fn extract(&mut self, src: Register, channel: ColorChannel)
+        -> Result<Register, CommandError>
+    {
+        let desc = self.describe_reg(src)?;
+        let desc = todo!("Check plane against desc");
+        Ok(self.push(Op::Unary {
+            src,
+            op: UnaryOp::Extract { channel },
+            desc,
+        }))
+    }
+
+    /// Overwrite some channels with overlaid data.
+    pub fn inject(&mut self, below: Register, channel: ColorChannel, above: Register)
+        -> Result<Register, CommandError>
+    {
+        let desc_below = self.describe_reg(below)?;
+        let desc_above = self.describe_reg(above)?;
+        let desc = todo!("Check plane against desc");
+
+        Ok(self.push(Op::Binary {
+            lhs: below,
+            rhs: above,
+            op: BinaryOp::Inject { channel },
+            desc: desc_below.clone(),
+        }))
     }
 
     /// Overlay this image as part of a larger one, performing blending.
     pub fn blend(&mut self, below: Register, _: Rectangle, above: Register, _: Blend)
         -> Result<Register, CommandError>
     {
-        todo!()
+        todo!("What blending should we support??");
+        Err(CommandError::OTHER)
     }
 
     /// A solid color image, from a descriptor and a single texel.
-    pub fn solid(&mut self, _: Descriptor, _: &[u8])
+    pub fn solid(&mut self, describe: Descriptor, data: &[u8])
         -> Result<Register, CommandError>
     {
-        todo!()
+        if data.len() != describe.layout.bytes_per_texel {
+            return Err(CommandError::TYPE_ERR);
+        }
+
+        Ok(self.push(Op::Construct {
+            desc: describe,
+            op: ConstructOp::Solid(data.to_owned()),
+        }))
     }
 
     /// An affine transformation of the image.
-    pub fn affine(&mut self, src: Register, _: Affine)
+    pub fn affine(&mut self, src: Register, affine: Affine)
         -> Result<Register, CommandError>
     {
-        todo!()
+        // TODO: should we check affine here?
+        let desc = self.describe_reg(src)?.clone();
+        Ok(self.push(Op::Unary {
+            src,
+            op: UnaryOp::Affine(affine),
+            desc,
+        }))
     }
 
     /// Declare an output.
     ///
     /// Outputs MUST later be bound from the pool during launch.
-    pub fn output(&mut self, src: Register, _: Descriptor)
+    pub fn output(&mut self, src: Register)
         -> Result<Register, CommandError>
     {
-        todo!()
+        Ok(self.push(Op::Output {
+            src,
+        }))
     }
 
     pub fn compile(&self) -> Result<Program, CompileError> {
         todo!()
+    }
+
+    fn describe_reg(&self, Register(reg): Register)
+        -> Result<&Descriptor, CommandError>
+    {
+        match self.ops.get(reg) {
+            None | Some(Op::Output { .. }) => {
+                Err(CommandError::BAD_REGISTER)
+            }
+            Some(Op::Input { desc })
+            | Some(Op::Construct { desc, .. })
+            | Some(Op::Unary { desc, .. })
+            | Some(Op::Binary { desc, .. }) => {
+                Ok(desc)
+            }
+        }
+    }
+
+    fn push(&mut self, op: Op) -> Register {
+        let reg = Register(self.ops.len());
+        self.ops.push(op);
+        reg
     }
 }
 
@@ -260,6 +375,9 @@ impl CommandError {
     const OTHER: Self = CommandError {
         type_err: false,
     };
+
+    /// Specifies that a register reference was invalid.
+    const BAD_REGISTER: Self = Self::OTHER;
 
     pub fn is_type_err(&self) -> bool {
         self.type_err

@@ -1,9 +1,12 @@
 //! Defines layout and buffer of our images.
 use canvas::layout::Layout;
 
+/// The byte layout of a buffer.
+#[derive(Clone, PartialEq, Eq)]
 pub struct BufferLayout {
-    width: u32,
-    height: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) bytes_per_texel: usize,
 }
 
 /// Describe a row-major rectangular matrix layout.
@@ -22,6 +25,7 @@ pub struct ImageBuffer {
 }
 
 /// Describes an image semantically.
+#[derive(Clone, PartialEq)]
 pub struct Descriptor {
     /// The byte and physical layout of the buffer.
     pub layout: BufferLayout,
@@ -29,6 +33,7 @@ pub struct Descriptor {
     pub texel: Texel,
 }
 
+#[derive(Clone, PartialEq)]
 pub struct Texel {
     /// Which part of the image a single texel refers to.
     pub block: Block,
@@ -38,6 +43,7 @@ pub struct Texel {
     pub color: Color,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Block {
     /// Each texel is a single pixel.
@@ -55,6 +61,7 @@ pub enum Block {
 }
 
 /// The bit encoding of values within the texel bytes.
+#[derive(Clone, PartialEq)]
 pub struct Samples {
     /// Which values are encoded, which controls the applicable color spaces.
     pub parts: SampleParts,
@@ -63,6 +70,7 @@ pub struct Samples {
 }
 
 /// Describes which values are present in a texel.
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SampleParts {
     A,
@@ -79,6 +87,7 @@ pub enum SampleParts {
     Yuv,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SampleBits {
     /// A single 8-bit integer.
@@ -113,6 +122,7 @@ pub enum SampleBits {
     Float32x4,
 }
 
+#[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Color {
     /// A common model based on the CIE 1931 XYZ observer.
@@ -130,6 +140,7 @@ pub enum Color {
 /// inverse: An electro-optical transfer (EOTF) and opto-electronic transfer function (OETF) that
 /// describes how scene lighting is encoded as an electric signal. These are applied to each
 /// stimulus value.
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Transfer {
     Bt709,
@@ -147,6 +158,7 @@ pub enum Transfer {
 }
 
 /// The reference brightness of the color specification.
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Luminance {
     /// 100cd/m².
@@ -157,6 +169,7 @@ pub enum Luminance {
 }
 
 /// The relative stimuli of the three corners of a triangular gamut.
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Primaries {
     Bt601_525,
@@ -168,6 +181,7 @@ pub enum Primaries {
 }
 
 /// The whitepoint/standard illuminant.
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Whitepoint {
     D65,

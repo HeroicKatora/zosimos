@@ -10,5 +10,15 @@ image-canvas = { path = "../image-canvas" }
 slotmap = "1"
 wgpu = "0.7"
 
+[dependencies.image]
+version = "0.23.12"
+default-features = false
+
 [build-dependencies]
 shaderc = "0.7"
+
+[dev-dependencies]
+image = "0.23.13"
+
+[[test]]
+name = "blend"

@@ -1,7 +1,7 @@
 use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
-use crate::buffer::{BufferLayout, ImageBuffer};
+use crate::buffer::{BufferLayout, Descriptor, ImageBuffer, Texel};
 
 /// Holds a number of image buffers, their descriptors and meta data.
 ///
@@ -25,6 +25,7 @@ pub struct PoolImage<'pool> {
 struct Image {
     meta: ImageMeta,
     data: ImageData,
+    texel: Option<Texel>,
 }
 
 /// Meta data distinct from the layout questions.
@@ -78,6 +79,7 @@ impl Pool {
         let key = self.items.insert(Image {
             meta: ImageMeta::default(),
             data,
+            texel: None,
         });
 
         PoolImage {
@@ -94,6 +96,16 @@ impl PoolImage<'_> {
 
     pub fn layout(&self) -> &BufferLayout {
         self.image.data.layout()
+    }
+
+    /// The full descriptor for this image.
+    ///
+    /// This is only available if a valid `Texel` descriptor has been configured.
+    pub fn descriptor(&self) -> Option<Descriptor> {
+       Some(Descriptor {
+           layout: self.layout().clone(),
+           texel: self.image.texel.as_ref()?.clone(),
+       })
     }
 }
 
