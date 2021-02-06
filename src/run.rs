@@ -99,6 +99,13 @@ impl Execution {
                 self.descriptors.modules.push(module);
                 Ok(SyncPoint::NO_SYNC)
             }
+            Low::PipelineLayout(desc) => {
+                let mut entry_buffer = vec![];
+                let layout = self.descriptors.pipeline_layout(desc, &mut entry_buffer)?;
+                let layout = self.gpu.device.create_pipeline_layout(&layout);
+                self.descriptors.pipeline_layouts.push(layout);
+                Ok(SyncPoint::NO_SYNC)
+            }
             Low::Sampler(desc) => {
                 let desc = wgpu::SamplerDescriptor {
                     label: None,
@@ -345,6 +352,27 @@ impl Descriptors {
                 alpha_to_coverage_enabled: false,
             },
             fragment: Some(self.fragment_state(&desc.fragment, fragments)?),
+        })
+    }
+
+    fn pipeline_layout<'set>(
+        &'set self,
+        desc: &program::PipelineLayoutDescriptor,
+        buf: &'set mut Vec<&'set wgpu::BindGroupLayout>,
+    ) -> Result<wgpu::PipelineLayoutDescriptor<'_>, StepError> {
+        buf.clear();
+
+        for &layout in &desc.bind_group_layouts {
+            let group = self.bind_group_layouts
+                .get(layout)
+                .ok_or_else(|| StepError::InvalidInstruction)?;
+            buf.push(group);
+        }
+
+        Ok(wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: buf,
+            push_constant_ranges: desc.push_constant_ranges,
         })
     }
 

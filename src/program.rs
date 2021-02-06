@@ -1,5 +1,6 @@
 use std::borrow::Cow;
-use crate::pool::Pool;
+use crate::buffer::BufferLayout;
+use crate::pool::{Pool, PoolKey};
 use crate::run::{Execution, LaunchError};
 
 /// Planned out and intrinsically validated command buffer.
@@ -20,12 +21,15 @@ pub struct Program {
 /// Currently, resources are never deleted until the end of the program. All commands reference a
 /// particular selected device/queue that is implicit global context.
 pub(crate) enum Low {
+    // Descriptor modification commands.
     /// Create (and store) a bind group layout.
     BindGroupLayout(BindGroupLayoutDescriptor),
     /// Create (and store) a bind group, referencing one of the layouts.
     BindGroup(BindGroupDescriptor),
     /// Create (and store) a new buffer.
     Buffer(BufferDescriptor),
+    /// Describe (and store) a new pipeline layout.
+    PipelineLayout(PipelineLayoutDescriptor),
     /// Create (and store) a new sampler.
     Sampler(SamplerDescriptor),
     /// Upload (and store) a new shader.
@@ -38,6 +42,7 @@ pub(crate) enum Low {
     /// Create (and store) a render pipeline with specified parameters.
     RenderPipeline(RenderPipelineDescriptor),
 
+    // Render state commands.
     /// Start a new command recording.  It reaches until `EndCommands` but can be interleaved with
     /// arbitrary other commands.
     BeginCommands,
@@ -48,6 +53,38 @@ pub(crate) enum Low {
     EndCommands,
     /// End the render pass.
     EndRenderPass,
+
+    // Render pass commands.
+
+    // Render execution commands.
+    /// Run one command buffer previously created.
+    RunCommands(usize),
+    /// Run multiple commands at once.
+    RunAll(Cow<'static, usize>),
+    /// Read a buffer into host image data.
+    /// Will map the buffer then do row-wise writes.
+    WriteImageToBuffer {
+        source_image: PoolKey,
+        offset: (u32, u32),
+        size: (u32, u32),
+        target_buffer: usize,
+        target_layout: BufferLayout,
+    },
+    WriteImageToTexture {
+        source_image: PoolKey,
+        offset: (u32, u32),
+        size: (u32, u32),
+        target_texture: usize,
+    },
+    /// Read a buffer into host image data.
+    /// Will map the buffer then do row-wise reads.
+    ReadBuffer {
+        source_buffer: usize,
+        source_layout: BufferLayout,
+        offset: (u32, u32),
+        size: (u32, u32),
+        target_image: usize,
+    },
 }
 
 /// Create a bind group.
@@ -113,6 +150,11 @@ pub(crate) struct FragmentState {
     pub fragment_module: usize,
     pub entry_point: &'static str,
     pub targets: Vec<wgpu::ColorTargetState>,
+}
+
+pub(crate) struct PipelineLayoutDescriptor {
+    pub bind_group_layouts: Vec<usize>,
+    pub push_constant_ranges: &'static [wgpu::PushConstantRange],
 }
 
 /// For constructing a new buffer, of anonymous memory.
