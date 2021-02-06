@@ -54,13 +54,38 @@ pub(crate) enum Low {
     /// End the render pass.
     EndRenderPass,
 
+    // Command context.
+
     // Render pass commands.
+    SetPipeline(usize),
+    SetBindGroup {
+        group: usize,
+        index: u32,
+        offsets: Cow<'static, [u32]>,
+    },
+    SetVertexBuffer {
+        slot: u32,
+        buffer: usize,
+    },
+    DrawOnce {
+        vertices: u32,
+    },
+    DrawIndexedZero {
+        vertices: u32,
+    },
+    SetPushConstants {
+        stages: wgpu::ShaderStage,
+        offset: u32,
+        data: Cow<'static, [u8]>,
+    },
 
     // Render execution commands.
     /// Run one command buffer previously created.
-    RunCommands(usize),
+    RunTopCommand,
     /// Run multiple commands at once.
-    RunAll(Cow<'static, usize>),
+    RunTopToBot(usize),
+    /// Run multiple commands at once.
+    RunBotToTop(usize),
     /// Read a buffer into host image data.
     /// Will map the buffer then do row-wise writes.
     WriteImageToBuffer {

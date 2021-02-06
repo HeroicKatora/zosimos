@@ -1,3 +1,5 @@
+use core::iter::once;
+
 use crate::pool::Pool;
 use crate::program::{self, Low};
 
@@ -199,7 +201,7 @@ impl Execution {
 
                 let pass = encoder.begin_render_pass(&descriptor);
                 drop(attachment_buf);
-                self.machine.render_pass(pass)?;
+                self.machine.render_pass(&self.descriptors, pass)?;
 
                 Ok(SyncPoint::NO_SYNC)
             },
@@ -211,6 +213,31 @@ impl Execution {
                         Ok(SyncPoint::NO_SYNC)
                     }
                 }
+            }
+            &Low::RunTopCommand => {
+                let command = self.descriptors.command_buffers
+                    .pop()
+                    .ok_or_else(|| StepError::InvalidInstruction)?;
+                self.gpu.queue.submit(once(command));
+                Ok(SyncPoint::NO_SYNC)
+            }
+            &Low::RunTopToBot(many) => {
+                if many > self.descriptors.command_buffers.len() {
+                    return Err(StepError::InvalidInstruction);
+                }
+
+                let commands = self.descriptors.command_buffers.drain(many..);
+                self.gpu.queue.submit(commands.rev());
+                Ok(SyncPoint::NO_SYNC)
+            }
+            &Low::RunBotToTop(many) => {
+                if many > self.descriptors.command_buffers.len() {
+                    return Err(StepError::InvalidInstruction);
+                }
+
+                let commands = self.descriptors.command_buffers.drain(many..);
+                self.gpu.queue.submit(commands);
+                Ok(SyncPoint::NO_SYNC)
             }
             _ => Err(StepError::InvalidInstruction),
         }
@@ -417,11 +444,40 @@ impl Machine {
         Ok(instruction)
     }
 
-    fn render_pass(&mut self, pass: wgpu::RenderPass<'_>)
-        -> Result<(), StepError>
-    {
+    fn render_pass<'pass>(
+        &mut self,
+        descriptors: &'pass Descriptors,
+        mut pass: wgpu::RenderPass<'pass>,
+    ) -> Result<(), StepError> {
         loop {
             match self.next_instruction()? {
+                &Low::SetPipeline(idx) => {
+                    let pipeline = descriptors.render_pipelines
+                        .get(idx)
+                        .ok_or_else(|| StepError::InvalidInstruction)?;
+                    pass.set_pipeline(pipeline);
+                }
+                &Low::SetBindGroup{ group, index, ref offsets } => {
+                    let group = descriptors.bind_groups
+                        .get(group)
+                        .ok_or_else(|| StepError::InvalidInstruction)?;
+                    pass.set_bind_group(index, group, offsets);
+                }
+                &Low::SetVertexBuffer { slot, buffer } => {
+                    let buffer = descriptors.buffers
+                        .get(buffer)
+                        .ok_or_else(|| StepError::InvalidInstruction)?;
+                    pass.set_vertex_buffer(slot, buffer.slice(..));
+                }
+                &Low::DrawOnce { vertices } => {
+                    pass.draw(0..vertices, 0..1);
+                }
+                &Low::DrawIndexedZero { vertices } => {
+                    pass.draw_indexed(0..vertices, 0, 0..1);
+                }
+                &Low::SetPushConstants { stages, offset, ref data } => {
+                    pass.set_push_constants(stages, offset, data);
+                }
                 Low::EndRenderPass => return Ok(()),
                 _ => return Err(StepError::InvalidInstruction),
             }
