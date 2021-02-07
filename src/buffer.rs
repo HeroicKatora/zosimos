@@ -76,6 +76,9 @@ pub struct Samples {
 #[non_exhaustive]
 pub enum SampleParts {
     A,
+    R,
+    G,
+    B,
     Rgb,
     Bgr,
     Rgba,
@@ -122,6 +125,15 @@ pub enum SampleBits {
     Float16x4,
     /// Four floats.
     Float32x4,
+}
+
+/// Describes a single channel from an image.
+/// Note that it must match the descriptor when used in `extract` and `inject`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ColorChannel {
+    R,
+    G,
+    B,
 }
 
 #[derive(Clone, PartialEq)]
@@ -187,6 +199,49 @@ pub enum Primaries {
 #[non_exhaustive]
 pub enum Whitepoint {
     D65,
+}
+
+impl Descriptor {
+    /// Get the texel describing a single channel.
+    /// Returns None if the channel is not contained, or if it can not be extracted on its own.
+    pub fn channel_texel(&self, channel: ColorChannel) -> Option<Texel> {
+        self.texel.channel_texel(channel)
+    }
+}
+
+impl Texel {
+    /// Get the texel describing a single channel.
+    /// Returns None if the channel is not contained, or if it can not be extracted on its own.
+    pub fn channel_texel(&self, channel: ColorChannel) -> Option<Texel> {
+        use Block::*;
+        use SampleParts::*;
+        use SampleBits::*;
+        let parts = match self.samples.parts {
+            Rgb | Rgbx | Rgba | Bgrx | Bgra | Abgr | Argb | Xrgb | Xbgr => match channel {
+                ColorChannel::R => R,
+                ColorChannel::G => G,
+                ColorChannel::B => B,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let bits = match self.samples.bits {
+            Int8 | Int8x3 | Int8x4 => Int8,
+            _ => return None,
+        };
+        let block = match self.block {
+            Pixel | Sub1x2 | Sub1x4 | Sub2x2 | Sub2x4 | Sub4x4 => self.block,
+            _ => return None,
+        };
+        Some(Texel {
+            samples: Samples {
+                bits,
+                parts
+            },
+            block,
+            color: self.color.clone(),
+        })
+    }
 }
 
 impl ImageBuffer {

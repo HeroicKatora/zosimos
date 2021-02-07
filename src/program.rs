@@ -10,7 +10,7 @@ use crate::run::Execution;
 /// This is selected based on the available device and its capabilities, which is performed during
 /// launch.
 pub struct Program {
-    ops: Vec<High>,
+    pub(crate) ops: Vec<High>,
 }
 
 #[derive(Debug)]
@@ -297,7 +297,11 @@ impl Program {
 
     /// Return a descriptor for a device that's capable of executing the program.
     pub fn device_descriptor(&self) -> wgpu::DeviceDescriptor<'static> {
-        todo!()
+        wgpu::DeviceDescriptor {
+            label: None,
+            features: wgpu::Features::empty(),
+            limits: wgpu::Limits::default(),
+        }
     }
 
     /// Run this program with a pool.
@@ -319,8 +323,8 @@ impl Launcher<'_> {
     pub fn bind(self, Register(reg): Register, img: PoolKey)
         -> Result<Self, LaunchError>
     {
-        let descriptor = match self.program.ops.get(reg) {
-            Some(High::Input(descriptor)) => descriptor,
+        let (target, descriptor) = match self.program.ops.get(reg) {
+            Some(High::Input(target, descriptor)) => (target, descriptor),
             _ => return Err(LaunchError { })
         };
 

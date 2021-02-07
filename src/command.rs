@@ -1,4 +1,4 @@
-use crate::buffer::{Color, Descriptor};
+use crate::buffer::{Color, ColorChannel, Descriptor};
 use crate::program::{CompileError, Program};
 use crate::pool::PoolImage;
 
@@ -63,19 +63,49 @@ enum Op {
     },
 }
 
-enum ConstructOp {
+pub(crate) enum ConstructOp {
     // TODO: can optimize this repr for the common case.
     Solid(Vec<u8>),
 }
 
+/// Identifies one resources in the render pipeline, by an index.
+#[derive(Clone, Copy)]
+pub(crate) struct Texture(usize);
+
 /// A high-level, device independent, translation of ops.
 /// The main difference to Op is that this is no longer in SSA-form, and it may reinterpret and
 /// reuse resources. In particular it will ran after the initial liveness analysis.
+/// This will also return the _available_ strategies for one operation. For example, some texels
+/// can not be represented on the GPU directly, depending on available formats, and need to be
+/// either processed on the CPU (with SIMD hopefully) or they must be converted first, potentially
+/// in a compute shader.
 pub(crate) enum High {
-    Input(Descriptor),
+    /// Assign a texture id to an input with given descriptor.
+    Input(Texture, Descriptor),
+    /// Designate the ith textures as output n, according to the position in sequence of outputs.
+    Output(Texture),
+    /// Instruct the machine to allocate the texture now.
+    Allocate(Texture),
+    /// Mark a texture as unneeded.
+    Discard(Texture),
+    Construct {
+        dst: Texture,
+        op: ConstructOp,
+    },
+    Unary {
+        src: Texture,
+        dst: Texture,
+        op: UnaryOp,
+    },
+    Binary {
+        lhs: Texture,
+        rhs: Texture,
+        dst: Texture,
+        op: BinaryOp,
+    },
 }
 
-enum UnaryOp {
+pub(crate) enum UnaryOp {
     /// Op = id
     Affine(Affine),
     /// Op = id
@@ -87,7 +117,7 @@ enum UnaryOp {
     Extract { channel: ColorChannel },
 }
 
-enum BinaryOp {
+pub(crate) enum BinaryOp {
     /// Op[T, U] = T
     /// where T = U
     Inscribe,
@@ -116,14 +146,6 @@ pub enum Blend {
 
 pub struct Affine {
     transformation: [f32; 9],
-}
-
-/// Describes a single channel from an image.
-/// Note that it must match the descriptor when used in `extract` and `inject`.
-pub enum ColorChannel {
-    R,
-    G,
-    B,
 }
 
 #[derive(Debug)]
@@ -166,11 +188,13 @@ impl CommandBuffer {
         -> Result<Register, CommandError>
     {
         let desc = todo!("Check for convertibility");
-        Ok(self.push(Op::Unary {
+        let op = Op::Unary {
             src,
             op: UnaryOp::ColorConvert(color),
             desc,
-        }))
+        };
+
+        Ok(self.push(op))
     }
 
     /// Embed this image as part of a larger one.
@@ -184,12 +208,14 @@ impl CommandBuffer {
             return Err(CommandError::TYPE_ERR);
         }
 
-        Ok(self.push(Op::Binary {
+        let op = Op::Binary {
             lhs: below,
             rhs: above,
             op: BinaryOp::Inscribe,
             desc: desc_below.clone(),
-        }))
+        };
+
+        Ok(self.push(op))
     }
 
     /// Extract some channels from an image data into a new view.
@@ -197,12 +223,18 @@ impl CommandBuffer {
         -> Result<Register, CommandError>
     {
         let desc = self.describe_reg(src)?;
-        let desc = todo!("Check plane against desc");
-        Ok(self.push(Op::Unary {
+        let texel = desc.channel_texel(channel)
+            .ok_or_else(|| CommandError::OTHER)?;
+        let op = Op::Unary {
             src,
             op: UnaryOp::Extract { channel },
-            desc,
-        }))
+            desc: Descriptor {
+                layout: desc.layout.clone(),
+                texel,
+            },
+        };
+
+        Ok(self.push(op))
     }
 
     /// Overwrite some channels with overlaid data.
@@ -212,13 +244,14 @@ impl CommandBuffer {
         let desc_below = self.describe_reg(below)?;
         let desc_above = self.describe_reg(above)?;
         let desc = todo!("Check plane against desc");
-
-        Ok(self.push(Op::Binary {
+        let op = Op::Binary {
             lhs: below,
             rhs: above,
             op: BinaryOp::Inject { channel },
             desc: desc_below.clone(),
-        }))
+        };
+
+        Ok(self.push(op))
     }
 
     /// Overlay this image as part of a larger one, performing blending.
@@ -271,7 +304,23 @@ impl CommandBuffer {
     }
 
     pub fn compile(&self) -> Result<Program, CompileError> {
-        todo!()
+        let steps = self.ops.len();
+
+        let mut last_use = vec![0; steps];
+        let mut first_use = vec![steps; steps];
+
+        let mut high_ops = vec![];
+
+        // Liveness analysis.
+        for op in self.ops.iter().rev() {
+            match op {
+                _ => {},
+            }
+        }
+
+        Ok(Program {
+            ops: high_ops,
+        })
     }
 
     fn describe_reg(&self, Register(reg): Register)
