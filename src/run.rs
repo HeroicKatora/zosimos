@@ -1,12 +1,10 @@
 use core::iter::once;
 
-use crate::pool::Pool;
+use crate::pool::{Pool, PoolImage, PoolKey};
+use crate::command::Register;
 use crate::program::{self, Low};
 
 use wgpu::{Device, Queue};
-
-pub enum LaunchError {
-}
 
 pub struct Execution {
     machine: Machine,
@@ -39,21 +37,35 @@ pub struct SyncPoint<'a> {
     marker: core::marker::PhantomData<&'a mut Execution>,
 }
 
+/// Represents a stopped execution instance, without information abouts its outputs.
+pub struct Retire<'pool> {
+    /// The retiring execution instance.
+    execution: Execution,
+    pool: &'pool mut Pool,
+}
+
 struct Machine {
     instructions: Vec<Low>,
     instruction_pointer: usize,
 }
 
+#[derive(Debug)]
 pub enum StepError {
     InvalidInstruction,
     ProgramEnd,
     RenderPassDidNotEnd,
 }
 
+#[derive(Debug)]
 pub enum RetireError {
 }
 
 impl Execution {
+    /// Check if the machine is still running.
+    pub fn is_running(&self) -> bool {
+        self.machine.instruction_pointer < self.machine.instructions.len()
+    }
+
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
         match self.machine.next_instruction()? {
             Low::BindGroupLayout(desc) => {
@@ -249,8 +261,9 @@ impl Execution {
     }
 
     /// Stop the execution, depositing all resources into the provided pool.
-    pub fn retire_gracefully(self, pool: &mut Pool) -> Result<(), RetireError> {
-        todo!()
+    #[must_use = "You won't get the ids of outputs."]
+    pub fn retire_gracefully<'pool>(self, pool: &'pool mut Pool) -> Retire<'pool> {
+        Retire { execution: self, pool }
     }
 }
 
@@ -482,6 +495,16 @@ impl Machine {
                 _ => return Err(StepError::InvalidInstruction),
             }
         }
+    }
+}
+
+impl Retire<'_> {
+    pub fn output(&self, _: Register) -> Result<PoolImage<'_>, RetireError> {
+        todo!()
+    }
+
+    pub fn output_key(&self, _: Register) -> Result<PoolKey, RetireError> {
+        todo!()
     }
 }
 

@@ -14,12 +14,26 @@ pub struct Pool {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PoolKey(DefaultKey);
 
-/// A handle on an image inside the pool.
+/// A view on an image inside the pool.
 pub struct PoolImage<'pool> {
+    key: DefaultKey,
+    image: &'pool Image,
+}
+
+/// A handle on an image inside the pool.
+pub struct PoolImageMut<'pool> {
     /// The key of the slot map referring to this entry.
     key: DefaultKey,
     /// The image inside the pool.
     image: &'pool mut Image,
+}
+
+pub struct Iter<'pool> {
+    inner: slotmap::basic::Iter<'pool, DefaultKey, Image>,
+}
+
+pub struct IterMut<'pool> {
+    inner: slotmap::basic::IterMut<'pool, DefaultKey, Image>,
 }
 
 struct Image {
@@ -58,31 +72,41 @@ impl Pool {
     }
 
     /// Get a mutable handle of an image in the pool.
-    pub fn entry(&mut self, PoolKey(key): PoolKey) -> Option<PoolImage<'_>> {
-        Some(PoolImage {
+    pub fn entry(&mut self, PoolKey(key): PoolKey) -> Option<PoolImageMut<'_>> {
+        Some(PoolImageMut {
             key,
             image: self.items.get_mut(key)?,
         })
     }
 
     /// Gift the pool an image allocated on the host.
-    pub fn insert(&mut self, image: ImageBuffer) -> PoolImage<'_> {
+    pub fn insert(&mut self, image: ImageBuffer) -> PoolImageMut<'_> {
         self.new_with_data(ImageData::Host(image))
     }
 
     /// Create the descriptor for an image buffer that is provided by the caller.
-    pub fn declare(&mut self, layout: BufferLayout) -> PoolImage<'_> {
+    pub fn declare(&mut self, layout: BufferLayout) -> PoolImageMut<'_> {
         self.new_with_data(ImageData::LateBound(layout))
     }
 
-    fn new_with_data(&mut self, data: ImageData) -> PoolImage<'_> {
+    /// Iterate over all entries in the pool.
+    pub fn iter(&self) -> Iter<'_> {
+        Iter { inner: self.items.iter() }
+    }
+
+    /// Iterate over all entries in the pool.
+    pub fn iter_mut(&mut self) -> IterMut<'_> {
+        IterMut { inner: self.items.iter_mut() }
+    }
+
+    fn new_with_data(&mut self, data: ImageData) -> PoolImageMut<'_> {
         let key = self.items.insert(Image {
             meta: ImageMeta::default(),
             data,
             texel: None,
         });
 
-        PoolImage {
+        PoolImageMut {
             key,
             image: &mut self.items[key],
         }
@@ -90,6 +114,10 @@ impl Pool {
 }
 
 impl PoolImage<'_> {
+    pub fn to_image(&self) -> Option<image::DynamicImage> {
+        todo!()
+    }
+
     pub fn key(&self) -> PoolKey {
         PoolKey(self.key)
     }
@@ -106,6 +134,57 @@ impl PoolImage<'_> {
            layout: self.layout().clone(),
            texel: self.image.texel.as_ref()?.clone(),
        })
+    }
+}
+
+impl PoolImageMut<'_> {
+    pub fn key(&self) -> PoolKey {
+        PoolKey(self.key)
+    }
+
+    pub fn layout(&self) -> &BufferLayout {
+        self.image.data.layout()
+    }
+
+    /// The full descriptor for this image.
+    ///
+    /// This is only available if a valid `Texel` descriptor has been configured.
+    pub fn descriptor(&self) -> Option<Descriptor> {
+       Some(Descriptor {
+           layout: self.layout().clone(),
+           texel: self.image.texel.as_ref()?.clone(),
+       })
+    }
+}
+
+impl<'pool> From<PoolImageMut<'pool>> for PoolImage<'pool> {
+    fn from(img: PoolImageMut<'pool>) -> Self {
+        PoolImage {
+            key: img.key,
+            image: img.image,
+        }
+    }
+}
+
+impl<'pool> Iterator for Iter<'pool> {
+    type Item = PoolImage<'pool>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let (key, image) = self.inner.next()?;
+        Some(PoolImage {
+            key,
+            image,
+        })
+    }
+}
+
+impl<'pool> Iterator for IterMut<'pool> {
+    type Item = PoolImageMut<'pool>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let (key, image) = self.inner.next()?;
+        Some(PoolImageMut {
+            key,
+            image,
+        })
     }
 }
 

@@ -4,7 +4,7 @@ use crate::pool::PoolImage;
 
 /// A reference to one particular value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Register(usize);
+pub struct Register(pub(crate) usize);
 
 /// One linear sequence of instructions.
 ///
@@ -72,6 +72,7 @@ enum ConstructOp {
 /// The main difference to Op is that this is no longer in SSA-form, and it may reinterpret and
 /// reuse resources. In particular it will ran after the initial liveness analysis.
 pub(crate) enum High {
+    Input(Descriptor),
 }
 
 enum UnaryOp {
@@ -125,6 +126,7 @@ pub enum ColorChannel {
     B,
 }
 
+#[derive(Debug)]
 pub struct CommandError {
     type_err: bool,
 }
@@ -137,6 +139,9 @@ impl CommandBuffer {
         todo!()
     }
 
+    /// Declare an image as input.
+    ///
+    /// Returns its register if the image has a valid descriptor, otherwise returns an error.
     pub fn input_from(&mut self, img: PoolImage)
         -> Result<Register, CommandError>
     {
@@ -255,11 +260,14 @@ impl CommandBuffer {
     ///
     /// Outputs MUST later be bound from the pool during launch.
     pub fn output(&mut self, src: Register)
-        -> Result<Register, CommandError>
+        -> Result<Descriptor, CommandError>
     {
-        Ok(self.push(Op::Output {
+        let outformat = self.describe_reg(src)?.clone();
+        // Ignore this, it doesn't really produce a register.
+        let _ = self.push(Op::Output {
             src,
-        }))
+        });
+        Ok(outformat)
     }
 
     pub fn compile(&self) -> Result<Program, CompileError> {

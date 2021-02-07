@@ -2,6 +2,8 @@
 use canvas::layout::Layout;
 
 /// The byte layout of a buffer.
+///
+/// An inner invariant is that the layout fits in memory and in particular into a `usize`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BufferLayout {
     pub(crate) width: u32,
@@ -193,8 +195,41 @@ impl ImageBuffer {
     }
 }
 
+impl BufferLayout {
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+}
+
 impl Layout for BufferLayout {
     fn byte_len(&self) -> usize {
-        todo!()
+        // No overflow due to inner invariant.
+        (self.width as usize) * (self.height as usize) * (self.bytes_per_texel as usize)
+    }
+}
+
+impl From<image::DynamicImage> for ImageBuffer {
+    fn from(image: image::DynamicImage) -> ImageBuffer {
+        use image::GenericImageView;
+        let (width, height) = image.dimensions();
+
+        let layout = BufferLayout {
+            width,
+            height,
+            bytes_per_texel: if image.as_flat_samples_u8().is_some() {
+                1
+            } else if image.as_flat_samples_u16().is_some() {
+                2
+            } else {
+                unreachable!("");
+            },
+        };
+
+        let inner = canvas::Canvas::with_bytes(layout, image.as_bytes());
+        ImageBuffer { inner }
     }
 }

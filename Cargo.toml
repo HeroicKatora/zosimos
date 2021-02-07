@@ -10,6 +10,12 @@ image-canvas = { path = "../image-canvas" }
 slotmap = "1"
 wgpu = "0.7"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+async-io = "1.3"
+# Well, we try.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4.19"
+
 [dependencies.image]
 version = "0.23.12"
 default-features = false

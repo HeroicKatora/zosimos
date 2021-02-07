@@ -1,8 +1,8 @@
 use std::borrow::Cow;
-use crate::command::High;
+use crate::command::{High, Register};
 use crate::buffer::BufferLayout;
 use crate::pool::{Pool, PoolKey};
-use crate::run::{Execution, LaunchError};
+use crate::run::Execution;
 
 /// Planned out and intrinsically validated command buffer.
 ///
@@ -11,6 +11,10 @@ use crate::run::{Execution, LaunchError};
 /// launch.
 pub struct Program {
     ops: Vec<High>,
+}
+
+#[derive(Debug)]
+pub struct LaunchError {
 }
 
 /// Low level instruction.
@@ -264,12 +268,14 @@ pub struct CostModel {
 }
 
 /// The commands could not be made into a program.
+#[derive(Debug)]
 pub enum CompileError {
 }
 
 /// Something won't work with this program and pool combination, no matter the amount of
 /// configuration.
-pub enum MismatchError {
+#[derive(Debug)]
+pub struct MismatchError {
 }
 
 /// Prepare program execution with a specific pool.
@@ -282,23 +288,78 @@ pub struct Launcher<'program> {
 }
 
 impl Program {
+    /// Choose an applicable adapter from one of the presented ones.
+    pub fn choose_adapter(&self, from: impl Iterator<Item=wgpu::Adapter>)
+        -> Result<wgpu::Adapter, MismatchError>
+    {
+        Err(MismatchError {})
+    }
+
+    /// Return a descriptor for a device that's capable of executing the program.
+    pub fn device_descriptor(&self) -> wgpu::DeviceDescriptor<'static> {
+        todo!()
+    }
+
     /// Run this program with a pool.
     ///
     /// Required input and output image descriptors must match those declared, or be convertible
     /// to them when a normalization operation was declared.
     pub fn launch<'pool>(&'pool self, pool: &'pool mut Pool)
-        -> Result<Launcher<'pool>, MismatchError>
+        -> Launcher<'pool>
     {
-        Ok(Launcher {
-            program: self,
-            pool,
-        })
+        Launcher { program: self, pool }
     }
 }
 
 impl Launcher<'_> {
+    /// Bind an image in the pool to an input register.
+    ///
+    /// Returns an error if the register does not specify an input, or when there is no image under
+    /// the key in the pool, or when the image in the pool does not match the declared format.
+    pub fn bind(self, Register(reg): Register, img: PoolKey)
+        -> Result<Self, LaunchError>
+    {
+        let descriptor = match self.program.ops.get(reg) {
+            Some(High::Input(descriptor)) => descriptor,
+            _ => return Err(LaunchError { })
+        };
+
+        Ok(self)
+    }
+
     /// Really launch, potentially failing if configuration or inputs were missing etc.
-    pub fn launch(self) -> Result<Execution, LaunchError> {
+    pub fn launch(self, adapter: &wgpu::Adapter) -> Result<Execution, LaunchError> {
+        let request = adapter.request_device(&self.program.device_descriptor(), None);
+        let (device, queue) = match block_on(request) {
+            Ok(tuple) => tuple,
+            Err(_) => return Err(LaunchError {}),
+        };
         todo!()
+    }
+}
+
+fn block_on<F, T>(future: F) -> T
+where
+    F: core::future::Future<Output = T> + 'static
+{
+    #[cfg(target_arch = "wasm32")] {
+        use std::rc::Rc;
+        use core::cell::RefCell;
+
+        async fn the_thing<F, T>(future: F, buffer: Rc<RefCell<Option<T>>>) {
+            let result = future.await;
+            *buffer.borrow_mut() = result;
+        }
+
+        let result = Rc::new(RefCell::new(None));
+        let mover = Rc::clone(&result);
+
+        wasm_bindgen_futures::spawn_local(the_thing(future, mover));
+
+        result.try_unwrap().unwrap()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))] {
+        async_io::block_on(future)
     }
 }
