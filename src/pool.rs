@@ -39,7 +39,7 @@ pub struct IterMut<'pool> {
 struct Image {
     meta: ImageMeta,
     data: ImageData,
-    texel: Option<Texel>,
+    texel: Texel,
 }
 
 /// Meta data distinct from the layout questions.
@@ -80,13 +80,29 @@ impl Pool {
     }
 
     /// Gift the pool an image allocated on the host.
-    pub fn insert(&mut self, image: ImageBuffer) -> PoolImageMut<'_> {
-        self.new_with_data(ImageData::Host(image))
+    ///
+    /// You must describe the texels of the image buffer.
+    pub fn insert(&mut self, image: ImageBuffer, texel: Texel) -> PoolImageMut<'_> {
+        self.new_with_data(ImageData::Host(image), texel)
+    }
+
+    /// Insert an simple SRGB image into the pool.
+    ///
+    /// Note that this can not be performed without an allocation since the pool image uses its own
+    /// special allocation tactic.
+    pub fn insert_srgb(&mut self, image: &image::DynamicImage) -> PoolImageMut<'_> {
+        let buffer = ImageBuffer::from(image);
+        let texel = Texel::with_srgb_image(image);
+        self.insert(buffer, texel)
     }
 
     /// Create the descriptor for an image buffer that is provided by the caller.
-    pub fn declare(&mut self, layout: BufferLayout) -> PoolImageMut<'_> {
-        self.new_with_data(ImageData::LateBound(layout))
+    ///
+    /// # Panics
+    /// This method will panic if the layout is inconsistent.
+    pub fn declare(&mut self, desc: Descriptor) -> PoolImageMut<'_> {
+        assert!(desc.is_consistent());
+        self.new_with_data(ImageData::LateBound(desc.layout), desc.texel)
     }
 
     /// Iterate over all entries in the pool.
@@ -99,11 +115,11 @@ impl Pool {
         IterMut { inner: self.items.iter_mut() }
     }
 
-    fn new_with_data(&mut self, data: ImageData) -> PoolImageMut<'_> {
+    fn new_with_data(&mut self, data: ImageData, texel: Texel) -> PoolImageMut<'_> {
         let key = self.items.insert(Image {
             meta: ImageMeta::default(),
             data,
-            texel: None,
+            texel,
         });
 
         PoolImageMut {
@@ -129,11 +145,11 @@ impl PoolImage<'_> {
     /// The full descriptor for this image.
     ///
     /// This is only available if a valid `Texel` descriptor has been configured.
-    pub fn descriptor(&self) -> Option<Descriptor> {
-       Some(Descriptor {
+    pub fn descriptor(&self) -> Descriptor {
+       Descriptor {
            layout: self.layout().clone(),
-           texel: self.image.texel.as_ref()?.clone(),
-       })
+           texel: self.image.texel.clone(),
+       }
     }
 }
 
@@ -149,11 +165,11 @@ impl PoolImageMut<'_> {
     /// The full descriptor for this image.
     ///
     /// This is only available if a valid `Texel` descriptor has been configured.
-    pub fn descriptor(&self) -> Option<Descriptor> {
-       Some(Descriptor {
+    pub fn descriptor(&self) -> Descriptor {
+       Descriptor {
            layout: self.layout().clone(),
-           texel: self.image.texel.as_ref()?.clone(),
-       })
+           texel: self.image.texel.clone(),
+       }
     }
 }
 

@@ -79,6 +79,8 @@ pub enum SampleParts {
     R,
     G,
     B,
+    Luma,
+    LumaA,
     Rgb,
     Bgr,
     Rgba,
@@ -101,6 +103,8 @@ pub enum SampleBits {
     Int332,
     /// Three packed integer.
     Int233,
+    /// A single 16-bit integer.
+    Int16,
     /// Four packed integer.
     Int4x4,
     /// Four packed integer, one component ignored.
@@ -109,10 +113,18 @@ pub enum SampleBits {
     Int444i,
     /// Three packed integer.
     Int565,
+    /// Two 8-bit integers.
+    Int8x2,
     /// Three 8-bit integer.
     Int8x3,
     /// Four 8-bit integer.
     Int8x4,
+    /// Two 16-bit integers.
+    Int16x2,
+    /// Three 16-bit integer.
+    Int16x3,
+    /// Four 16-bit integer.
+    Int16x4,
     /// Four packed integer.
     Int1010102,
     /// Four packed integer.
@@ -208,13 +220,13 @@ impl Descriptor {
         self.texel.channel_texel(channel)
     }
 
-    /// Check if the descriptor is coherent.
+    /// Check if the descriptor is consistent.
     ///
-    /// A coherent descriptor makes inherent sense. That is, the different fields contain values
+    /// A consistent descriptor makes inherent sense. That is, the different fields contain values
     /// that are not contradictory. For example, the color channels parts and the color model
     /// correspond to each other, and the sample parts and sample bits field is correct, and the
     /// texel descriptor has the same number of bytes as the layout, etc.
-    pub fn is_coherent(&self) -> bool {
+    pub fn is_consistent(&self) -> bool {
         self.texel.samples.bits.bytes() == self.layout.byte_len()
             && {
                 todo!()
@@ -223,6 +235,58 @@ impl Descriptor {
 }
 
 impl Texel {
+    pub fn with_srgb_image(img: &image::DynamicImage) -> Self {
+        use image::DynamicImage::*;
+        let samples = match img {
+            ImageLuma8(_) => Samples {
+                bits: SampleBits::Int8,
+                parts: SampleParts::Luma,
+            },
+            ImageLumaA8(_) => Samples {
+                bits: SampleBits::Int8x2,
+                parts: SampleParts::LumaA,
+            },
+            ImageLuma16(_) => Samples {
+                bits: SampleBits::Int16,
+                parts: SampleParts::Luma,
+            },
+            ImageLumaA16(_) => Samples {
+                bits: SampleBits::Int16x2,
+                parts: SampleParts::LumaA,
+            },
+            ImageRgb8(_) => Samples {
+                bits: SampleBits::Int8x3,
+                parts: SampleParts::Rgb,
+            },
+            ImageRgba8(_) => Samples {
+                bits: SampleBits::Int8x4,
+                parts: SampleParts::Rgba,
+            },
+            ImageBgr8(_) => Samples {
+                bits: SampleBits::Int8x3,
+                parts: SampleParts::Bgr,
+            },
+            ImageBgra8(_) => Samples {
+                bits: SampleBits::Int8x4,
+                parts: SampleParts::Bgra,
+            },
+            ImageRgb16(_) => Samples {
+                bits: SampleBits::Int16x3,
+                parts: SampleParts::Rgb,
+            },
+            ImageRgba16(_) => Samples {
+                bits: SampleBits::Int16x4,
+                parts: SampleParts::Rgba,
+            },
+        };
+
+        Texel {
+            block: Block::Pixel,
+            color: Color::SRGB,
+            samples,
+        }
+    }
+
     /// Get the texel describing a single channel.
     /// Returns None if the channel is not contained, or if it can not be extracted on its own.
     pub fn channel_texel(&self, channel: ColorChannel) -> Option<Texel> {
@@ -266,13 +330,23 @@ impl SampleBits {
         use SampleBits::*;
         match self {
             Int8 | Int332 | Int233 => 1,
-            Int565 | Int4x4 | Int444i | Inti444 => 2,
+            Int8x2 | Int16 | Int565 | Int4x4 | Int444i | Inti444 => 2,
             Int8x3 => 3,
-            Int8x4 | Int1010102 | Int2101010 | Int101010i | Inti101010 => 4,
-            Float16x4 => 8,
+            Int8x4 | Int16x2 | Int1010102 | Int2101010 | Int101010i | Inti101010 => 4,
+            Int16x3 => 6,
+            Int16x4 | Float16x4 => 8,
             Float32x4 => 16,
         }
     }
+}
+
+impl Color {
+    pub const SRGB: Color = Color::Xyz {
+        luminance: Luminance::Sdr,
+        primary: Primaries::Bt709,
+        transfer: Transfer::Srgb,
+        whitepoint: Whitepoint::D65,
+    };
 }
 
 impl ImageBuffer {
@@ -298,8 +372,8 @@ impl Layout for BufferLayout {
     }
 }
 
-impl From<image::DynamicImage> for ImageBuffer {
-    fn from(image: image::DynamicImage) -> ImageBuffer {
+impl From<&'_ image::DynamicImage> for ImageBuffer {
+    fn from(image: &'_ image::DynamicImage) -> ImageBuffer {
         use image::GenericImageView;
         let (width, height) = image.dimensions();
 

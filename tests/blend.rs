@@ -20,15 +20,15 @@ fn run_blending() {
         .expect("Background image opened");
 
     let (bg_key, background) = {
-        let entry = pool.insert(background.into());
+        let entry = pool.insert_srgb(&background);
         // TODO: more configuration.
-        (entry.key(), entry.descriptor().unwrap())
+        (entry.key(), entry.descriptor())
     };
 
     let (fg_key, foreground) = {
-        let entry = pool.insert(foreground.into());
+        let entry = pool.insert_srgb(&foreground);
         // TODO: more configuration.
-        (entry.key(), entry.descriptor().unwrap())
+        (entry.key(), entry.descriptor())
     };
 
     let placement = Rectangle {
@@ -43,8 +43,8 @@ fn run_blending() {
     // 1: in (foreground)
     // 2: inscribe(0, placement, 1)
     // 3: out(3)
-    let background = commands.input(background);
-    let foreground = commands.input(foreground);
+    let background = commands.input(background).unwrap();
+    let foreground = commands.input(foreground).unwrap();
     let result = commands.inscribe(background, placement, foreground)
         .expect("Valid to inscribe");
     let outformat = commands.output(result)

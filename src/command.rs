@@ -158,7 +158,7 @@ impl CommandBuffer {
     ///
     /// Inputs MUST later be bound from the pool during launch.
     pub fn input(&mut self, desc: Descriptor) -> Result<Register, CommandError> {
-        if !desc.is_coherent() {
+        if !desc.is_consistent() {
             return Err(CommandError::TYPE_ERR);
         }
 
@@ -169,11 +169,11 @@ impl CommandBuffer {
     ///
     /// Returns its register if the image has a valid descriptor, otherwise returns an error.
     pub fn input_from(&mut self, img: PoolImage)
-        -> Result<Register, CommandError>
+        -> Register
     {
-        let descriptor = img.descriptor()
-            .ok_or(CommandError::OTHER)?;
+        let descriptor = img.descriptor();
         self.input(descriptor)
+            .expect("Pool image descriptor should be valid")
     }
 
     /// Select a rectangular part of an image.
@@ -504,4 +504,15 @@ impl CommandError {
     pub fn is_type_err(&self) -> bool {
         self.type_err
     }
+}
+
+#[test]
+fn rectangles() {
+    let small = Rectangle::with_width_height(2, 2);
+    let large = Rectangle::with_width_height(4, 4);
+
+    assert_eq!(small, large.join(small));
+    assert_eq!(large, large.meet(small));
+    assert!(large.contains(small));
+    assert!(!small.contains(large));
 }
