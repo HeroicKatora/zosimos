@@ -63,7 +63,7 @@ pub enum Block {
 }
 
 /// The bit encoding of values within the texel bytes.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Samples {
     /// Which values are encoded, which controls the applicable color spaces.
     pub parts: SampleParts,
@@ -207,6 +207,19 @@ impl Descriptor {
     pub fn channel_texel(&self, channel: ColorChannel) -> Option<Texel> {
         self.texel.channel_texel(channel)
     }
+
+    /// Check if the descriptor is coherent.
+    ///
+    /// A coherent descriptor makes inherent sense. That is, the different fields contain values
+    /// that are not contradictory. For example, the color channels parts and the color model
+    /// correspond to each other, and the sample parts and sample bits field is correct, and the
+    /// texel descriptor has the same number of bytes as the layout, etc.
+    pub fn is_coherent(&self) -> bool {
+        self.texel.samples.bits.bytes() == self.layout.byte_len()
+            && {
+                todo!()
+            }
+    }
 }
 
 impl Texel {
@@ -241,6 +254,24 @@ impl Texel {
             block,
             color: self.color.clone(),
         })
+    }
+}
+
+impl Samples {
+}
+
+impl SampleBits {
+    /// Determine the number of bytes for texels containing these samples.
+    pub fn bytes(self) -> usize {
+        use SampleBits::*;
+        match self {
+            Int8 | Int332 | Int233 => 1,
+            Int565 | Int4x4 | Int444i | Inti444 => 2,
+            Int8x3 => 3,
+            Int8x4 | Int1010102 | Int2101010 | Int101010i | Inti101010 => 4,
+            Float16x4 => 8,
+            Float32x4 => 16,
+        }
     }
 }
 

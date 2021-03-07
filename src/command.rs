@@ -1,4 +1,4 @@
-use crate::buffer::{Color, ColorChannel, Descriptor};
+use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, Texel};
 use crate::program::{CompileError, Program};
 use crate::pool::PoolImage;
 
@@ -120,7 +120,7 @@ pub(crate) enum UnaryOp {
 pub(crate) enum BinaryOp {
     /// Op[T, U] = T
     /// where T = U
-    Inscribe,
+    Inscribe { placement: Rectangle },
     /// Replace a channel T with U itself.
     /// Op[T, U] = T
     /// where select(channel, T.color) = U.color
@@ -157,8 +157,12 @@ impl CommandBuffer {
     /// Declare an input.
     ///
     /// Inputs MUST later be bound from the pool during launch.
-    pub fn input(&mut self, _: Descriptor) -> Register {
-        todo!()
+    pub fn input(&mut self, desc: Descriptor) -> Result<Register, CommandError> {
+        if !desc.is_coherent() {
+            return Err(CommandError::TYPE_ERR);
+        }
+
+        Ok(self.push(Op::Input { desc }))
     }
 
     /// Declare an image as input.
@@ -167,8 +171,9 @@ impl CommandBuffer {
     pub fn input_from(&mut self, img: PoolImage)
         -> Result<Register, CommandError>
     {
-        let descriptor = img.descriptor().ok_or(CommandError::OTHER)?;
-        Ok(self.input(descriptor))
+        let descriptor = img.descriptor()
+            .ok_or(CommandError::OTHER)?;
+        self.input(descriptor)
     }
 
     /// Select a rectangular part of an image.
@@ -184,14 +189,38 @@ impl CommandBuffer {
     }
 
     /// Create an image with different color encoding.
-    pub fn color_convert(&mut self, src: Register, color: Color)
+    pub fn color_convert(&mut self, src: Register, texel: Texel)
         -> Result<Register, CommandError>
     {
-        let desc = todo!("Check for convertibility");
+        let desc_src = self.describe_reg(src)?;
+
+        // Pretend that all colors with the same whitepoint will be mapped from encoded to
+        // linear RGB when loading, and re-encoded in target format when storing them. This is
+        // almost correct, but not all GPUs will support all texel kinds. In particular
+        // some channel orders or bit-field channels are likely to be unsupported. In these
+        // cases, we will later add some temporary conversion.
+        match (&desc_src.texel.color, &texel.color) {
+            (
+                Color::Xyz { whitepoint: wp_src, .. },
+                Color::Xyz { whitepoint: wp_dst, .. },
+            ) if wp_src == wp_dst => {},
+            _ => return Err(CommandError::TYPE_ERR),
+        }
+
+        // FIXME: validate memory condition.
+        let layout = BufferLayout {
+            width: desc_src.layout.width,
+            height: desc_src.layout.height,
+            bytes_per_texel: texel.samples.bits.bytes(),
+        };
+
         let op = Op::Unary {
             src,
-            op: UnaryOp::ColorConvert(color),
-            desc,
+            op: UnaryOp::ColorConvert(texel.color.clone()),
+            desc: Descriptor {
+                layout,
+                texel,
+            },
         };
 
         Ok(self.push(op))
@@ -204,14 +233,24 @@ impl CommandBuffer {
         let desc_below = self.describe_reg(below)?;
         let desc_above = self.describe_reg(above)?;
 
-        if desc_above != desc_above {
+        if desc_above.texel != desc_below.texel {
             return Err(CommandError::TYPE_ERR);
+        }
+
+        if Rectangle::with_layout(&desc_above.layout) != rect {
+            return Err(CommandError::OTHER);
+        }
+
+        if !Rectangle::with_layout(&desc_below.layout).contains(rect) {
+            return Err(CommandError::OTHER);
         }
 
         let op = Op::Binary {
             lhs: below,
             rhs: above,
-            op: BinaryOp::Inscribe,
+            op: BinaryOp::Inscribe {
+                placement: rect.normalize(),
+            },
             desc: desc_below.clone(),
         };
 
@@ -242,8 +281,14 @@ impl CommandBuffer {
         -> Result<Register, CommandError>
     {
         let desc_below = self.describe_reg(below)?;
+        let expected_texel = desc_below.channel_texel(channel)
+            .ok_or_else(|| CommandError::OTHER)?;
         let desc_above = self.describe_reg(above)?;
-        let desc = todo!("Check plane against desc");
+
+        if expected_texel != desc_above.texel {
+            return Err(CommandError::TYPE_ERR);
+        }
+
         let op = Op::Binary {
             lhs: below,
             rhs: above,
@@ -255,10 +300,10 @@ impl CommandBuffer {
     }
 
     /// Overlay this image as part of a larger one, performing blending.
-    pub fn blend(&mut self, below: Register, _: Rectangle, above: Register, _: Blend)
+    pub fn blend(&mut self, _below: Register, _rect: Rectangle, _above: Register, _blend: Blend)
         -> Result<Register, CommandError>
     {
-        todo!("What blending should we support??");
+        // TODO: What blending should we support
         Err(CommandError::OTHER)
     }
 
@@ -312,9 +357,24 @@ impl CommandBuffer {
         let mut high_ops = vec![];
 
         // Liveness analysis.
-        for op in self.ops.iter().rev() {
+        for (back_idx, op) in self.ops.iter().rev().enumerate() {
+            let idx = self.ops.len() - 1 - back_idx;
             match op {
-                _ => {},
+                Op::Input { .. } | Op::Construct { .. } => {},
+                &Op::Output { src: Register(src) } => {
+                    last_use[src] = last_use[src].max(idx);
+                    first_use[src] = first_use[src].min(idx);
+                },
+                &Op::Unary { src: Register(src), .. } => {
+                    last_use[src] = last_use[src].max(idx);
+                    first_use[src] = first_use[src].min(idx);
+                },
+                &Op::Binary { lhs: Register(lhs), rhs: Register(rhs), .. } => {
+                    last_use[rhs] = last_use[rhs].max(idx);
+                    first_use[rhs] = first_use[rhs].min(idx);
+                    last_use[lhs] = last_use[lhs].max(idx);
+                    first_use[lhs] = first_use[lhs].min(idx);
+                },
             }
         }
 
@@ -350,6 +410,11 @@ impl Rectangle {
     /// A rectangle at the origin with given width (x) and height (y).
     pub fn with_width_height(width: u32, height: u32) -> Self {
         Rectangle { x: 0, y: 0, max_x: width, max_y: height }
+    }
+
+    /// A rectangle describing a complete buffer.
+    pub fn with_layout(buffer: &BufferLayout) -> Self {
+        Self::with_width_height(buffer.width, buffer.height)
     }
 
     /// The apparent width.

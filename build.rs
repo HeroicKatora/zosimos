@@ -22,6 +22,10 @@ fn main() -> Result<(), BuildError> {
             path: "src/shaders/copy.frag",
             kind: ShaderKind::Fragment,
         },
+        SimpleSource {
+            path: "src/shaders/inject.frag",
+            kind: ShaderKind::Fragment,
+        },
     ];
 
     let mut compiler = Compiler::new().unwrap();

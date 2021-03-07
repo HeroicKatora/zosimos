@@ -13,6 +13,10 @@ pub struct Program {
     pub(crate) ops: Vec<High>,
 }
 
+enum Function {
+
+}
+
 #[derive(Debug)]
 pub struct LaunchError {
 }
