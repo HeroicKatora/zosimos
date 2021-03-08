@@ -1,6 +1,8 @@
+use core::ops::Range;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use crate::command::{High, Register};
-use crate::buffer::BufferLayout;
+use crate::buffer::{BufferLayout, Descriptor};
 use crate::pool::{Pool, PoolKey};
 use crate::run::Execution;
 
@@ -11,11 +13,21 @@ use crate::run::Execution;
 /// launch.
 pub struct Program {
     pub(crate) ops: Vec<High>,
+    pub(crate) textures: Textures,
 }
 
 enum Function {
-
 }
+
+#[derive(Default)]
+pub struct Textures {
+    vec: Vec<Descriptor>,
+    by_layout: HashMap<BufferLayout, usize>,
+}
+
+/// Identifies one resources in the render pipeline, by an index.
+#[derive(Clone, Copy)]
+pub(crate) struct Texture(usize);
 
 #[derive(Debug)]
 pub struct LaunchError {
@@ -289,6 +301,18 @@ pub struct MismatchError {
 pub struct Launcher<'program> {
     program: &'program Program,
     pool: &'program mut Pool,
+}
+
+impl Textures {
+    pub(crate) fn allocate_for(&mut self, desc: &Descriptor, _: Range<usize>)
+        -> Texture
+    {
+        // FIXME: we could de-duplicate textures using liveness information.
+        let idx = self.vec.len();
+        self.vec.push(desc.clone());
+        self.by_layout.insert(desc.layout.clone(), idx);
+        Texture(idx)
+    }
 }
 
 impl Program {

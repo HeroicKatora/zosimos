@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, Texel};
-use crate::program::{CompileError, Program};
+use crate::program::{CompileError, Program, Textures, Texture};
 use crate::pool::PoolImage;
 
 /// A reference to one particular value.
@@ -28,6 +29,7 @@ pub struct CommandBuffer {
     ops: Vec<Op>,
 }
 
+#[derive(Clone)]
 enum Op {
     /// i := in()
     Input {
@@ -37,7 +39,7 @@ enum Op {
     ///
     /// WIP: and is_cpu_type(desc)
     /// for the eventuality of gpu-only buffer layouts.
-    Output { 
+    Output {
         src: Register,
     },
     /// i := op()
@@ -63,14 +65,11 @@ enum Op {
     },
 }
 
+#[derive(Clone)]
 pub(crate) enum ConstructOp {
     // TODO: can optimize this repr for the common case.
     Solid(Vec<u8>),
 }
-
-/// Identifies one resources in the render pipeline, by an index.
-#[derive(Clone, Copy)]
-pub(crate) struct Texture(usize);
 
 /// A high-level, device independent, translation of ops.
 /// The main difference to Op is that this is no longer in SSA-form, and it may reinterpret and
@@ -79,6 +78,7 @@ pub(crate) struct Texture(usize);
 /// can not be represented on the GPU directly, depending on available formats, and need to be
 /// either processed on the CPU (with SIMD hopefully) or they must be converted first, potentially
 /// in a compute shader.
+#[derive(Clone)]
 pub(crate) enum High {
     /// Assign a texture id to an input with given descriptor.
     Input(Texture, Descriptor),
@@ -105,6 +105,7 @@ pub(crate) enum High {
     },
 }
 
+#[derive(Clone)]
 pub(crate) enum UnaryOp {
     /// Op = id
     Affine(Affine),
@@ -117,6 +118,7 @@ pub(crate) enum UnaryOp {
     Extract { channel: ColorChannel },
 }
 
+#[derive(Clone)]
 pub(crate) enum BinaryOp {
     /// Op[T, U] = T
     /// where T = U
@@ -139,18 +141,28 @@ pub struct Rectangle {
     pub max_y: u32,
 }
 
+#[derive(Clone, Copy)]
 #[non_exhaustive]
 pub enum Blend {
     Alpha,
 }
 
+#[derive(Clone, Copy)]
 pub struct Affine {
     transformation: [f32; 9],
 }
 
 #[derive(Debug)]
 pub struct CommandError {
-    type_err: bool,
+    inner: CommandErrorKind,
+}
+
+#[derive(Debug)]
+enum CommandErrorKind {
+    BadDescriptor(Descriptor),
+    ConflictingTypes(Descriptor, Descriptor),
+    GenericTypeError,
+    Other,
 }
 
 impl CommandBuffer {
@@ -159,7 +171,9 @@ impl CommandBuffer {
     /// Inputs MUST later be bound from the pool during launch.
     pub fn input(&mut self, desc: Descriptor) -> Result<Register, CommandError> {
         if !desc.is_consistent() {
-            return Err(CommandError::TYPE_ERR);
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(desc),
+            });
         }
 
         Ok(self.push(Op::Input { desc }))
@@ -204,7 +218,9 @@ impl CommandBuffer {
                 Color::Xyz { whitepoint: wp_src, .. },
                 Color::Xyz { whitepoint: wp_dst, .. },
             ) if wp_src == wp_dst => {},
-            _ => return Err(CommandError::TYPE_ERR),
+            _ => return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(desc_src.clone()),
+            }),
         }
 
         // FIXME: validate memory condition.
@@ -234,7 +250,9 @@ impl CommandBuffer {
         let desc_above = self.describe_reg(above)?;
 
         if desc_above.texel != desc_below.texel {
-            return Err(CommandError::TYPE_ERR);
+            return Err(CommandError {
+                inner: CommandErrorKind::ConflictingTypes(desc_below.clone(), desc_above.clone()),
+            });
         }
 
         if Rectangle::with_layout(&desc_above.layout) != rect {
@@ -286,7 +304,9 @@ impl CommandBuffer {
         let desc_above = self.describe_reg(above)?;
 
         if expected_texel != desc_above.texel {
-            return Err(CommandError::TYPE_ERR);
+            return Err(CommandError {
+                inner: CommandErrorKind::ConflictingTypes(desc_below.clone(), desc_above.clone()),
+            });
         }
 
         let op = Op::Binary {
@@ -311,8 +331,16 @@ impl CommandBuffer {
     pub fn solid(&mut self, describe: Descriptor, data: &[u8])
         -> Result<Register, CommandError>
     {
+        if !describe.is_consistent() {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(describe),
+            });
+        }
+
         if data.len() != describe.layout.bytes_per_texel {
-            return Err(CommandError::TYPE_ERR);
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(describe),
+            });
         }
 
         Ok(self.push(Op::Construct {
@@ -378,11 +406,57 @@ impl CommandBuffer {
             }
         }
 
+        let mut textures = Textures::default();
+        let mut reg_to_texture: HashMap<Register, Texture> = HashMap::default();
+
+        for (idx, op) in self.ops.iter().enumerate() {
+            let liveness = first_use[idx]..last_use[idx];
+            match op {
+                Op::Input { desc } => {
+                    let texture = textures.allocate_for(desc, liveness);
+                    high_ops.push(High::Input(texture, desc.clone()));
+                    reg_to_texture.insert(Register(idx), texture);
+                }
+                Op::Output { src } => {
+                    high_ops.push(High::Output(reg_to_texture[src]))
+                }
+                Op::Construct { desc, op } => {
+                    let texture = textures.allocate_for(desc, liveness);
+                    high_ops.push(High::Construct {
+                        dst: texture,
+                        op: op.clone(),
+                    });
+                    reg_to_texture.insert(Register(idx), texture);
+                }
+                Op::Unary { src, desc, op } => {
+                    let texture = textures.allocate_for(desc, liveness);
+                    high_ops.push(High::Unary {
+                        src: reg_to_texture[src],
+                        dst: texture,
+                        op: op.clone(),
+                    });
+                    reg_to_texture.insert(Register(idx), texture);
+                }
+                Op::Binary { desc, lhs, rhs, op } => {
+                    let texture = textures.allocate_for(desc, liveness);
+                    high_ops.push(High::Binary {
+                        lhs: reg_to_texture[lhs],
+                        rhs: reg_to_texture[rhs],
+                        dst: texture,
+                        op: op.clone(),
+                    });
+                    reg_to_texture.insert(Register(idx), texture);
+                }
+            }
+        }
+
         Ok(Program {
             ops: high_ops,
+            textures,
         })
     }
 
+    /// Get the descriptor for a register.
     fn describe_reg(&self, Register(reg): Register)
         -> Result<&Descriptor, CommandError>
     {
@@ -489,20 +563,23 @@ impl Rectangle {
 impl CommandError {
     /// Indicates a very generic type error.
     const TYPE_ERR: Self = CommandError {
-        type_err: true,
+        inner: CommandErrorKind::GenericTypeError,
     };
 
     /// Indicates a very generic other error.
     /// E.g. the usage of a command requires an extension? Not quite sure yet.
     const OTHER: Self = CommandError {
-        type_err: false,
+        inner: CommandErrorKind::Other,
     };
 
     /// Specifies that a register reference was invalid.
     const BAD_REGISTER: Self = Self::OTHER;
 
     pub fn is_type_err(&self) -> bool {
-        self.type_err
+        matches!(self.inner,
+            CommandErrorKind::GenericTypeError
+            | CommandErrorKind::ConflictingTypes(_, _)
+            | CommandErrorKind::BadDescriptor(_))
     }
 }
 
@@ -511,8 +588,48 @@ fn rectangles() {
     let small = Rectangle::with_width_height(2, 2);
     let large = Rectangle::with_width_height(4, 4);
 
-    assert_eq!(small, large.join(small));
-    assert_eq!(large, large.meet(small));
+    assert_eq!(large, large.join(small));
+    assert_eq!(small, large.meet(small));
     assert!(large.contains(small));
     assert!(!small.contains(large));
+}
+
+#[test]
+fn simple_program() {
+    use crate::pool::Pool;
+    use image::GenericImageView;
+
+    const BACKGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/background.png");
+    const FOREGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/foreground.png");
+
+    let mut pool = Pool::new();
+    let mut commands = CommandBuffer::default();
+
+    let background = image::open(BACKGROUND)
+        .expect("Background image opened");
+    let foreground = image::open(FOREGROUND)
+        .expect("Background image opened");
+    let expected = BufferLayout::from(&background);
+
+    let placement = Rectangle {
+        x: 0,
+        y: 0,
+        max_x: foreground.width(),
+        max_y: foreground.height(),
+    };
+
+    let background = pool.insert_srgb(&background);
+    let background = commands.input_from(background.into());
+
+    let foreground = pool.insert_srgb(&foreground);
+    let foreground = commands.input_from(foreground.into());
+
+    let result = commands.inscribe(background, placement, foreground)
+        .expect("Valid to inscribe");
+    let outformat = commands.output(result)
+        .expect("Valid for output");
+
+    let _ = commands.compile()
+        .expect("Could build command buffer");
+    assert_eq!(outformat.layout, expected);
 }

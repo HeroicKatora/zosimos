@@ -4,7 +4,7 @@ use canvas::layout::Layout;
 /// The byte layout of a buffer.
 ///
 /// An inner invariant is that the layout fits in memory and in particular into a `usize`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BufferLayout {
     pub(crate) width: u32,
     pub(crate) height: u32,
@@ -27,7 +27,7 @@ pub struct ImageBuffer {
 }
 
 /// Describes an image semantically.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Descriptor {
     /// The byte and physical layout of the buffer.
     pub layout: BufferLayout,
@@ -35,7 +35,7 @@ pub struct Descriptor {
     pub texel: Texel,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Texel {
     /// Which part of the image a single texel refers to.
     pub block: Block,
@@ -45,7 +45,7 @@ pub struct Texel {
     pub color: Color,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Block {
     /// Each texel is a single pixel.
@@ -63,7 +63,7 @@ pub enum Block {
 }
 
 /// The bit encoding of values within the texel bytes.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Samples {
     /// Which values are encoded, which controls the applicable color spaces.
     pub parts: SampleParts,
@@ -72,7 +72,7 @@ pub struct Samples {
 }
 
 /// Describes which values are present in a texel.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SampleParts {
     A,
@@ -94,7 +94,7 @@ pub enum SampleParts {
     Yuv,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SampleBits {
     /// A single 8-bit integer.
@@ -141,14 +141,14 @@ pub enum SampleBits {
 
 /// Describes a single channel from an image.
 /// Note that it must match the descriptor when used in `extract` and `inject`.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorChannel {
     R,
     G,
     B,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Color {
     /// A common model based on the CIE 1931 XYZ observer.
@@ -166,7 +166,7 @@ pub enum Color {
 /// inverse: An electro-optical transfer (EOTF) and opto-electronic transfer function (OETF) that
 /// describes how scene lighting is encoded as an electric signal. These are applied to each
 /// stimulus value.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Transfer {
     Bt709,
@@ -184,7 +184,7 @@ pub enum Transfer {
 }
 
 /// The reference brightness of the color specification.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Luminance {
     /// 100cd/m².
@@ -195,7 +195,7 @@ pub enum Luminance {
 }
 
 /// The relative stimuli of the three corners of a triangular gamut.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Primaries {
     Bt601_525,
@@ -207,7 +207,7 @@ pub enum Primaries {
 }
 
 /// The whitepoint/standard illuminant.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Whitepoint {
     D65,
@@ -227,10 +227,8 @@ impl Descriptor {
     /// correspond to each other, and the sample parts and sample bits field is correct, and the
     /// texel descriptor has the same number of bytes as the layout, etc.
     pub fn is_consistent(&self) -> bool {
-        self.texel.samples.bits.bytes() == self.layout.byte_len()
-            && {
-                todo!()
-            }
+        // FIXME: other checks.
+        self.texel.samples.bits.bytes() == self.layout.bytes_per_texel
     }
 }
 
@@ -372,23 +370,22 @@ impl Layout for BufferLayout {
     }
 }
 
-impl From<&'_ image::DynamicImage> for ImageBuffer {
-    fn from(image: &'_ image::DynamicImage) -> ImageBuffer {
+impl From<&'_ image::DynamicImage> for BufferLayout {
+    fn from(image: &'_ image::DynamicImage) -> BufferLayout {
         use image::GenericImageView;
         let (width, height) = image.dimensions();
 
-        let layout = BufferLayout {
+        BufferLayout {
             width,
             height,
-            bytes_per_texel: if image.as_flat_samples_u8().is_some() {
-                1
-            } else if image.as_flat_samples_u16().is_some() {
-                2
-            } else {
-                unreachable!("");
-            },
-        };
+            bytes_per_texel: image.color().bytes_per_pixel().into(),
+        }
+    }
+}
 
+impl From<&'_ image::DynamicImage> for ImageBuffer {
+    fn from(image: &'_ image::DynamicImage) -> ImageBuffer {
+        let layout = BufferLayout::from(image);
         let inner = canvas::Canvas::with_bytes(layout, image.as_bytes());
         ImageBuffer { inner }
     }
