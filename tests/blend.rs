@@ -8,7 +8,8 @@ const OUTPUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/composed.png");
 #[test]
 fn run_blending() {
     const ANY: wgpu::BackendBit = wgpu::BackendBit::all();
-    let instance = wgpu::Instance::new(ANY);
+    // FIXME: this drop SEGFAULTs for me...
+    let instance = core::mem::ManuallyDrop::new(wgpu::Instance::new(ANY));
     let adapters = instance.enumerate_adapters(ANY);
 
     let mut pool = Pool::new();

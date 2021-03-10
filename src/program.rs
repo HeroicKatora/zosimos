@@ -1,7 +1,7 @@
 use core::ops::Range;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use crate::command::{High, Register};
+use crate::command::{High, Rectangle, Register};
 use crate::buffer::{BufferLayout, Descriptor};
 use crate::pool::{Pool, PoolKey};
 use crate::run::Execution;
@@ -16,7 +16,25 @@ pub struct Program {
     pub(crate) textures: Textures,
 }
 
-enum Function {
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum Function {
+    /// VS: id
+    ///   in: vec3 position
+    ///   in: vec2 vertUv
+    ///   out: vec2 uv
+    /// FS:
+    ///   in: vec2 uv
+    ///   pc: vec4 (parameter)
+    ///   bind: sampler2D[2]
+    ///   out: vec4 (color)
+    PaintOnTop {
+        // Source selection.
+        lower_region: [Rectangle; 2],
+        // Target viewport.
+        upper_region: Rectangle,
+        // The shader to execute with that pipeline.
+        fragment_shader: &'static [u8],
+    },
 }
 
 #[derive(Default)]
@@ -286,6 +304,8 @@ pub struct CostModel {
 /// The commands could not be made into a program.
 #[derive(Debug)]
 pub enum CompileError {
+    #[deprecated = "We should strive to remove these"]
+    NotYetImplemented,
 }
 
 /// Something won't work with this program and pool combination, no matter the amount of
@@ -317,9 +337,21 @@ impl Textures {
 
 impl Program {
     /// Choose an applicable adapter from one of the presented ones.
-    pub fn choose_adapter(&self, from: impl Iterator<Item=wgpu::Adapter>)
+    pub fn choose_adapter(&self, mut from: impl Iterator<Item=wgpu::Adapter>)
         -> Result<wgpu::Adapter, MismatchError>
     {
+        while let Some(adapter) = from.next() {
+            // FIXME: check limits.
+            // FIXME: collect required texture formats from `self.textures`
+            let basic_format = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8Uint);
+            if !basic_format.allowed_usages.contains(wgpu::TextureUsage::all()) {
+                continue;
+            }
+
+            from.for_each(drop);
+            return Ok(adapter)
+        }
+
         Err(MismatchError {})
     }
 

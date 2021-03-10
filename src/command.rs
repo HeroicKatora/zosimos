@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, Texel};
-use crate::program::{CompileError, Program, Textures, Texture};
+use crate::program::{CompileError, Function, Program, Textures, Texture};
 use crate::pool::PoolImage;
+use crate::shaders;
 
 /// A reference to one particular value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -96,12 +97,14 @@ pub(crate) enum High {
         src: Texture,
         dst: Texture,
         op: UnaryOp,
+        fn_: Function,
     },
     Binary {
         lhs: Texture,
         rhs: Texture,
         dst: Texture,
         op: BinaryOp,
+        fn_: Function,
     },
 }
 
@@ -133,7 +136,7 @@ pub(crate) enum BinaryOp {
 /// It's describe by minimum and maximum coordinates, inclusive and exclusive respectively. Any
 /// rectangle where the order is not correct is interpreted as empty. This has the advantage of
 /// simplifying certain operations that would otherwise need to check for correctness.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Rectangle {
     pub x: u32,
     pub y: u32,
@@ -434,16 +437,41 @@ impl CommandBuffer {
                         src: reg_to_texture[src],
                         dst: texture,
                         op: op.clone(),
+                        fn_: match op {
+                            &UnaryOp::Crop(region) => {
+                                Function::PaintOnTop {
+                                    lower_region: [region, region],
+                                    upper_region: Rectangle::with_width_height(region.width(), region.height()),
+                                    fragment_shader: shaders::FRAG_COPY,
+                                }
+                            },
+                            _ => return Err(CompileError::NotYetImplemented),
+                        },
                     });
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 Op::Binary { desc, lhs, rhs, op } => {
                     let texture = textures.allocate_for(desc, liveness);
+                    let lower_region = [
+                        Rectangle::from(self.describe_reg(*lhs).unwrap()),
+                        Rectangle::from(self.describe_reg(*rhs).unwrap()),
+                    ];
+
                     high_ops.push(High::Binary {
                         lhs: reg_to_texture[lhs],
                         rhs: reg_to_texture[rhs],
                         dst: texture,
                         op: op.clone(),
+                        fn_: match op {
+                            BinaryOp::Inscribe { placement } => {
+                                Function::PaintOnTop {
+                                    lower_region: lower_region,
+                                    upper_region: *placement,
+                                    fragment_shader: shaders::FRAG_COPY,
+                                }
+                            },
+                            _ => return Err(CompileError::NotYetImplemented),
+                        },
                     });
                     reg_to_texture.insert(Register(idx), texture);
                 }
@@ -557,6 +585,18 @@ impl Rectangle {
             max_x: self.max_x.saturating_sub(border),
             max_y: self.max_y.saturating_sub(border),
         }
+    }
+}
+
+impl From<&'_ BufferLayout> for Rectangle {
+    fn from(buffer: &BufferLayout) -> Rectangle {
+        Rectangle::with_width_height(buffer.width, buffer.height)
+    }
+}
+
+impl From<&'_ Descriptor> for Rectangle {
+    fn from(buffer: &Descriptor) -> Rectangle {
+        Rectangle::from(&buffer.layout)
     }
 }
 
