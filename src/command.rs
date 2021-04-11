@@ -481,6 +481,7 @@ impl CommandBuffer {
         Ok(Program {
             ops: high_ops,
             textures,
+            by_register: reg_to_texture,
         })
     }
 

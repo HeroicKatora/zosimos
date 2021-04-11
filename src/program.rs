@@ -1,10 +1,10 @@
 use core::ops::Range;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::command::{High, Rectangle, Register};
 use crate::buffer::{BufferLayout, Descriptor};
-use crate::pool::{Pool, PoolKey};
-use crate::run::Execution;
+use crate::pool::{ImageData, Pool, PoolKey};
+use crate::run;
 
 /// Planned out and intrinsically validated command buffer.
 ///
@@ -14,6 +14,7 @@ use crate::run::Execution;
 pub struct Program {
     pub(crate) ops: Vec<High>,
     pub(crate) textures: Textures,
+    pub(crate) by_register: HashMap<Register, Texture>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -46,6 +47,10 @@ pub struct Textures {
 /// Identifies one resources in the render pipeline, by an index.
 #[derive(Clone, Copy)]
 pub(crate) struct Texture(usize);
+
+#[derive(Default)]
+struct Encoder {
+}
 
 #[derive(Debug)]
 pub struct LaunchError {
@@ -321,6 +326,7 @@ pub struct MismatchError {
 pub struct Launcher<'program> {
     program: &'program Program,
     pool: &'program mut Pool,
+    binds: Vec<ImageData>,
 }
 
 impl Textures {
@@ -371,7 +377,15 @@ impl Program {
     pub fn launch<'pool>(&'pool self, pool: &'pool mut Pool)
         -> Launcher<'pool>
     {
-        Launcher { program: self, pool }
+        let binds = self.textures.vec
+            .iter()
+            .map(|desciptor| ImageData::LateBound(desciptor.layout.clone()))
+            .collect();
+        Launcher {
+            program: self,
+            pool,
+            binds,
+        }
     }
 }
 
@@ -380,25 +394,67 @@ impl Launcher<'_> {
     ///
     /// Returns an error if the register does not specify an input, or when there is no image under
     /// the key in the pool, or when the image in the pool does not match the declared format.
-    pub fn bind(self, Register(reg): Register, img: PoolKey)
+    pub fn bind(mut self, Register(reg): Register, img: PoolKey)
         -> Result<Self, LaunchError>
     {
-        let (target, descriptor) = match self.program.ops.get(reg) {
+        let mut entry = match self.pool.entry(img) {
+            Some(entry) => entry,
+            None => return Err(LaunchError { }),
+        };
+
+        let (_, _) = match self.program.ops.get(reg) {
             Some(High::Input(target, descriptor)) => (target, descriptor),
             _ => return Err(LaunchError { })
         };
+
+        let Texture(texture) = match self.program.by_register.get(&Register(reg)) {
+            Some(texture) => *texture,
+            None => return Err(LaunchError { }),
+        };
+
+        entry.swap(&mut self.binds[texture]);
 
         Ok(self)
     }
 
     /// Really launch, potentially failing if configuration or inputs were missing etc.
-    pub fn launch(self, adapter: &wgpu::Adapter) -> Result<Execution, LaunchError> {
+    pub fn launch(self, adapter: &wgpu::Adapter) -> Result<run::Execution, LaunchError> {
         let request = adapter.request_device(&self.program.device_descriptor(), None);
+
+        for high in &self.program.ops {
+            match high {
+                &High::Input(Texture(texture), _) => {
+                    let entry = &self.binds[texture];
+                    if matches!(entry, ImageData::LateBound(_)) {
+                        return Err(LaunchError { })
+                    }
+                }
+                _ => {},
+            }
+        }
+
         let (device, queue) = match block_on(request) {
             Ok(tuple) => tuple,
             Err(_) => return Err(LaunchError {}),
         };
-        todo!()
+
+        let mut instructions = vec![];
+        let mut encoder = Encoder::default();
+
+        for high in &self.program.ops {
+        }
+
+        Ok(run::Execution {
+            machine: run::Machine::new(instructions),
+            gpu: run::Gpu {
+                device,
+                queue,
+                // FIXME: load modules that are required.
+                modules: vec![],
+            },
+            descriptors: run::Descriptors::default(),
+            ..todo!()
+        })
     }
 }
 

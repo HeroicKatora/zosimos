@@ -36,10 +36,10 @@ pub struct IterMut<'pool> {
     inner: slotmap::basic::IterMut<'pool, DefaultKey, Image>,
 }
 
-struct Image {
-    meta: ImageMeta,
-    data: ImageData,
-    texel: Texel,
+pub(crate) struct Image {
+    pub(crate) meta: ImageMeta,
+    pub(crate) data: ImageData,
+    pub(crate) texel: Texel,
 }
 
 /// Meta data distinct from the layout questions.
@@ -53,7 +53,7 @@ pub(crate) struct ImageMeta {
     no_write: bool,
 }
 
-enum ImageData {
+pub(crate) enum ImageData {
     Host(ImageBuffer),
     /// The data lives in a generic buffer.
     Gpu(Buffer, BufferLayout),
@@ -170,6 +170,11 @@ impl PoolImageMut<'_> {
            layout: self.layout().clone(),
            texel: self.image.texel.clone(),
        }
+    }
+
+    pub(crate) fn swap(&mut self, image: &mut ImageData) {
+        assert_eq!(self.image.data.layout(), image.layout());
+        core::mem::swap(&mut self.image.data, image)
     }
 }
 

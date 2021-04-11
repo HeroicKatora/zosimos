@@ -7,14 +7,15 @@ use crate::program::{self, Low};
 use wgpu::{Device, Queue};
 
 pub struct Execution {
-    machine: Machine,
-    gpu: Gpu,
-    descriptors: Descriptors,
-    command_encoder: Option<wgpu::CommandEncoder>,
-    buffers: Pool,
+    pub(crate) machine: Machine,
+    pub(crate) gpu: Gpu,
+    pub(crate) descriptors: Descriptors,
+    pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
+    pub(crate) buffers: Pool,
 }
 
-struct Descriptors {
+#[derive(Default)]
+pub(crate) struct Descriptors {
     bind_groups: Vec<wgpu::BindGroup>,
     bind_group_layouts: Vec<wgpu::BindGroupLayout>,
     buffers: Vec<wgpu::Buffer>,
@@ -27,10 +28,10 @@ struct Descriptors {
     texture_views: Vec<wgpu::TextureView>,
 }
 
-struct Gpu {
-    device: Device,
-    queue: Queue,
-    modules: Vec<wgpu::ShaderModule>,
+pub(crate) struct Gpu {
+    pub(crate) device: Device,
+    pub(crate) queue: Queue,
+    pub(crate) modules: Vec<wgpu::ShaderModule>,
 }
 
 pub struct SyncPoint<'a> {
@@ -44,7 +45,7 @@ pub struct Retire<'pool> {
     pool: &'pool mut Pool,
 }
 
-struct Machine {
+pub(crate) struct Machine {
     instructions: Vec<Low>,
     instruction_pointer: usize,
 }
@@ -449,6 +450,13 @@ impl Descriptors {
 }
 
 impl Machine {
+    pub(crate) fn new(instructions: Vec<Low>) -> Self {
+        Machine {
+            instructions,
+            instruction_pointer: 0,
+        }
+    }
+
     fn next_instruction(&mut self) -> Result<&Low, StepError> {
         let instruction = self.instructions
             .get(self.instruction_pointer)
