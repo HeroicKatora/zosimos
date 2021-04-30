@@ -442,6 +442,24 @@ impl Launcher<'_> {
         let mut encoder = Encoder::default();
 
         for high in &self.program.ops {
+            match high {
+                High::Allocate(texture) => {
+                },
+                High::Discard(texture) => {
+                },
+                High::Input(dst, what) => {
+                    let idx = encoder.input_id();
+                },
+                High::Output(texture) => {
+                    let idx = encoder.output_id();
+                },
+                High::Construct { dst, op } => {
+                },
+                High::Unary { src, dst, op, fn_ } => {
+                },
+                High::Binary { lhs, rhs, dst, op, fn_ } => {
+                },
+            }
         }
 
         Ok(run::Execution {
@@ -455,6 +473,16 @@ impl Launcher<'_> {
             descriptors: run::Descriptors::default(),
             ..todo!()
         })
+    }
+}
+
+impl Encoder {
+    fn input_id(&mut self) -> usize {
+        todo!()
+    }
+
+    fn output_id(&mut self) -> usize {
+        todo!()
     }
 }
 

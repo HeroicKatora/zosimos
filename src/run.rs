@@ -150,7 +150,7 @@ impl Execution {
                     dimension: Some(wgpu::TextureViewDimension::D2),
                     aspect: wgpu::TextureAspect::All,
                     base_mip_level: 0,
-                    level_count: None,
+                    mip_level_count: None,
                     base_array_layer: 0,
                     array_layer_count: None,
                 };
@@ -165,7 +165,7 @@ impl Execution {
                     size: wgpu::Extent3d {
                         width: desc.size.0,
                         height: desc.size.1,
-                        depth: 1
+                        depth_or_array_layers: 1
                     },
                     mip_level_count: 1,
                     sample_count: 1,
@@ -302,11 +302,11 @@ impl Descriptors {
                 let buffer = self.buffers
                     .get(buffer_idx)
                     .ok_or_else(|| StepError::InvalidInstruction)?;
-                Ok(wgpu::BindingResource::Buffer {
+                Ok(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer,
                     offset,
                     size,
-                })
+                }))
             }
             &Sampler(idx) => {
                 self.sampler
@@ -339,7 +339,7 @@ impl Descriptors {
     fn render_pass<'set, 'buf>(
         &'set self,
         desc: &program::RenderPassDescriptor,
-        buf: &'buf mut Vec<wgpu::RenderPassColorAttachmentDescriptor<'set>>,
+        buf: &'buf mut Vec<wgpu::RenderPassColorAttachment<'set>>,
     ) -> Result<wgpu::RenderPassDescriptor<'set, 'buf>, StepError> {
         buf.clear();
 
@@ -355,10 +355,10 @@ impl Descriptors {
     }
 
     fn color_attachment(&self, desc: &program::ColorAttachmentDescriptor)
-        -> Result<wgpu::RenderPassColorAttachmentDescriptor<'_>, StepError>
+        -> Result<wgpu::RenderPassColorAttachment<'_>, StepError>
     {
-        Ok(wgpu::RenderPassColorAttachmentDescriptor {
-            attachment: self.texture_views
+        Ok(wgpu::RenderPassColorAttachment{
+            view: self.texture_views
                 .get(desc.texture_view)
                 .ok_or_else(|| StepError::InvalidInstruction)?,
             resolve_target: None,
@@ -382,8 +382,10 @@ impl Descriptors {
                     topology: wgpu::PrimitiveTopology::TriangleStrip,
                     strip_index_format: None,
                     front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: wgpu::CullMode::None,
+                    cull_mode: None,
+                    clamp_depth: false,
                     polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
                 }
             },
             depth_stencil: None,
