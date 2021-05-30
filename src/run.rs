@@ -1,7 +1,7 @@
 use core::iter::once;
 
 use crate::pool::{Pool, PoolImage, PoolKey};
-use crate::command::Register;
+use crate::command::{Rectangle, Register};
 use crate::program::{self, Low};
 
 use wgpu::{Device, Queue};
@@ -11,6 +11,13 @@ pub struct Execution {
     pub(crate) gpu: Gpu,
     pub(crate) descriptors: Descriptors,
     pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
+    pub(crate) buffers: Pool,
+}
+
+pub(crate) struct InitialState {
+    pub(crate) instructions: Vec<Low>,
+    pub(crate) device: Device,
+    pub(crate) queue: Queue,
     pub(crate) buffers: Pool,
 }
 
@@ -32,6 +39,23 @@ pub(crate) struct Gpu {
     pub(crate) device: Device,
     pub(crate) queue: Queue,
     pub(crate) modules: Vec<wgpu::ShaderModule>,
+}
+
+/// One fragment shader execution with pipeline:
+/// FS:
+///   in: vec2 uv
+///   region: vec4 (parameter)
+///   bind: sampler2D
+///   out: vec4 (color)
+pub(crate) struct PaintRectFragment {
+    /// The 'selected' region relative to which uv is to be interpreted.
+    region: Rectangle,
+    /// The index of the sampler which we should bind to `bind`.
+    region_sampler_id: usize,
+    /// The target region we want to paint.
+    target: Rectangle,
+    /// The shader to compile for this.
+    fragment_shader: &'static [u8],
 }
 
 pub struct SyncPoint<'a> {
@@ -62,6 +86,20 @@ pub enum RetireError {
 }
 
 impl Execution {
+    pub(crate) fn new(init: InitialState) -> Self {
+        Execution {
+            machine: Machine::new(init.instructions),
+            gpu: Gpu {
+                device: init.device,
+                queue: init.queue,
+                modules: vec![],
+            },
+            descriptors: Descriptors::default(),
+            buffers: init.buffers,
+            command_encoder: None,
+        }
+    }
+
     /// Check if the machine is still running.
     pub fn is_running(&self) -> bool {
         self.machine.instruction_pointer < self.machine.instructions.len()

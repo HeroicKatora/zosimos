@@ -5,6 +5,7 @@ use crate::command::{High, Rectangle, Register};
 use crate::buffer::{BufferLayout, Descriptor};
 use crate::pool::{ImageData, Pool, PoolKey};
 use crate::run;
+use crate::util::ExtendOne;
 
 /// Planned out and intrinsically validated command buffer.
 ///
@@ -48,8 +49,24 @@ pub struct Textures {
 #[derive(Clone, Copy)]
 pub(crate) struct Texture(usize);
 
+/// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
 #[derive(Default)]
 struct Encoder {
+    // Replicated fields from `run::Descriptors`
+    bind_groups: usize,
+    bind_group_layouts: usize,
+    buffers: usize,
+    command_buffers: usize,
+    modules: usize,
+    pipeline_layouts: usize,
+    render_pipelines: usize,
+    sampler: usize,
+    textures: usize,
+    texture_views: usize,
+
+    // Additional fields to map our runtime state.
+    paint_group_layout: Option<usize>,
+    paint_pipeline_layout: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -441,6 +458,8 @@ impl Launcher<'_> {
         let mut instructions = vec![];
         let mut encoder = Encoder::default();
 
+        encoder.enable_capabilities(&device);
+
         for high in &self.program.ops {
             match high {
                 High::Allocate(texture) => {
@@ -462,27 +481,78 @@ impl Launcher<'_> {
             }
         }
 
-        Ok(run::Execution {
-            machine: run::Machine::new(instructions),
-            gpu: run::Gpu {
-                device,
-                queue,
-                // FIXME: load modules that are required.
-                modules: vec![],
-            },
-            descriptors: run::Descriptors::default(),
-            ..todo!()
-        })
+        let init = run::InitialState {
+            instructions,
+            device,
+            queue,
+            buffers: core::mem::take(self.pool),
+        };
+
+        Ok(run::Execution::new(init))
     }
 }
 
 impl Encoder {
+    /// Tell the encoder which commands are natively supported.
+    /// Some features require GPU support. At this point we decide if our request has succeeded and
+    /// we might poly-fill it with a compute shader or something similar.
+    fn enable_capabilities(&mut self, device: &wgpu::Device) {
+        // currently no feature selection..
+        let _ = device.features();
+        let _ = device.limits();
+    }
+
     fn input_id(&mut self) -> usize {
         todo!()
     }
 
     fn output_id(&mut self) -> usize {
         todo!()
+    }
+
+    fn make_paint_group(&mut self, instructions: &mut dyn ExtendOne<Low>) -> usize {
+        let bind_group_layouts = &mut self.bind_group_layouts;
+        *self.paint_group_layout.get_or_insert_with(|| {
+            let descriptor = BindGroupLayoutDescriptor {
+                entries: vec![
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler {
+                            filtering: true,
+                            comparison: true,
+                        },
+                        count: None,
+                    },
+                ],
+            };
+
+            instructions.extend_one(Low::BindGroupLayout(descriptor));
+            let descriptor_id = *bind_group_layouts;
+            *bind_group_layouts += 1;
+            descriptor_id
+        })
+    }
+
+    fn make_paint_layout(&mut self, instructions: &mut dyn ExtendOne<Low>) -> usize {
+        let bind_group = self.make_paint_group(instructions);
+        let layouts = &mut self.pipeline_layouts;
+        *self.paint_pipeline_layout.get_or_insert_with(|| {
+            let descriptor = PipelineLayoutDescriptor {
+                bind_group_layouts: vec![bind_group],
+                push_constant_ranges: &[
+                    wgpu::PushConstantRange {
+                        stages: wgpu::ShaderStage::FRAGMENT,
+                        range: 0..16,
+                    },
+                ],
+            };
+
+            instructions.extend_one(Low::PipelineLayout(descriptor));
+            let descriptor_id = *layouts;
+            *layouts += 1;
+            descriptor_id
+        })
     }
 }
 
