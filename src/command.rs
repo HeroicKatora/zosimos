@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, Texel};
-use crate::program::{CompileError, Function, Program, Textures, Texture};
+use crate::program::{CompileError, Function, PaintOnTopKind, Program, Textures, Texture};
 use crate::pool::PoolImage;
-use crate::shaders;
 
 /// A reference to one particular value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -89,23 +88,22 @@ pub(crate) enum High {
     Allocate(Texture),
     /// Mark a texture as unneeded.
     Discard(Texture),
+    #[deprecated = "Should be mapped to of paint with a discarding load or another buffer initialization."]
     Construct {
         dst: Texture,
         op: ConstructOp,
     },
-    Unary {
-        src: Texture,
-        dst: Texture,
-        op: UnaryOp,
+    Paint {
+        texture: Texture,
+        dst: Target,
         fn_: Function,
     },
-    Binary {
-        lhs: Texture,
-        rhs: Texture,
-        dst: Texture,
-        op: BinaryOp,
-        fn_: Function,
-    },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Target {
+    Discard(Texture),
+    Load(Texture),
 }
 
 #[derive(Clone)]
@@ -433,21 +431,22 @@ impl CommandBuffer {
                 }
                 Op::Unary { src, desc, op } => {
                     let texture = textures.allocate_for(desc, liveness);
-                    high_ops.push(High::Unary {
-                        src: reg_to_texture[src],
-                        dst: texture,
-                        op: op.clone(),
-                        fn_: match op {
-                            &UnaryOp::Crop(region) => {
-                                Function::PaintOnTop {
+
+                    match op {
+                        &UnaryOp::Crop(region) => {
+                            high_ops.push(High::Paint {
+                                texture: reg_to_texture[src],
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintOnTop {
                                     lower_region: [region, region],
                                     upper_region: Rectangle::with_width_height(region.width(), region.height()),
-                                    fragment_shader: shaders::FRAG_COPY,
-                                }
-                            },
-                            _ => return Err(CompileError::NotYetImplemented),
+                                    paint_on_top: PaintOnTopKind::Copy,
+                                },
+                            });
                         },
-                    });
+                        _ => return Err(CompileError::NotYetImplemented),
+                    }
+
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 Op::Binary { desc, lhs, rhs, op } => {
@@ -457,22 +456,31 @@ impl CommandBuffer {
                         Rectangle::from(self.describe_reg(*rhs).unwrap()),
                     ];
 
-                    high_ops.push(High::Binary {
-                        lhs: reg_to_texture[lhs],
-                        rhs: reg_to_texture[rhs],
-                        dst: texture,
-                        op: op.clone(),
-                        fn_: match op {
-                            BinaryOp::Inscribe { placement } => {
-                                Function::PaintOnTop {
+                    match op {
+                        BinaryOp::Inscribe { placement } => {
+                            high_ops.push(High::Paint {
+                                dst: Target::Discard(texture),
+                                texture: reg_to_texture[lhs],
+                                fn_: Function::PaintOnTop {
+                                    lower_region: [lower_region[0], lower_region[0]],
+                                    upper_region: lower_region[0],
+                                    paint_on_top: PaintOnTopKind::Copy,
+                                },
+                            });
+
+                            high_ops.push(High::Paint {
+                                dst: Target::Load(texture),
+                                texture: reg_to_texture[lhs],
+                                fn_: Function::PaintOnTop {
                                     lower_region: lower_region,
                                     upper_region: *placement,
-                                    fragment_shader: shaders::FRAG_COPY,
-                                }
-                            },
-                            _ => return Err(CompileError::NotYetImplemented),
+                                    paint_on_top: PaintOnTopKind::Copy,
+                                },
+                            });
                         },
-                    });
+                        _ => return Err(CompileError::NotYetImplemented),
+                    }
+
                     reg_to_texture.insert(Register(idx), texture);
                 }
             }

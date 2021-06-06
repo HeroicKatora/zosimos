@@ -1,10 +1,10 @@
 use core::ops::Range;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use crate::command::{High, Rectangle, Register};
+use crate::command::{High, Rectangle, Register, Target};
 use crate::buffer::{BufferLayout, Descriptor};
 use crate::pool::{ImageData, Pool, PoolKey};
-use crate::run;
+use crate::{run, shaders};
 use crate::util::ExtendOne;
 
 /// Planned out and intrinsically validated command buffer.
@@ -34,9 +34,13 @@ pub(crate) enum Function {
         lower_region: [Rectangle; 2],
         // Target viewport.
         upper_region: Rectangle,
-        // The shader to execute with that pipeline.
-        fragment_shader: &'static [u8],
+        paint_on_top: PaintOnTopKind,
     },
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum PaintOnTopKind {
+    Copy,
 }
 
 #[derive(Default)]
@@ -51,7 +55,9 @@ pub(crate) struct Texture(usize);
 
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
 #[derive(Default)]
-struct Encoder {
+struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
+    instructions: Instructions,
+    
     // Replicated fields from `run::Descriptors`
     bind_groups: usize,
     bind_group_layouts: usize,
@@ -61,8 +67,14 @@ struct Encoder {
     pipeline_layouts: usize,
     render_pipelines: usize,
     sampler: usize,
+    shaders: usize,
     textures: usize,
     texture_views: usize,
+
+    // Additional validation properties.
+    is_in_command_encoder: bool,
+    is_in_render_pass: bool,
+    commands: usize,
 
     // Additional fields to map our runtime state.
     paint_group_layout: Option<usize>,
@@ -455,34 +467,82 @@ impl Launcher<'_> {
             Err(_) => return Err(LaunchError {}),
         };
 
-        let mut instructions = vec![];
         let mut encoder = Encoder::default();
-
         encoder.enable_capabilities(&device);
 
         for high in &self.program.ops {
             match high {
                 High::Allocate(texture) => {
+                    todo!()
                 },
                 High::Discard(texture) => {
+                    todo!()
                 },
                 High::Input(dst, what) => {
                     let idx = encoder.input_id();
+                    // Identify how we ingest this image.
+                    // If it is a texture format that we support then we will allocate and upload
+                    // it directly. If it is not then we will allocate a generic version capable of
+                    // holding a lossless convert variant of it and add instructions to convert
+                    // into that buffer.
+                    todo!()
                 },
                 High::Output(texture) => {
                     let idx = encoder.output_id();
+                    // Identify if we need to transform the texture from the internal format to the
+                    // one actually chosen for this texture.
                 },
                 High::Construct { dst, op } => {
+                    todo!()
                 },
-                High::Unary { src, dst, op, fn_ } => {
-                },
-                High::Binary { lhs, rhs, dst, op, fn_ } => {
+                High::Paint { texture, dst, fn_ } => {
+                    let layout = encoder.make_paint_layout();
+
+                    let dst_view = encoder.texture_view(TextureViewDescriptor {
+                        texture: match dst {
+                            Target::Discard(texture) | Target::Load(texture) => texture.0,
+                        }
+                    });
+
+                    let ops = match dst {
+                        Target::Discard(_) => {
+                            wgpu::Operations {
+                                // TODO: we could let choose a replacement color..
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: true,
+                            }
+                        },
+                        Target::Load(_) => {
+                            wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: true,
+                            }
+                        },
+                    };
+
+                    let attachment = ColorAttachmentDescriptor {
+                        texture_view: dst_view,
+                        ops,
+                    };
+
+                    encoder.push(Low::BeginCommands)?;
+                    encoder.push(Low::BeginRenderPass(RenderPassDescriptor {
+                        color_attachments: vec![attachment],
+                        depth_stencil: None,
+                    }))?;
+                    encoder.render(fn_);
+                    encoder.push(Low::EndRenderPass)?;
+                    encoder.push(Low::EndCommands)?;
+
+                    // Actually run it immediately.
+                    // TODO: this might not be the most efficient.
+                    encoder.push(Low::RunTopCommand)?;
                 },
             }
         }
 
         let init = run::InitialState {
-            instructions,
+            instructions: encoder.instructions,
             device,
             queue,
             buffers: core::mem::take(self.pool),
@@ -492,7 +552,7 @@ impl Launcher<'_> {
     }
 }
 
-impl Encoder {
+impl<I: ExtendOne<Low>> Encoder<I> {
     /// Tell the encoder which commands are natively supported.
     /// Some features require GPU support. At this point we decide if our request has succeeded and
     /// we might poly-fill it with a compute shader or something similar.
@@ -500,6 +560,94 @@ impl Encoder {
         // currently no feature selection..
         let _ = device.features();
         let _ = device.limits();
+    }
+
+    /// Validate and then add the command to the encoder.
+    ///
+    /// This ensures we can keep track of the expected state change, and validate the correct order
+    /// of commands. More specific sequencing commands will expect correct order or assume it
+    /// internally.
+    fn push(&mut self, low: Low) -> Result<(), LaunchError> {
+        match low {
+            Low::BindGroupLayout(_) => self.bind_group_layouts += 1,
+            Low::BindGroup(_) => self.bind_groups += 1,
+            Low::Buffer(_) => self.buffers += 1,
+            Low::PipelineLayout(_) => self.pipeline_layouts += 1,
+            Low::Sampler(_) => self.sampler += 1,
+            Low::Shader(_) => self.shaders += 1,
+            Low::Texture(_) => self.textures += 1,
+            Low::TextureView(_) => self.texture_views += 1,
+            Low::RenderPipeline(_) => self.render_pipelines += 1,
+            Low::BeginCommands => {
+                if self.is_in_command_encoder {
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+
+                self.is_in_command_encoder = true;
+            },
+            Low::BeginRenderPass(_) => {
+                if self.is_in_render_pass {
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+
+                if !self.is_in_command_encoder {
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+
+                self.is_in_render_pass = true;
+            },
+            Low::EndCommands => {
+                if !self.is_in_command_encoder {
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+
+                self.is_in_command_encoder = false;
+                self.commands += 1;
+            },
+            Low::EndRenderPass => {
+                if !self.is_in_render_pass {
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+
+                self.is_in_render_pass = false;
+            }
+            Low::SetPipeline(_) => todo!(),
+            Low::SetBindGroup { group, .. } => {
+                if group >= self.bind_groups {
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+            }
+            Low::SetVertexBuffer { buffer, .. } => {
+                if buffer >= self.buffers {
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+            }
+            // TODO: could validate indices.
+            Low::DrawOnce { .. }
+            | Low::DrawIndexedZero { .. }
+            | Low::SetPushConstants { .. } => {},
+            Low::RunTopCommand => {
+                if self.commands == 0{
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+
+                self.commands -= 1;
+            }
+            Low::RunBotToTop(num) | Low::RunTopToBot(num) => {
+                if num >= self.commands {
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+
+                self.commands -= num;
+            }
+            // TODO: could validate indices.
+            Low::WriteImageToBuffer { .. }
+            | Low::WriteImageToTexture { .. }
+            | Low::ReadBuffer { .. } => {},
+        }
+
+        self.instructions.extend_one(low);
+        Ok(())
     }
 
     fn input_id(&mut self) -> usize {
@@ -510,8 +658,16 @@ impl Encoder {
         todo!()
     }
 
-    fn make_paint_group(&mut self, instructions: &mut dyn ExtendOne<Low>) -> usize {
+    fn texture_view(&mut self, descriptor: TextureViewDescriptor) -> usize {
+        self.instructions.extend_one(Low::TextureView(descriptor));
+        let id = self.texture_views;
+        self.texture_views += 1;
+        id
+    }
+
+    fn make_paint_group(&mut self) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
+        let instructions = &mut self.instructions;
         *self.paint_group_layout.get_or_insert_with(|| {
             let descriptor = BindGroupLayoutDescriptor {
                 entries: vec![
@@ -534,9 +690,10 @@ impl Encoder {
         })
     }
 
-    fn make_paint_layout(&mut self, instructions: &mut dyn ExtendOne<Low>) -> usize {
-        let bind_group = self.make_paint_group(instructions);
+    fn make_paint_layout(&mut self) -> usize {
+        let bind_group = self.make_paint_group();
         let layouts = &mut self.pipeline_layouts;
+        let instructions = &mut self.instructions;
         *self.paint_pipeline_layout.get_or_insert_with(|| {
             let descriptor = PipelineLayoutDescriptor {
                 bind_group_layouts: vec![bind_group],
@@ -553,6 +710,37 @@ impl Encoder {
             *layouts += 1;
             descriptor_id
         })
+    }
+
+    fn render(&mut self, function: &Function) {
+        match function {
+            Function::PaintOnTop { lower_region, upper_region, paint_on_top } => {
+                let vertex = shaders::VERT_NOOP;
+                let fragment = paint_on_top.fragment_shader();
+
+                todo!("Actual shader painting")
+            },
+        }
+    }
+}
+
+impl PaintOnTopKind {
+    fn fragment_shader(&self) -> &[u8] {
+        match self {
+            PaintOnTopKind::Copy => shaders::FRAG_COPY,
+        }
+    }
+}
+
+impl LaunchError {
+    #[deprecated = "Should be removed and implemented"]
+    pub(crate) const UNIMPLEMENTED_CHECK: Self = LaunchError {};
+    #[allow(non_snake_case)]
+    #[deprecated = "This should be cleaned up"]
+    pub(crate) fn InternalCommandError(line: u32) -> Self {
+        // FIXME: this should not be here..
+        eprintln!("In line {}", line);
+        LaunchError {}
     }
 }
 
