@@ -122,22 +122,26 @@ impl Execution {
                 Ok(SyncPoint::NO_SYNC)
             }
             Low::Buffer(desc) => {
-                use wgpu::BufferUsage as U;
                 let desc = wgpu::BufferDescriptor {
                     label: None,
                     size: desc.size,
-                    usage: match desc.usage {
-                        program::BufferUsage::InVertices => U::MAP_WRITE | U::VERTEX,
-                        program::BufferUsage::DataIn => U::MAP_WRITE | U::STORAGE | U::COPY_SRC,
-                        program::BufferUsage::DataOut => U::MAP_READ | U::STORAGE | U::COPY_DST,
-                        program::BufferUsage::DataInOut => {
-                            U::MAP_READ | U::MAP_WRITE | U::STORAGE | U::COPY_SRC | U::COPY_DST
-                        }
-                        program::BufferUsage::Uniform => U::MAP_WRITE | U::STORAGE | U::COPY_SRC,
-                    },
+                    usage: desc.usage.to_wgpu(),
                     mapped_at_creation: false,
                 };
+
                 let buffer = self.gpu.device.create_buffer(&desc);
+                self.descriptors.buffers.push(buffer);
+                Ok(SyncPoint::NO_SYNC)
+            }
+            Low::BufferInit(desc) => {
+                use wgpu::util::DeviceExt;
+                let desc = wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: &desc.content,
+                    usage: desc.usage.to_wgpu(),
+                };
+
+                let buffer = self.gpu.device.create_buffer_init(&desc);
                 self.descriptors.buffers.push(buffer);
                 Ok(SyncPoint::NO_SYNC)
             }

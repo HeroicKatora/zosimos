@@ -6,6 +6,7 @@ edition = "2018"
 license = "MPL-2.0"
 
 [dependencies]
+bytemuck = "1.4"
 image-canvas = { path = "../image-canvas" }
 slotmap = "1"
 wgpu = "0.8"

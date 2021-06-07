@@ -79,6 +79,19 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     // Additional fields to map our runtime state.
     paint_group_layout: Option<usize>,
     paint_pipeline_layout: Option<usize>,
+    fragment_shaders: HashMap<FragmentShader, usize>,
+    vertex_shaders: HashMap<VertexShader, usize>,
+    simple_quad_buffer: Option<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum VertexShader {
+    Noop,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum FragmentShader {
+    PaintOnTop(PaintOnTopKind),
 }
 
 #[derive(Debug)]
@@ -101,6 +114,8 @@ pub(crate) enum Low {
     BindGroup(BindGroupDescriptor),
     /// Create (and store) a new buffer.
     Buffer(BufferDescriptor),
+    /// Create (and store) a new buffer with initial contents.
+    BufferInit(BufferDescriptorInit),
     /// Describe (and store) a new pipeline layout.
     PipelineLayout(PipelineLayoutDescriptor),
     /// Create (and store) a new sampler.
@@ -237,7 +252,6 @@ pub(crate) struct RenderPipelineDescriptor {
 pub(crate) struct VertexState {
     pub vertex_module: usize,
     pub entry_point: &'static str,
-    pub targets: Vec<wgpu::ColorTargetState>,
 }
 
 pub(crate) enum PrimitiveState {
@@ -258,6 +272,12 @@ pub(crate) struct PipelineLayoutDescriptor {
 /// For constructing a new buffer, of anonymous memory.
 pub(crate) struct BufferDescriptor {
     pub size: wgpu::BufferAddress,
+    pub usage: BufferUsage,
+}
+
+/// For constructing a new buffer, of anonymous memory.
+pub(crate) struct BufferDescriptorInit {
+    pub content: Cow<'static, [u8]>,
     pub usage: BufferUsage,
 }
 
@@ -525,6 +545,8 @@ impl Launcher<'_> {
                         ops,
                     };
 
+                    // TODO: we need to remember the attachment format here.
+                    // This is need to to automatically construct the shader pipeline.
                     encoder.push(Low::BeginCommands)?;
                     encoder.push(Low::BeginRenderPass(RenderPassDescriptor {
                         color_attachments: vec![attachment],
@@ -571,7 +593,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         match low {
             Low::BindGroupLayout(_) => self.bind_group_layouts += 1,
             Low::BindGroup(_) => self.bind_groups += 1,
-            Low::Buffer(_) => self.buffers += 1,
+            Low::Buffer(_) | Low::BufferInit(_) => self.buffers += 1,
             Low::PipelineLayout(_) => self.pipeline_layouts += 1,
             Low::Sampler(_) => self.sampler += 1,
             Low::Shader(_) => self.shaders += 1,
@@ -712,22 +734,170 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
-    fn render(&mut self, function: &Function) {
+    fn shader(&mut self, desc: ShaderDescriptor) -> Result<usize, LaunchError> {
+        if !self.is_in_command_encoder {
+            return Err(LaunchError::InternalCommandError(line!()));
+        }
+
+        self.instructions.extend_one(Low::Shader(desc));
+        let idx = self.shaders;
+        self.shaders += 1;
+        Ok(idx)
+    }
+
+    fn fragment_shader(&mut self, kind: Option<FragmentShader>, source: Cow<'static, [u32]>)
+        -> Result<usize, LaunchError>
+    {
+        if let Some(&shader) = kind.and_then(|k| self.fragment_shaders.get(&k)) {
+            return Ok(shader);
+        }
+
+        let flags = 0;
+
+        let shader_idx = self.shaders;
+        self.shader(ShaderDescriptor {
+            name: "",
+            flags: wgpu::ShaderFlags::empty(),
+            source_spirv: source,
+        })
+    }
+
+    fn vertex_shader(&mut self, kind: Option<VertexShader>, source: Cow<'static, [u32]>)
+        -> Result<usize, LaunchError>
+    {
+        if let Some(&shader) = kind.and_then(|k| self.vertex_shaders.get(&k)) {
+            return Ok(shader);
+        }
+
+        self.shader(ShaderDescriptor {
+            name: "",
+            flags: wgpu::ShaderFlags::empty(),
+            source_spirv: source,
+        })
+    }
+
+    fn simple_quad_buffer(&mut self) -> usize {
+        let buffers = &mut self.buffers;
+        let instructions = &mut self.instructions;
+        *self.simple_quad_buffer.get_or_insert_with(|| {
+            // Sole quad!
+            let content: &'static [f32; 8] = &[
+                0.0, 0.0,
+                0.0, 1.0,
+                1.0, 1.0,
+                1.0, 0.0,
+            ];
+
+            let descriptor = BufferDescriptorInit {
+                usage: BufferUsage::InVertices,
+                content: bytemuck::cast_slice(content).into(),
+            };
+
+            instructions.extend_one(Low::BufferInit(descriptor));
+
+            let buffer = *buffers;
+            *buffers += 1;
+            buffer
+        })
+    }
+
+    fn attachment_format(&self) -> Result<wgpu::TextureFormat, LaunchError> {
+        todo!()
+    }
+    
+    fn simple_render_pipeline(&mut self, vertex: usize, fragment: usize)
+        -> Result<usize, LaunchError>
+    {
+        let instructions = &mut self.instructions;
+        let format = self.attachment_format()?;
+
+        self.push(Low::RenderPipeline(RenderPipelineDescriptor {
+            vertex: VertexState {
+                entry_point: "main",
+                vertex_module: vertex,
+            },
+            fragment: FragmentState {
+                entry_point: "main",
+                fragment_module: fragment,
+                targets: vec![wgpu::ColorTargetState {
+                    blend: None,
+                    write_mask: wgpu::ColorWrite::ALL,
+                    format,
+                }],
+            },
+            primitive: PrimitiveState::SoleQuad,
+            layout: self.paint_pipeline_layout.ok_or_else(|| {
+                LaunchError::InternalCommandError(line!())
+            })?,
+        }));
+
+        let pipeline = self.render_pipelines;
+        self.render_pipelines += 1;
+        Ok(pipeline)
+    }
+
+    /// Render the pipeline, after all customization and buffers were bound..
+    fn render_simple_pipeline(&mut self, vertex: usize, fragment: usize)
+        -> Result<(), LaunchError>
+    {
+        let buffer = self.simple_quad_buffer();
+
+        todo!();
+
+        self.push(Low::SetVertexBuffer {
+            buffer,
+            slot: 0,
+        })?;
+
+        self.push(Low::DrawOnce { vertices: 6 })?;
+
+        Ok(())
+    }
+
+    fn render(&mut self, function: &Function) -> Result<(), LaunchError> {
         match function {
             Function::PaintOnTop { lower_region, upper_region, paint_on_top } => {
-                let vertex = shaders::VERT_NOOP;
-                let fragment = paint_on_top.fragment_shader();
+                let vertex = self.vertex_shader(
+                    Some(VertexShader::Noop),
+                    shader_include_to_spirv(shaders::VERT_NOOP))?;
 
-                todo!("Actual shader painting")
+                let fragment = paint_on_top.fragment_shader();
+                let fragment = self.fragment_shader(
+                    Some(FragmentShader::PaintOnTop(paint_on_top.clone())),
+                    shader_include_to_spirv(fragment))?;
+
+                self.render_simple_pipeline(vertex, fragment)
             },
         }
     }
+}
+
+fn shader_include_to_spirv(src: &[u8]) -> Cow<'static, [u32]> {
+    assert!(src.len() % 4 == 0);
+    let mut target = vec![0u32; src.len() / 4];
+    bytemuck::cast_slice_mut(&mut target).copy_from_slice(src);
+    Cow::Owned(target)
 }
 
 impl PaintOnTopKind {
     fn fragment_shader(&self) -> &[u8] {
         match self {
             PaintOnTopKind::Copy => shaders::FRAG_COPY,
+        }
+    }
+}
+
+impl BufferUsage {
+    pub fn to_wgpu(self) -> wgpu::BufferUsage {
+        use wgpu::BufferUsage as U;
+        match self {
+            BufferUsage::InVertices => U::MAP_WRITE | U::VERTEX,
+            BufferUsage::DataIn => U::MAP_WRITE | U::STORAGE | U::COPY_SRC,
+            BufferUsage::DataOut => U::MAP_READ | U::STORAGE | U::COPY_DST,
+            BufferUsage::DataInOut => {
+                U::MAP_READ | U::MAP_WRITE | U::STORAGE | U::COPY_SRC | U::COPY_DST
+            }
+            BufferUsage::Uniform => U::MAP_WRITE | U::STORAGE | U::COPY_SRC,
         }
     }
 }
