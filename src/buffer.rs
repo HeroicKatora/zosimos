@@ -214,6 +214,22 @@ pub enum Whitepoint {
 }
 
 impl Descriptor {
+    pub const EMPTY: Self = Descriptor {
+        layout: BufferLayout {
+            width: 0,
+            height: 0,
+            bytes_per_texel: 4,
+        },
+        texel: Texel {
+            block: Block::Pixel,
+            color: Color::SRGB,
+            samples: Samples {
+                bits: SampleBits::Int8x4,
+                parts: SampleParts::Rgba,
+            },
+        },
+    };
+
     /// Get the texel describing a single channel.
     /// Returns None if the channel is not contained, or if it can not be extracted on its own.
     pub fn channel_texel(&self, channel: ColorChannel) -> Option<Texel> {

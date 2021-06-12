@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, Texel};
-use crate::program::{CompileError, Function, PaintOnTopKind, Program, Textures, Texture};
+use crate::program::{
+    CompileError, Function, ImageBufferPlan, ImageBufferAssignment, PaintOnTopKind, Program,
+    Texture,
+};
 use crate::pool::PoolImage;
 
 /// A reference to one particular value.
@@ -98,11 +101,17 @@ pub(crate) enum High {
         dst: Target,
         fn_: Function,
     },
+    /// Last phase marking a register as done.
+    /// This is emitted after the Command defining the register has been translated.
+    Done(usize),
 }
 
+/// The target image texture of a paint operation (pipeline).
 #[derive(Clone, Copy)]
 pub(crate) enum Target {
+    /// The data in the texture is to be discarded.
     Discard(Texture),
+    /// The data in the texture must be loaded.
     Load(Texture),
 }
 
@@ -407,14 +416,18 @@ impl CommandBuffer {
             }
         }
 
-        let mut textures = Textures::default();
+        let mut textures = ImageBufferPlan::default();
         let mut reg_to_texture: HashMap<Register, Texture> = HashMap::default();
 
         for (idx, op) in self.ops.iter().enumerate() {
             let liveness = first_use[idx]..last_use[idx];
+            let descriptor = self.describe_reg(Register(idx))
+                .unwrap_or(&Descriptor::EMPTY);
+            let ImageBufferAssignment { buffer, texture }
+                = textures.allocate_for(descriptor, liveness);
+
             match op {
                 Op::Input { desc } => {
-                    let texture = textures.allocate_for(desc, liveness);
                     high_ops.push(High::Input(texture, desc.clone()));
                     reg_to_texture.insert(Register(idx), texture);
                 }
@@ -422,7 +435,6 @@ impl CommandBuffer {
                     high_ops.push(High::Output(reg_to_texture[src]))
                 }
                 Op::Construct { desc, op } => {
-                    let texture = textures.allocate_for(desc, liveness);
                     high_ops.push(High::Construct {
                         dst: texture,
                         op: op.clone(),
@@ -430,8 +442,6 @@ impl CommandBuffer {
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 Op::Unary { src, desc, op } => {
-                    let texture = textures.allocate_for(desc, liveness);
-
                     match op {
                         &UnaryOp::Crop(region) => {
                             high_ops.push(High::Paint {
@@ -450,7 +460,6 @@ impl CommandBuffer {
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 Op::Binary { desc, lhs, rhs, op } => {
-                    let texture = textures.allocate_for(desc, liveness);
                     let lower_region = [
                         Rectangle::from(self.describe_reg(*lhs).unwrap()),
                         Rectangle::from(self.describe_reg(*rhs).unwrap()),
@@ -484,12 +493,13 @@ impl CommandBuffer {
                     reg_to_texture.insert(Register(idx), texture);
                 }
             }
+
+            high_ops.push(High::Done(idx));
         }
 
         Ok(Program {
             ops: high_ops,
             textures,
-            by_register: reg_to_texture,
         })
     }
 

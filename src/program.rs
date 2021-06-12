@@ -9,13 +9,23 @@ use crate::util::ExtendOne;
 
 /// Planned out and intrinsically validated command buffer.
 ///
-/// This does not necessarily plan out a commands of low leve execution instruction set flavor.
+/// This does not necessarily plan out a commands of low level execution instruction set flavor.
 /// This is selected based on the available device and its capabilities, which is performed during
 /// launch.
 pub struct Program {
     pub(crate) ops: Vec<High>,
-    pub(crate) textures: Textures,
-    pub(crate) by_register: HashMap<Register, Texture>,
+    /// Assigns resources to each image based on liveness.
+    /// This translates the SSA form into a mutable mapping where each image can be represented by
+    /// a texture and a buffer. The difference is that the texture is assigned based on the _exact_
+    /// descriptor while the buffer only requires the same byte layout and is treated as untyped
+    /// memory.
+    /// Note that, still, these are virtual registers. The encoder need not make use of them and it
+    /// might allocate multiple physical textures if this is required to execute a conversion
+    /// shader etc. It is however guaranteed that using the buffers of a _live_ register can not
+    /// affect any other images.
+    /// The encoder can make use of this mapping as intermediate resources for transfer between
+    /// different images or from host to graphic device etc.
+    pub(crate) textures: ImageBufferPlan,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -44,12 +54,24 @@ pub(crate) enum PaintOnTopKind {
 }
 
 #[derive(Default)]
-pub struct Textures {
-    vec: Vec<Descriptor>,
-    by_layout: HashMap<BufferLayout, usize>,
+pub struct ImageBufferPlan {
+    pub(crate) texture: Vec<Descriptor>,
+    pub(crate) buffer: Vec<BufferLayout>,
+    pub(crate) by_register: Vec<ImageBufferAssignment>,
+    pub(crate) by_layout: HashMap<BufferLayout, Texture>,
 }
 
-/// Identifies one resources in the render pipeline, by an index.
+#[derive(Clone, Copy)]
+pub struct ImageBufferAssignment {
+    pub(crate) texture: Texture,
+    pub(crate) buffer: Buffer,
+}
+
+/// Identifies one layout based buffer in the render pipeline, by an index.
+#[derive(Clone, Copy)]
+pub(crate) struct Buffer(usize);
+
+/// Identifies one descriptor based resource in the render pipeline, by an index.
 #[derive(Clone, Copy)]
 pub(crate) struct Texture(usize);
 
@@ -82,6 +104,11 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     fragment_shaders: HashMap<FragmentShader, usize>,
     vertex_shaders: HashMap<VertexShader, usize>,
     simple_quad_buffer: Option<usize>,
+    texture_maps: Vec<TextureMap>,
+}
+
+/// Describes how an image has been mapped to a texture.
+struct TextureMap {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -287,6 +314,7 @@ pub(crate) struct ShaderDescriptor {
     pub flags: wgpu::ShaderFlags,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum BufferUsage {
     /// Map Write + Vertex
     InVertices,
@@ -378,15 +406,23 @@ pub struct Launcher<'program> {
     binds: Vec<ImageData>,
 }
 
-impl Textures {
+impl ImageBufferPlan {
     pub(crate) fn allocate_for(&mut self, desc: &Descriptor, _: Range<usize>)
-        -> Texture
+        -> ImageBufferAssignment
     {
         // FIXME: we could de-duplicate textures using liveness information.
-        let idx = self.vec.len();
-        self.vec.push(desc.clone());
-        self.by_layout.insert(desc.layout.clone(), idx);
-        Texture(idx)
+        let texture = Texture(self.texture.len());
+        self.texture.push(desc.clone());
+        let buffer = Buffer(self.buffer.len());
+        self.buffer.push(desc.layout.clone());
+        self.by_layout.insert(desc.layout.clone(), texture);
+        let assigned = ImageBufferAssignment {
+            buffer,
+            texture,
+        };
+        let register = self.by_register.len();
+        self.by_register.push(assigned);
+        assigned
     }
 }
 
@@ -426,7 +462,7 @@ impl Program {
     pub fn launch<'pool>(&'pool self, pool: &'pool mut Pool)
         -> Launcher<'pool>
     {
-        let binds = self.textures.vec
+        let binds = self.textures.texture
             .iter()
             .map(|desciptor| ImageData::LateBound(desciptor.layout.clone()))
             .collect();
@@ -456,8 +492,8 @@ impl Launcher<'_> {
             _ => return Err(LaunchError { })
         };
 
-        let Texture(texture) = match self.program.by_register.get(&Register(reg)) {
-            Some(texture) => *texture,
+        let Texture(texture) = match self.program.textures.by_register.get(reg) {
+            Some(assigned) => assigned.texture,
             None => return Err(LaunchError { }),
         };
 
@@ -492,14 +528,17 @@ impl Launcher<'_> {
 
         for high in &self.program.ops {
             match high {
-                High::Allocate(texture) => {
-                    todo!()
+                &High::Allocate(Texture(texture_id)) => {
+                    let descriptor = &self.program.textures.texture[texture_id];
+                    let texture = encoder.texture_descriptor(descriptor);
+
+                    encoder.push(Low::Texture(texture))?;
                 },
-                High::Discard(texture) => {
-                    todo!()
+                High::Discard(texture_id) => {
+                    let texture = todo!("translate to actual texture id");
+                    encoder.push(todo!("Low::Discard(texture)"))?;
                 },
                 High::Input(dst, what) => {
-                    let idx = encoder.input_id();
                     // Identify how we ingest this image.
                     // If it is a texture format that we support then we will allocate and upload
                     // it directly. If it is not then we will allocate a generic version capable of
@@ -508,9 +547,9 @@ impl Launcher<'_> {
                     todo!()
                 },
                 High::Output(texture) => {
-                    let idx = encoder.output_id();
                     // Identify if we need to transform the texture from the internal format to the
                     // one actually chosen for this texture.
+                    todo!()
                 },
                 High::Construct { dst, op } => {
                     todo!()
@@ -552,7 +591,7 @@ impl Launcher<'_> {
                         color_attachments: vec![attachment],
                         depth_stencil: None,
                     }))?;
-                    encoder.render(fn_);
+                    encoder.render(fn_)?;
                     encoder.push(Low::EndRenderPass)?;
                     encoder.push(Low::EndCommands)?;
 
@@ -672,12 +711,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(())
     }
 
-    fn input_id(&mut self) -> usize {
-        todo!()
-    }
+    fn texture_descriptor(&mut self, _: &Descriptor) -> TextureDescriptor {
+        let (format, size, usage) = todo!();
 
-    fn output_id(&mut self) -> usize {
-        todo!()
+        TextureDescriptor {
+            format,
+            size,
+            usage,
+        }
     }
 
     fn texture_view(&mut self, descriptor: TextureViewDescriptor) -> usize {
@@ -808,10 +849,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn simple_render_pipeline(&mut self, vertex: usize, fragment: usize)
         -> Result<usize, LaunchError>
     {
-        let instructions = &mut self.instructions;
+        // let instructions = &mut self.instructions;
         let format = self.attachment_format()?;
 
-        self.push(Low::RenderPipeline(RenderPipelineDescriptor {
+        self.instructions.extend_one(Low::RenderPipeline(RenderPipelineDescriptor {
             vertex: VertexState {
                 entry_point: "main",
                 vertex_module: vertex,
