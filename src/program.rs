@@ -798,15 +798,19 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(())
     }
 
-    fn make_texture_descriptor(&mut self, descriptor: &Descriptor)
+    fn make_texture_descriptor(&mut self, texture: Texture)
         -> Result<TextureDescriptor, LaunchError>
     {
+        let descriptor = &self.buffer_plan.texture[texture.0];
         let size = (descriptor.layout.width, descriptor.layout.height);
 
         let format = match descriptor.texel.color {
+            Color::SRGB => wgpu::TextureFormat::Rgba8UnormSrgb,
+            Color::Xyz { .. } => return Err(LaunchError {}),
         };
 
-        let usage = todo!();
+        // TODO: be more precise?
+        let usage = TextureUsage::Storage;
 
         Ok(TextureDescriptor {
             format,
@@ -816,17 +820,24 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     fn allocate_register(&mut self, idx: Register) -> Result<&RegisterMap, LaunchError> {
+        self.ensure_allocate_register(idx)?;
+        // Trick, reborrow the thing..
+        Ok(&self.register_map[&idx])
+    }
+
+    // We must trick the borrow checker here..
+    fn ensure_allocate_register(&mut self, idx: Register) -> Result<(), LaunchError> {
         let ImageBufferAssignment {
             buffer: reg_buffer,
             texture: reg_texture,
         } = self.buffer_plan.get(idx)?;
 
-        if let Some(map) = self.register_map.get(&idx) {
-            return Ok(map);
+        if let Some(_) = self.register_map.get(&idx) {
+            return Ok(());
         }
 
+        let texture_format = self.make_texture_descriptor(reg_texture)?;
         let descriptor = &self.buffer_plan.texture[reg_texture.0];
-        let texture_format = self.make_texture_descriptor(descriptor)?;
 
         let bytes_per_row = (descriptor.layout.bytes_per_texel as u32)
             .checked_mul(texture_format.size.0)
@@ -845,15 +856,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let buffer = {
             let buffer = self.buffers;
             self.push(Low::Buffer(BufferDescriptor {
-                size: todo!(),
-                usage: todo!(),
-            }));
+                size: buffer_layout.u64_len(),
+                usage: BufferUsage::DataInOut,
+            }))?;
             buffer
         };
 
         let texture = {
             let texture = self.textures;
-            self.push(Low::Texture(texture_format));
+            self.push(Low::Texture(texture_format.clone()))?;
             texture
         };
 
@@ -866,18 +877,19 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             staging_format: None,
         };
 
+        // TODO do a match instead?
         let in_map = self.register_map
             .entry(idx)
-            .or_insert(map_entry);
-        *in_map = map_entry;
+            .or_insert(map_entry.clone());
+        *in_map = map_entry.clone();
 
         self.buffer_map.insert(reg_buffer, BufferMap(buffer));
         self.texture_map.insert(reg_texture, TextureMap(texture));
-        if let Some(staging) = map_entry.staging {
+        if let Some(staging) = in_map.staging {
             self.staging_map.insert(reg_texture, StagingTexture(staging));
         }
 
-        Ok(in_map)
+        Ok(())
     }
 
     /// Copy from the input to the internal memory visible buffer.
@@ -893,7 +905,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             offset: (0, 0),
             target_buffer: regmap.buffer,
             target_layout: regmap.buffer_layout,
-        });
+        })?;
 
         Ok(())
     }

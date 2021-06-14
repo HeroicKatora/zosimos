@@ -235,7 +235,8 @@ impl CommandBuffer {
         let layout = BufferLayout {
             width: desc_src.layout.width,
             height: desc_src.layout.height,
-            bytes_per_texel: texel.samples.bits.bytes(),
+            // TODO: just add a bytes_u8 method or so.
+            bytes_per_texel: texel.samples.bits.bytes() as u8,
             // TODO: make this nicer.
             bytes_per_row: desc_src.layout.width * texel.samples.bits.bytes() as u32,
         };
@@ -347,7 +348,7 @@ impl CommandBuffer {
             });
         }
 
-        if data.len() != describe.layout.bytes_per_texel {
+        if data.len() != usize::from(describe.layout.bytes_per_texel) {
             return Err(CommandError {
                 inner: CommandErrorKind::BadDescriptor(describe),
             });

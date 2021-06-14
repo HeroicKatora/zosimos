@@ -8,7 +8,7 @@ use canvas::layout::Layout;
 pub struct BufferLayout {
     pub(crate) width: u32,
     pub(crate) height: u32,
-    pub(crate) bytes_per_texel: usize,
+    pub(crate) bytes_per_texel: u8,
     pub(crate) bytes_per_row: u32,
 }
 
@@ -149,7 +149,7 @@ pub enum ColorChannel {
     B,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Color {
     /// A common model based on the CIE 1931 XYZ observer.
@@ -246,7 +246,7 @@ impl Descriptor {
     /// texel descriptor has the same number of bytes as the layout, etc.
     pub fn is_consistent(&self) -> bool {
         // FIXME: other checks.
-        self.texel.samples.bits.bytes() == self.layout.bytes_per_texel
+        self.texel.samples.bits.bytes() == usize::from(self.layout.bytes_per_texel)
     }
 
     pub fn pixel_width(&self) -> u32 {
@@ -411,12 +411,21 @@ impl BufferLayout {
     pub fn height(&self) -> u32 {
         self.height
     }
+
+    pub fn u64_len(&self) -> u64 {
+        // No overflow due to inner invariant.
+        u64::from(self.width) * u64::from(self.height) * u64::from(self.bytes_per_texel)
+    }
+
+    pub fn byte_len(&self) -> usize {
+        // No overflow due to inner invariant.
+        (self.width as usize) * (self.height as usize) * usize::from(self.bytes_per_texel)
+    }
 }
 
 impl Layout for BufferLayout {
     fn byte_len(&self) -> usize {
-        // No overflow due to inner invariant.
-        (self.width as usize) * (self.height as usize) * (self.bytes_per_texel as usize)
+        BufferLayout::byte_len(self)
     }
 }
 
@@ -430,7 +439,7 @@ impl From<&'_ image::DynamicImage> for BufferLayout {
         BufferLayout {
             width,
             height,
-            bytes_per_texel: bytes_per_texel.into(),
+            bytes_per_texel,
             bytes_per_row,
         }
     }
