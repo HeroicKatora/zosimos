@@ -9,6 +9,7 @@ pub struct BufferLayout {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) bytes_per_texel: usize,
+    pub(crate) bytes_per_row: u32,
 }
 
 /// Describe a row-major rectangular matrix layout.
@@ -219,6 +220,7 @@ impl Descriptor {
             width: 0,
             height: 0,
             bytes_per_texel: 4,
+            bytes_per_row: 0,
         },
         texel: Texel {
             block: Block::Pixel,
@@ -245,6 +247,18 @@ impl Descriptor {
     pub fn is_consistent(&self) -> bool {
         // FIXME: other checks.
         self.texel.samples.bits.bytes() == self.layout.bytes_per_texel
+    }
+
+    pub fn pixel_width(&self) -> u32 {
+        self.layout.width * self.texel.block.width()
+    }
+
+    pub fn pixel_height(&self) -> u32 {
+        self.layout.height * self.texel.block.height()
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.layout.width, self.layout.height)
     }
 }
 
@@ -363,6 +377,26 @@ impl Color {
     };
 }
 
+impl Block {
+    pub fn width(&self) -> u32 {
+        use Block::*;
+        match self {
+            Pixel => 1,
+            Sub1x2 | Sub2x2 => 2,
+            Sub1x4 | Sub2x4 | Sub4x4 => 4,
+        }
+    }
+
+    pub fn height(&self) -> u32 {
+        use Block::*;
+        match self {
+            Pixel | Sub1x2 | Sub1x4 => 1,
+            Sub2x2 | Sub2x4 => 2,
+            Sub4x4 => 3,
+        }
+    }
+}
+
 impl ImageBuffer {
     pub fn layout(&self) -> &BufferLayout {
         self.inner.layout()
@@ -390,11 +424,14 @@ impl From<&'_ image::DynamicImage> for BufferLayout {
     fn from(image: &'_ image::DynamicImage) -> BufferLayout {
         use image::GenericImageView;
         let (width, height) = image.dimensions();
+        let bytes_per_texel = image.color().bytes_per_pixel();
+        let bytes_per_row = width * u32::from(bytes_per_texel);
 
         BufferLayout {
             width,
             height,
-            bytes_per_texel: image.color().bytes_per_pixel().into(),
+            bytes_per_texel: bytes_per_texel.into(),
+            bytes_per_row,
         }
     }
 }

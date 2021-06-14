@@ -2,7 +2,7 @@ use core::ops::Range;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use crate::command::{High, Rectangle, Register, Target};
-use crate::buffer::{BufferLayout, Descriptor};
+use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor};
 use crate::pool::{ImageData, Pool, PoolKey};
 use crate::{run, shaders};
 use crate::util::ExtendOne;
@@ -53,12 +53,17 @@ pub(crate) enum PaintOnTopKind {
     Copy,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ImageBufferPlan {
     pub(crate) texture: Vec<Descriptor>,
     pub(crate) buffer: Vec<BufferLayout>,
     pub(crate) by_register: Vec<ImageBufferAssignment>,
     pub(crate) by_layout: HashMap<BufferLayout, Texture>,
+}
+
+#[derive(Default, Clone)]
+pub struct ImagePoolPlan {
+    pub(crate) plan: HashMap<Register, PoolKey>,
 }
 
 #[derive(Clone, Copy)]
@@ -68,11 +73,11 @@ pub struct ImageBufferAssignment {
 }
 
 /// Identifies one layout based buffer in the render pipeline, by an index.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Buffer(usize);
 
 /// Identifies one descriptor based resource in the render pipeline, by an index.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Texture(usize);
 
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
@@ -80,7 +85,7 @@ pub(crate) struct Texture(usize);
 struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     instructions: Instructions,
     
-    // Replicated fields from `run::Descriptors`
+    // Replicated fields from `run::Descriptors` but only length.
     bind_groups: usize,
     bind_group_layouts: usize,
     buffers: usize,
@@ -99,17 +104,66 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     commands: usize,
 
     // Additional fields to map our runtime state.
+    /// How we map registers to device buffers.
+    buffer_plan: ImageBufferPlan,
+    /// Howe we mapped registers to images in the pool.
+    pool_plan: ImagePoolPlan,
     paint_group_layout: Option<usize>,
     paint_pipeline_layout: Option<usize>,
     fragment_shaders: HashMap<FragmentShader, usize>,
     vertex_shaders: HashMap<VertexShader, usize>,
     simple_quad_buffer: Option<usize>,
-    texture_maps: Vec<TextureMap>,
+
+    // Fields regarding the status of registers.
+    register_map: HashMap<Register, RegisterMap>,
+    /// Describes how textures have been mapped to the GPU.
+    texture_map: HashMap<Texture, TextureMap>,
+    /// Describes how buffers have been mapped to the GPU.
+    buffer_map: HashMap<Buffer, BufferMap>,
+    staging_map: HashMap<Texture, StagingTexture>,
 }
 
-/// Describes how an image has been mapped to a texture.
-struct TextureMap {
+/// The GPU buffers associated with a register.
+/// Supplements the buffer_plan by giving direct mappings to each device resource index in an
+/// encoder process.
+#[derive(Clone)]
+struct RegisterMap {
+    texture: usize,
+    buffer: usize,
+    staging: Option<usize>,
+    /// The layout of the buffer.
+    /// This might differ from the layout of the corresponding pool image because it must adhere to
+    /// the layout requirements of the device. For example, the alignment of each row must be
+    /// divisible by 256 etc.
+    buffer_layout: BufferLayout,
+    /// The format of the non-staging texture.
+    texture_format: TextureDescriptor,
+    /// The format of the staging texture.
+    staging_format: Option<TextureDescriptor>,
 }
+
+/// The gpu texture associated with the image.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TextureMap(usize);
+
+/// A 'staging' textures for rendering the internal texture to the externally chosen texel
+/// format including, for example, quantizing and clamping to a different numeric format.
+/// Note that the device texture needs to be a format that the device can use for color
+/// operations (read and store) but it might not support the format natively. In such cases we
+/// need to transform between the intended format and the native format. We could do this with
+/// a blit operation while copying from a buffer but this also depends on support from the
+/// device and wgpu does not allow arbitrary conversion (in 0.8 none are allowed).
+/// Hence we must perform such conversion ourselves with a specialized shader. This could also
+/// be a compute shader but then we must perform a buffer copy of everything so this can not be
+/// part of a graphic pipeline. If a staging texture exists then copies from the buffer and to
+/// the buffer always pass through it and we perform a sync from/to the staging texture before
+/// and after all paint operations involving that buffer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StagingTexture(usize);
+
+/// The gpu buffer associated with an image buffer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BufferMap(usize);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum VertexShader {
@@ -330,12 +384,14 @@ pub(crate) enum BufferUsage {
 
 /// For constructing a new texture.
 /// Ignores mip level, sample count, and some usages.
+#[derive(Clone)]
 pub(crate) struct TextureDescriptor {
     pub size: (u32, u32),
     pub format: wgpu::TextureFormat,
     pub usage: TextureUsage,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum TextureUsage {
     /// Copy Dst + Sampled
     DataIn,
@@ -404,6 +460,9 @@ pub struct Launcher<'program> {
     program: &'program Program,
     pool: &'program mut Pool,
     binds: Vec<ImageData>,
+    /// Assigns images from the internal pool to registers.
+    /// They may be transferred from an input pool, and conversely we assign outputs.
+    pool_plan: ImagePoolPlan,
 }
 
 impl ImageBufferPlan {
@@ -423,6 +482,24 @@ impl ImageBufferPlan {
         let register = self.by_register.len();
         self.by_register.push(assigned);
         assigned
+    }
+
+    pub(crate) fn get(&self, idx: Register)
+        -> Result<ImageBufferAssignment, LaunchError>
+    {
+        self.by_register.get(idx.0)
+            .ok_or(LaunchError {})
+            .map(ImageBufferAssignment::clone)
+    }
+}
+
+impl ImagePoolPlan {
+    pub(crate) fn get(&self, idx: Register)
+        -> Result<PoolKey, LaunchError>
+    {
+        self.plan.get(&idx)
+            .ok_or(LaunchError {})
+            .map(PoolKey::clone)
     }
 }
 
@@ -462,14 +539,17 @@ impl Program {
     pub fn launch<'pool>(&'pool self, pool: &'pool mut Pool)
         -> Launcher<'pool>
     {
+        // Create empty bind assignments as a start, with respective layouts.
         let binds = self.textures.texture
             .iter()
             .map(|desciptor| ImageData::LateBound(desciptor.layout.clone()))
             .collect();
+
         Launcher {
             program: self,
             pool,
             binds,
+            pool_plan: ImagePoolPlan::default(),
         }
     }
 }
@@ -506,15 +586,12 @@ impl Launcher<'_> {
     pub fn launch(self, adapter: &wgpu::Adapter) -> Result<run::Execution, LaunchError> {
         let request = adapter.request_device(&self.program.device_descriptor(), None);
 
+        // For all inputs check that they have now been supplied.
         for high in &self.program.ops {
-            match high {
-                &High::Input(Texture(texture), _) => {
-                    let entry = &self.binds[texture];
-                    if matches!(entry, ImageData::LateBound(_)) {
-                        return Err(LaunchError { })
-                    }
+            if let &High::Input(Register(texture), _) = high {
+                if matches!(self.binds[texture], ImageData::LateBound(_)) {
+                    return Err(LaunchError { })
                 }
-                _ => {},
             }
         }
 
@@ -524,37 +601,36 @@ impl Launcher<'_> {
         };
 
         let mut encoder = Encoder::default();
+        encoder.set_buffer_plan(&self.program.textures);
+        encoder.set_pool_plan(&self.pool_plan);
         encoder.enable_capabilities(&device);
 
         for high in &self.program.ops {
             match high {
-                &High::Allocate(Texture(texture_id)) => {
-                    let descriptor = &self.program.textures.texture[texture_id];
-                    let texture = encoder.texture_descriptor(descriptor);
-
-                    encoder.push(Low::Texture(texture))?;
-                },
-                High::Discard(texture_id) => {
-                    let texture = todo!("translate to actual texture id");
-                    encoder.push(todo!("Low::Discard(texture)"))?;
-                },
-                High::Input(dst, what) => {
+                &High::Done(_) => {
+                    // TODO: should deallocate textures that aren't live anymore.
+                }
+                &High::Input(dst, _) => {
                     // Identify how we ingest this image.
                     // If it is a texture format that we support then we will allocate and upload
                     // it directly. If it is not then we will allocate a generic version capable of
                     // holding a lossless convert variant of it and add instructions to convert
                     // into that buffer.
-                    todo!()
-                },
-                High::Output(texture) => {
+                    encoder.copy_input_to_buffer(dst)?;
+                    encoder.copy_buffer_to_staging(dst)?;
+                }
+                &High::Output(dst) => {
                     // Identify if we need to transform the texture from the internal format to the
                     // one actually chosen for this texture.
-                    todo!()
-                },
+                    encoder.copy_staging_to_buffer(dst)?;
+                    encoder.copy_buffer_to_output(dst)?;
+                }
                 High::Construct { dst, op } => {
                     todo!()
-                },
+                }
                 High::Paint { texture, dst, fn_ } => {
+                    encoder.copy_staging_to_texture(*texture)?;
+
                     let layout = encoder.make_paint_layout();
 
                     let dst_view = encoder.texture_view(TextureViewDescriptor {
@@ -598,7 +674,10 @@ impl Launcher<'_> {
                     // Actually run it immediately.
                     // TODO: this might not be the most efficient.
                     encoder.push(Low::RunTopCommand)?;
-                },
+
+                    // Post paint, make sure we quantize everything.
+                    encoder.copy_texture_to_staging(*texture)?;
+                }
             }
         }
 
@@ -621,6 +700,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // currently no feature selection..
         let _ = device.features();
         let _ = device.limits();
+    }
+
+    fn set_buffer_plan(&mut self, plan: &ImageBufferPlan) {
+        self.buffer_plan = plan.clone();
+    }
+
+    fn set_pool_plan(&mut self, plan: &ImagePoolPlan) {
+        self.pool_plan = plan.clone();
     }
 
     /// Validate and then add the command to the encoder.
@@ -711,14 +798,140 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(())
     }
 
-    fn texture_descriptor(&mut self, _: &Descriptor) -> TextureDescriptor {
-        let (format, size, usage) = todo!();
+    fn make_texture_descriptor(&mut self, descriptor: &Descriptor)
+        -> Result<TextureDescriptor, LaunchError>
+    {
+        let size = (descriptor.layout.width, descriptor.layout.height);
 
-        TextureDescriptor {
+        let format = match descriptor.texel.color {
+        };
+
+        let usage = todo!();
+
+        Ok(TextureDescriptor {
             format,
             size,
             usage,
+        })
+    }
+
+    fn allocate_register(&mut self, idx: Register) -> Result<&RegisterMap, LaunchError> {
+        let ImageBufferAssignment {
+            buffer: reg_buffer,
+            texture: reg_texture,
+        } = self.buffer_plan.get(idx)?;
+
+        if let Some(map) = self.register_map.get(&idx) {
+            return Ok(map);
         }
+
+        let descriptor = &self.buffer_plan.texture[reg_texture.0];
+        let texture_format = self.make_texture_descriptor(descriptor)?;
+
+        let bytes_per_row = (descriptor.layout.bytes_per_texel as u32)
+            .checked_mul(texture_format.size.0)
+            .ok_or(LaunchError {})?;
+        let bytes_per_row = (bytes_per_row/256 + u32::from(bytes_per_row%256 != 0))
+            .checked_mul(256)
+            .ok_or(LaunchError {})?;
+
+        let buffer_layout = BufferLayout {
+            bytes_per_texel: descriptor.layout.bytes_per_texel,
+            width: texture_format.size.0,
+            height: texture_format.size.1,
+            bytes_per_row,
+        };
+
+        let buffer = {
+            let buffer = self.buffers;
+            self.push(Low::Buffer(BufferDescriptor {
+                size: todo!(),
+                usage: todo!(),
+            }));
+            buffer
+        };
+
+        let texture = {
+            let texture = self.textures;
+            self.push(Low::Texture(texture_format));
+            texture
+        };
+
+        let map_entry = RegisterMap {
+            buffer,
+            texture,
+            staging: None,
+            buffer_layout,
+            texture_format,
+            staging_format: None,
+        };
+
+        let in_map = self.register_map
+            .entry(idx)
+            .or_insert(map_entry);
+        *in_map = map_entry;
+
+        self.buffer_map.insert(reg_buffer, BufferMap(buffer));
+        self.texture_map.insert(reg_texture, TextureMap(texture));
+        if let Some(staging) = map_entry.staging {
+            self.staging_map.insert(reg_texture, StagingTexture(staging));
+        }
+
+        Ok(in_map)
+    }
+
+    /// Copy from the input to the internal memory visible buffer.
+    fn copy_input_to_buffer(&mut self, idx: Register) -> Result<(), LaunchError> {
+        let regmap = self.allocate_register(idx)?.clone();
+        let descriptor = &self.buffer_plan.texture[regmap.texture];
+        let source_image = self.pool_plan.get(idx)?;
+        let size = descriptor.size();
+
+        self.push(Low::WriteImageToBuffer {
+            source_image,
+            size,
+            offset: (0, 0),
+            target_buffer: regmap.buffer,
+            target_layout: regmap.buffer_layout,
+        });
+
+        Ok(())
+    }
+
+    /// Copy from memory visible buffer to the texture.
+    fn copy_buffer_to_staging(&mut self, idx: Register) -> Result<(), LaunchError> {
+        todo!()
+    }
+
+    /// Copy quantized data to the internal buffer.
+    /// Note that this may be a no-op for buffers that need no staging buffer, i.e. where
+    /// quantization happens as part of the pipeline.
+    fn copy_staging_to_texture(&mut self, idx: Texture) -> Result<(), LaunchError> {
+        if let Some(staging) = self.staging_map.get(&idx) {
+            todo!()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Quantize the texture to the staging buffer.
+    /// May be a no-op, see reverse operation.
+    fn copy_texture_to_staging(&mut self, idx: Texture) -> Result<(), LaunchError> {
+        if let Some(staging) = self.staging_map.get(&idx) {
+            todo!()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Copy from texture to the memory buffer.
+    fn copy_staging_to_buffer(&mut self, idx: Register) -> Result<(), LaunchError> {
+        todo!()
+    }
+
+    /// Copy the memory buffer to the output.
+    fn copy_buffer_to_output(&mut self, idx: Register) -> Result<(), LaunchError> {
+        todo!()
     }
 
     fn texture_view(&mut self, descriptor: TextureViewDescriptor) -> usize {

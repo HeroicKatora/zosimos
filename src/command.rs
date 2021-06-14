@@ -84,13 +84,11 @@ pub(crate) enum ConstructOp {
 #[derive(Clone)]
 pub(crate) enum High {
     /// Assign a texture id to an input with given descriptor.
-    Input(Texture, Descriptor),
+    /// This instructs the program to insert instructions that load the image from the input in the
+    /// pool into the associated texture buffer.
+    Input(Register, Descriptor),
     /// Designate the ith textures as output n, according to the position in sequence of outputs.
-    Output(Texture),
-    /// Instruct the machine to allocate the texture now.
-    Allocate(Texture),
-    /// Mark a texture as unneeded.
-    Discard(Texture),
+    Output(Register),
     #[deprecated = "Should be mapped to of paint with a discarding load or another buffer initialization."]
     Construct {
         dst: Texture,
@@ -238,6 +236,8 @@ impl CommandBuffer {
             width: desc_src.layout.width,
             height: desc_src.layout.height,
             bytes_per_texel: texel.samples.bits.bytes(),
+            // TODO: make this nicer.
+            bytes_per_row: desc_src.layout.width * texel.samples.bits.bytes() as u32,
         };
 
         let op = Op::Unary {
@@ -428,11 +428,11 @@ impl CommandBuffer {
 
             match op {
                 Op::Input { desc } => {
-                    high_ops.push(High::Input(texture, desc.clone()));
+                    high_ops.push(High::Input(Register(idx), desc.clone()));
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 Op::Output { src } => {
-                    high_ops.push(High::Output(reg_to_texture[src]))
+                    high_ops.push(High::Output(Register(idx)))
                 }
                 Op::Construct { desc, op } => {
                     high_ops.push(High::Construct {
