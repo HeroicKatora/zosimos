@@ -7,7 +7,7 @@ use crate::program::{
 use crate::pool::PoolImage;
 
 /// A reference to one particular value.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Register(pub(crate) usize);
 
 /// One linear sequence of instructions.
@@ -68,7 +68,7 @@ enum Op {
     },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum ConstructOp {
     // TODO: can optimize this repr for the common case.
     Solid(Vec<u8>),
@@ -81,7 +81,7 @@ pub(crate) enum ConstructOp {
 /// can not be represented on the GPU directly, depending on available formats, and need to be
 /// either processed on the CPU (with SIMD hopefully) or they must be converted first, potentially
 /// in a compute shader.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum High {
     /// Assign a texture id to an input with given descriptor.
     /// This instructs the program to insert instructions that load the image from the input in the
@@ -105,7 +105,7 @@ pub(crate) enum High {
 }
 
 /// The target image texture of a paint operation (pipeline).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum Target {
     /// The data in the texture is to be discarded.
     Discard(Texture),
