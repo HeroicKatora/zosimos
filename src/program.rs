@@ -126,10 +126,15 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
 /// The GPU buffers associated with a register.
 /// Supplements the buffer_plan by giving direct mappings to each device resource index in an
 /// encoder process.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct RegisterMap {
     texture: DeviceTexture,
     buffer: DeviceBuffer,
+    /// A device buffer with (COPY_DST | MAP_READ) for reading back the texture.
+    map_read: Option<DeviceBuffer>,
+    /// A device buffer with (COPY_SRC | MAP_WRITE) for initialization the texture.
+    map_write: Option<DeviceBuffer>,
+    /// A device texture for (de-)normalizing the texture contents.
     staging: Option<DeviceTexture>,
     /// The layout of the buffer.
     /// This might differ from the layout of the corresponding pool image because it must adhere to
@@ -143,15 +148,15 @@ struct RegisterMap {
 }
 
 /// A gpu buffer associated with an image buffer.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceBuffer(usize);
 
 /// A gpu texture associated with an image buffer.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceTexture(usize);
 
 /// The gpu texture associated with the image.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct TextureMap {
     device: DeviceTexture,
     format: TextureDescriptor,
@@ -169,25 +174,25 @@ struct TextureMap {
 /// part of a graphic pipeline. If a staging texture exists then copies from the buffer and to
 /// the buffer always pass through it and we perform a sync from/to the staging texture before
 /// and after all paint operations involving that buffer.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct StagingTexture {
     device: DeviceTexture,
     format: TextureDescriptor,
 }
 
 /// The gpu buffer associated with an image buffer.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct BufferMap {
     device: DeviceBuffer,
     layout: BufferLayout,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum VertexShader {
     Noop,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum FragmentShader {
     PaintOnTop(PaintOnTopKind),
 }
@@ -205,6 +210,7 @@ pub struct LaunchError {
 ///
 /// Currently, resources are never deleted until the end of the program. All commands reference a
 /// particular selected device/queue that is implicit global context.
+#[derive(Debug)]
 pub(crate) enum Low {
     // Descriptor modification commands.
     /// Create (and store) a bind group layout.
@@ -304,6 +310,11 @@ pub(crate) enum Low {
         target_buffer: DeviceBuffer,
         target_layout: BufferLayout,
     },
+    CopyBufferToBuffer {
+        source_buffer: DeviceBuffer,
+        size: u64,
+        target_buffer: DeviceBuffer,
+    },
     /// Read a buffer into host image data.
     /// Will map the buffer then do row-wise reads.
     ReadBuffer {
@@ -316,6 +327,7 @@ pub(crate) enum Low {
 }
 
 /// Create a bind group.
+#[derive(Debug)]
 pub(crate) struct BindGroupDescriptor {
     /// Select the nth layout.
     pub layout_idx: usize,
@@ -323,6 +335,7 @@ pub(crate) struct BindGroupDescriptor {
     pub entries: Vec<BindingResource>,
 }
 
+#[derive(Debug)]
 pub(crate) enum BindingResource {
     Buffer {
         buffer_idx: usize,
@@ -334,21 +347,25 @@ pub(crate) enum BindingResource {
 }
 
 /// Describe a bind group.
+#[derive(Debug)]
 pub(crate) struct BindGroupLayoutDescriptor {
     pub entries: Vec<wgpu::BindGroupLayoutEntry>,
 }
 
 /// Create a render pass.
+#[derive(Debug)]
 pub(crate) struct RenderPassDescriptor {
     pub color_attachments: Vec<ColorAttachmentDescriptor>,
     pub depth_stencil: Option<DepthStencilDescriptor>,
 }
 
+#[derive(Debug)]
 pub(crate) struct ColorAttachmentDescriptor {
     pub texture_view: usize,
     pub ops: wgpu::Operations<wgpu::Color>,
 }
 
+#[derive(Debug)]
 pub(crate) struct DepthStencilDescriptor {
     pub texture_view: usize,
     pub depth_ops: Option<wgpu::Operations<f32>>,
@@ -357,6 +374,7 @@ pub(crate) struct DepthStencilDescriptor {
 
 /// The vertex+fragment shaders, primitive mode, layout and stencils.
 /// Ignore multi sampling.
+#[derive(Debug)]
 pub(crate) struct RenderPipelineDescriptor {
     pub layout: usize,
     pub vertex: VertexState,
@@ -364,45 +382,52 @@ pub(crate) struct RenderPipelineDescriptor {
     pub fragment: FragmentState,
 }
 
+#[derive(Debug)]
 pub(crate) struct VertexState {
     pub vertex_module: usize,
     pub entry_point: &'static str,
 }
 
+#[derive(Debug)]
 pub(crate) enum PrimitiveState {
     SoleQuad,
 }
 
+#[derive(Debug)]
 pub(crate) struct FragmentState {
     pub fragment_module: usize,
     pub entry_point: &'static str,
     pub targets: Vec<wgpu::ColorTargetState>,
 }
 
+#[derive(Debug)]
 pub(crate) struct PipelineLayoutDescriptor {
     pub bind_group_layouts: Vec<usize>,
     pub push_constant_ranges: &'static [wgpu::PushConstantRange],
 }
 
 /// For constructing a new buffer, of anonymous memory.
+#[derive(Debug)]
 pub(crate) struct BufferDescriptor {
     pub size: wgpu::BufferAddress,
     pub usage: BufferUsage,
 }
 
 /// For constructing a new buffer, of anonymous memory.
+#[derive(Debug)]
 pub(crate) struct BufferDescriptorInit {
     pub content: Cow<'static, [u8]>,
     pub usage: BufferUsage,
 }
 
+#[derive(Debug)]
 pub(crate) struct ShaderDescriptor {
     pub name: &'static str,
     pub source_spirv: Cow<'static, [u32]>,
     pub flags: wgpu::ShaderFlags,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum BufferUsage {
     /// Map Write + Vertex
     InVertices,
@@ -410,22 +435,22 @@ pub(crate) enum BufferUsage {
     DataIn,
     /// Map Read + Storage + Copy Dst
     DataOut,
-    /// Map Read/Write + Storage + Copy Src/Dst
-    DataInOut,
+    /// Storage + Copy Src/Dst
+    DataBuffer,
     /// Map Write + Uniform + Copy Src
     Uniform,
 }
 
 /// For constructing a new texture.
 /// Ignores mip level, sample count, and some usages.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct TextureDescriptor {
     pub size: (u32, u32),
     pub format: wgpu::TextureFormat,
     pub usage: TextureUsage,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum TextureUsage {
     /// Copy Dst + Sampled
     DataIn,
@@ -436,6 +461,7 @@ pub(crate) enum TextureUsage {
     Storage,
 }
 
+#[derive(Debug)]
 pub(crate) struct TextureViewDescriptor {
     pub texture: usize,
 }
@@ -447,6 +473,7 @@ pub(crate) struct TextureViewDescriptor {
 
 /// For constructing a texture samples.
 /// Ignores lod attributes
+#[derive(Debug)]
 pub(crate) struct SamplerDescriptor {
     /// In all directions.
     pub address_mode: wgpu::AddressMode,
@@ -528,6 +555,12 @@ impl ImageBufferPlan {
 }
 
 impl ImagePoolPlan {
+    pub(crate) fn choose_output(&self, pool: &mut Pool, desc: &Descriptor) -> PoolKey {
+        let mut entry = pool.declare(desc.clone());
+        entry.host_allocate();
+        entry.key()
+    }
+
     pub(crate) fn get(&self, idx: Register)
         -> Result<PoolKey, LaunchError>
     {
@@ -612,8 +645,28 @@ impl Launcher<'_> {
         Ok(self)
     }
 
+    /// Determine images to use for outputs.
+    ///
+    /// You do not need to call this prior to launching as it will be performed automatically.
+    /// However, you might get more detailed error information and in a future version might
+    /// pre-determine the keys that will be used.
+    pub fn bind_remaining_outputs(mut self)
+        -> Result<Self, LaunchError>
+    {
+        for high in &self.program.ops {
+            if let &High::Output(register) = high {
+                let assigned = &self.program.textures.by_register[register.0];
+                let descriptor = &self.program.textures.texture[assigned.texture.0];
+                let key = self.pool_plan.choose_output(&mut *self.pool, descriptor);
+                self.pool_plan.plan.insert(register, key);
+            }
+        }
+
+        Ok(self)
+    }
+
     /// Really launch, potentially failing if configuration or inputs were missing etc.
-    pub fn launch(self, adapter: &wgpu::Adapter) -> Result<run::Execution, LaunchError> {
+    pub fn launch(mut self, adapter: &wgpu::Adapter) -> Result<run::Execution, LaunchError> {
         let request = adapter.request_device(&self.program.device_descriptor(), None);
 
         // For all inputs check that they have now been supplied.
@@ -624,6 +677,9 @@ impl Launcher<'_> {
                 }
             }
         }
+
+        // Bind remaining outputs.
+        self = self.bind_remaining_outputs()?;
 
         let (device, queue) = match block_on(request) {
             Ok(tuple) => tuple,
@@ -819,10 +875,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 self.commands -= num;
             }
             // TODO: could validate indices.
-            Low::WriteImageToBuffer { .. }
-            | Low::WriteImageToTexture { .. }
+            Low::WriteImageToTexture { .. }
             | Low::CopyBufferToTexture { .. }
             | Low::CopyTextureToBuffer { .. }
+            | Low::CopyBufferToBuffer { .. } => {
+                if !self.is_in_command_encoder {
+                    dbg!(&low);
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+            }
+            Low::WriteImageToBuffer { .. }
             | Low::ReadBuffer { .. } => {},
         }
 
@@ -885,13 +947,26 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             bytes_per_row,
         };
 
-        let buffer = {
+        let (buffer, map_read, map_write) = {
             let buffer = self.buffers;
             self.push(Low::Buffer(BufferDescriptor {
                 size: buffer_layout.u64_len(),
-                usage: BufferUsage::DataInOut,
+                usage: BufferUsage::DataBuffer,
             }))?;
-            DeviceBuffer(buffer)
+            self.push(Low::Buffer(BufferDescriptor {
+                size: buffer_layout.u64_len(),
+                usage: BufferUsage::DataIn,
+            }))?;
+            self.push(Low::Buffer(BufferDescriptor {
+                size: buffer_layout.u64_len(),
+                usage: BufferUsage::DataOut,
+            }))?;
+
+            (
+                DeviceBuffer(buffer),
+                DeviceBuffer(buffer+1),
+                DeviceBuffer(buffer+2),
+            )
         };
 
         let texture = {
@@ -903,6 +978,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let map_entry = RegisterMap {
             buffer,
             texture,
+            map_read: Some(map_read),
+            map_write: Some(map_write),
             staging: None,
             buffer_layout,
             texture_format,
@@ -941,14 +1018,33 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let descriptor = &self.buffer_plan.texture[regmap.texture.0];
         let source_image = self.pool_plan.get(idx)?;
         let size = descriptor.size();
+        let sizeu64 = descriptor.layout.u64_len();
+        
+        let target_buffer = regmap.map_write
+            .unwrap_or(regmap.buffer);
 
         self.push(Low::WriteImageToBuffer {
             source_image,
             size,
             offset: (0, 0),
-            target_buffer: regmap.buffer,
+            target_buffer: target_buffer,
             target_layout: regmap.buffer_layout,
-        })
+        })?;
+
+        // FIXME: might happen at next call within another command encoder..
+        if let Some(map_write) = regmap.map_write {
+            self.push(Low::BeginCommands)?;
+            self.push(Low::CopyBufferToBuffer {
+                source_buffer: map_write,
+                size: sizeu64,
+                target_buffer: regmap.buffer,
+            })?;
+            self.push(Low::EndCommands)?;
+            // TODO: maybe also don't run it immediately?
+            self.push(Low::RunTopCommand)?;
+        }
+
+        Ok(())
     }
 
     /// Copy from memory visible buffer to the texture.
@@ -956,13 +1052,19 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let regmap = self.allocate_register(idx)?.clone();
         let size = self.buffer_plan.texture[regmap.texture.0].size();
 
+        self.push(Low::BeginCommands)?;
         self.push(Low::CopyBufferToTexture {
             source_buffer: regmap.buffer,
             source_layout: regmap.buffer_layout,
             offset: (0, 0),
             size,
             target_texture: regmap.texture,
-        })
+        })?;
+        self.push(Low::EndCommands)?;
+        // TODO: maybe also don't run it immediately?
+        self.push(Low::RunTopCommand)?;
+
+        Ok(())
     }
 
     /// Copy quantized data to the internal buffer.
@@ -989,26 +1091,51 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// Copy from texture to the memory buffer.
     fn copy_staging_to_buffer(&mut self, idx: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
-        let size = self.buffer_plan.texture[regmap.texture.0].size();
+        let descriptor = &self.buffer_plan.texture[regmap.texture.0];
+        let size = descriptor.size();
 
+        self.push(Low::BeginCommands)?;
         self.push(Low::CopyTextureToBuffer {
             source_texture: regmap.texture,
             offset: (0, 0),
             size,
             target_buffer: regmap.buffer,
             target_layout: regmap.buffer_layout,
-        })
+        })?;
+        self.push(Low::EndCommands)?;
+        // TODO: maybe also don't run it immediately?
+        self.push(Low::RunTopCommand)?;
+
+        Ok(())
     }
 
     /// Copy the memory buffer to the output.
     fn copy_buffer_to_output(&mut self, idx: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
         let descriptor = &self.buffer_plan.texture[regmap.texture.0];
+
         let target_image = self.pool_plan.get(idx)?;
         let size = descriptor.size();
+        let sizeu64 = descriptor.layout.u64_len();
+        
+        let source_buffer = regmap.map_read
+            .unwrap_or(regmap.buffer);
+
+        // FIXME: might happen at next call within another command encoder..
+        if let Some(map_read) = regmap.map_read {
+            self.push(Low::BeginCommands)?;
+            self.push(Low::CopyBufferToBuffer {
+                source_buffer: regmap.buffer,
+                size: sizeu64,
+                target_buffer: map_read,
+            })?;
+            self.push(Low::EndCommands)?;
+            // TODO: maybe also don't run it immediately?
+            self.push(Low::RunTopCommand)?;
+        }
 
         self.push(Low::ReadBuffer {
-            source_buffer: regmap.buffer,
+            source_buffer,
             source_layout: regmap.buffer_layout,
             size,
             offset: (0, 0),
@@ -1136,10 +1263,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             buffer
         })
     }
-
-    fn attachment_format(&self) -> Result<wgpu::TextureFormat, LaunchError> {
-        todo!()
-    }
     
     fn simple_render_pipeline(
         &mut self,
@@ -1147,6 +1270,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         fragment: usize,
         format: wgpu::TextureFormat,
     ) -> Result<usize, LaunchError> {
+        let layout = self.make_paint_layout();
+
         self.instructions.extend_one(Low::RenderPipeline(RenderPipelineDescriptor {
             vertex: VertexState {
                 entry_point: "main",
@@ -1162,9 +1287,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 }],
             },
             primitive: PrimitiveState::SoleQuad,
-            layout: self.paint_pipeline_layout.ok_or_else(|| {
-                LaunchError::InternalCommandError(line!())
-            })?,
+            layout,
         }));
 
         let pipeline = self.render_pipelines;
@@ -1231,10 +1354,10 @@ impl BufferUsage {
         use wgpu::BufferUsage as U;
         match self {
             BufferUsage::InVertices => U::MAP_WRITE | U::VERTEX,
-            BufferUsage::DataIn => U::MAP_WRITE | U::STORAGE | U::COPY_SRC,
-            BufferUsage::DataOut => U::MAP_READ | U::STORAGE | U::COPY_DST,
-            BufferUsage::DataInOut => {
-                U::MAP_READ | U::MAP_WRITE | U::STORAGE | U::COPY_SRC | U::COPY_DST
+            BufferUsage::DataIn => U::MAP_WRITE | U::COPY_SRC,
+            BufferUsage::DataOut => U::MAP_READ | U::COPY_DST,
+            BufferUsage::DataBuffer => {
+                U::STORAGE | U::COPY_SRC | U::COPY_DST
             }
             BufferUsage::Uniform => U::MAP_WRITE | U::STORAGE | U::COPY_SRC,
         }

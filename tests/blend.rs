@@ -63,7 +63,7 @@ fn run_blending() {
         .expect("Launching failed");
 
     while execution.is_running() {
-        let _wait_point = execution.step().expect("No failure");
+        let _wait_point = execution.step().expect("Shouldn't fail but");
     }
 
     let retire = execution

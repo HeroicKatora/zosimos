@@ -433,7 +433,7 @@ impl CommandBuffer {
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 Op::Output { src } => {
-                    high_ops.push(High::Output(Register(idx)))
+                    high_ops.push(High::Output(Register(idx)));
                 }
                 Op::Construct { desc, op } => {
                     high_ops.push(High::Construct {

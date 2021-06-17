@@ -1,5 +1,5 @@
 //! Defines layout and buffer of our images.
-use canvas::layout::Layout;
+use canvas::{Canvas, layout::Layout};
 
 /// The byte layout of a buffer.
 ///
@@ -17,6 +17,7 @@ pub struct BufferLayout {
 /// This is only concerned with byte-buffer compatibility and not type or color space semantics of
 /// texels. It assumes a row-major layout without space between texels of a row as that is the most
 /// efficient and common such layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RowLayoutDescription {
     pub width: u32,
     pub height: u32,
@@ -24,7 +25,7 @@ pub struct RowLayoutDescription {
 }
 
 pub struct ImageBuffer {
-    inner: canvas::Canvas<BufferLayout>,
+    inner: Canvas<BufferLayout>,
 }
 
 /// Describes an image semantically.
@@ -398,12 +399,22 @@ impl Block {
 }
 
 impl ImageBuffer {
+    /// Allocate a new image buffer given its layout.
+    pub fn with_layout(layout: &BufferLayout) -> Self {
+        let inner = Canvas::new(layout.clone());
+        ImageBuffer { inner }
+    }
+
     pub fn layout(&self) -> &BufferLayout {
         self.inner.layout()
     }
 }
 
 impl BufferLayout {
+    pub fn with_row_layout(_: RowLayoutDescription) -> Option<Self> {
+        todo!()
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -448,7 +459,7 @@ impl From<&'_ image::DynamicImage> for BufferLayout {
 impl From<&'_ image::DynamicImage> for ImageBuffer {
     fn from(image: &'_ image::DynamicImage) -> ImageBuffer {
         let layout = BufferLayout::from(image);
-        let inner = canvas::Canvas::with_bytes(layout, image.as_bytes());
+        let inner = Canvas::with_bytes(layout, image.as_bytes());
         ImageBuffer { inner }
     }
 }

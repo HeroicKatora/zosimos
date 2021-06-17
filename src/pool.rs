@@ -11,7 +11,7 @@ pub struct Pool {
     items: SlotMap<DefaultKey, Image>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PoolKey(DefaultKey);
 
 /// A view on an image inside the pool.
@@ -53,6 +53,7 @@ pub(crate) struct ImageMeta {
     no_write: bool,
 }
 
+/// TODO: figure out if we should expose this or a privacy wrapper.
 pub(crate) enum ImageData {
     Host(ImageBuffer),
     /// The data lives in a generic buffer.
@@ -154,10 +155,14 @@ impl PoolImage<'_> {
 }
 
 impl PoolImageMut<'_> {
+    /// Get the key associated with the image.
+    ///
+    /// You can use the key to access this same image again.
     pub fn key(&self) -> PoolKey {
         PoolKey(self.key)
     }
 
+    /// Get the buffer layout describing the byte occupancy.
     pub fn layout(&self) -> &BufferLayout {
         self.image.data.layout()
     }
@@ -172,6 +177,20 @@ impl PoolImageMut<'_> {
        }
     }
 
+    /// Replace the data with a host allocated buffer of the correct layout.
+    /// TODO: figure out if we should expose this..
+    pub(crate) fn host_allocate(&mut self) -> ImageData {
+        let buffer = ImageBuffer::with_layout(self.layout());
+        self.replace(ImageData::Host(buffer))
+    }
+
+    /// TODO: figure out if assert/panicking is ergonomic enough for making it pub.
+    pub(crate) fn replace(&mut self, image: ImageData) -> ImageData {
+        assert_eq!(self.image.data.layout(), image.layout());
+        core::mem::replace(&mut self.image.data, image)
+    }
+
+    /// TODO: figure out if assert/panicking is ergonomic enough for making it pub.
     pub(crate) fn swap(&mut self, image: &mut ImageData) {
         assert_eq!(self.image.data.layout(), image.layout());
         core::mem::swap(&mut self.image.data, image)
