@@ -408,6 +408,14 @@ impl ImageBuffer {
     pub fn layout(&self) -> &BufferLayout {
         self.inner.layout()
     }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.inner.as_bytes()
+    }
+
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        self.inner.as_bytes_mut()
+    }
 }
 
 impl BufferLayout {

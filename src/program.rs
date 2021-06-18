@@ -149,11 +149,11 @@ struct RegisterMap {
 
 /// A gpu buffer associated with an image buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DeviceBuffer(usize);
+pub struct DeviceBuffer(pub(crate) usize);
 
 /// A gpu texture associated with an image buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DeviceTexture(usize);
+pub struct DeviceTexture(pub(crate) usize);
 
 /// The gpu texture associated with the image.
 #[derive(Clone, Debug)]

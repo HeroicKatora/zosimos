@@ -1,8 +1,9 @@
-use core::iter::once;
+use core::{iter::once, num::NonZeroU32};
 
-use crate::pool::{Pool, PoolImage, PoolKey};
+use crate::buffer::BufferLayout;
 use crate::command::{Rectangle, Register};
-use crate::program::{self, Low};
+use crate::pool::{Pool, PoolImage, PoolKey};
+use crate::program::{self, DeviceBuffer, DeviceTexture, Low};
 
 use wgpu::{Device, Queue};
 
@@ -76,9 +77,15 @@ pub(crate) struct Machine {
 
 #[derive(Debug)]
 pub enum StepError {
-    InvalidInstruction,
+    InvalidInstruction(u32),
+    BadInstruction(BadInstruction),
     ProgramEnd,
     RenderPassDidNotEnd,
+}
+
+#[derive(Debug)]
+pub struct BadInstruction {
+    inner: String,
 }
 
 #[derive(Debug)]
@@ -185,7 +192,7 @@ impl Execution {
             Low::TextureView(desc) => {
                 let texture = self.descriptors.textures
                     .get(desc.texture)
-                    .ok_or_else(|| StepError::InvalidInstruction)?;
+                    .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                 let desc = wgpu::TextureViewDescriptor {
                     label: None,
                     format: None,
@@ -236,7 +243,7 @@ impl Execution {
             }
             Low::BeginCommands => {
                 if self.command_encoder.is_some() {
-                    return Err(StepError::InvalidInstruction);
+                    return Err(StepError::InvalidInstruction(line!()));
                 }
 
                 let descriptor = wgpu::CommandEncoderDescriptor {
@@ -251,7 +258,7 @@ impl Execution {
                 let descriptor = self.descriptors.render_pass(descriptor, &mut attachment_buf)?;
                 let encoder = match &mut self.command_encoder {
                     Some(encoder) => encoder,
-                    None => return Err(StepError::InvalidInstruction),
+                    None => return Err(StepError::InvalidInstruction(line!())),
                 };
 
                 let pass = encoder.begin_render_pass(&descriptor);
@@ -262,7 +269,7 @@ impl Execution {
             },
             Low::EndCommands => {
                 match self.command_encoder.take() {
-                    None => Err(StepError::InvalidInstruction),
+                    None => Err(StepError::InvalidInstruction(line!())),
                     Some(encoder) => {
                         self.descriptors.command_buffers.push(encoder.finish());
                         Ok(SyncPoint::NO_SYNC)
@@ -272,13 +279,13 @@ impl Execution {
             &Low::RunTopCommand => {
                 let command = self.descriptors.command_buffers
                     .pop()
-                    .ok_or_else(|| StepError::InvalidInstruction)?;
+                    .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                 self.gpu.queue.submit(once(command));
                 Ok(SyncPoint::NO_SYNC)
             }
             &Low::RunTopToBot(many) => {
                 if many > self.descriptors.command_buffers.len() {
-                    return Err(StepError::InvalidInstruction);
+                    return Err(StepError::InvalidInstruction(line!()));
                 }
 
                 let commands = self.descriptors.command_buffers.drain(many..);
@@ -287,14 +294,108 @@ impl Execution {
             }
             &Low::RunBotToTop(many) => {
                 if many > self.descriptors.command_buffers.len() {
-                    return Err(StepError::InvalidInstruction);
+                    return Err(StepError::InvalidInstruction(line!()));
                 }
 
                 let commands = self.descriptors.command_buffers.drain(many..);
                 self.gpu.queue.submit(commands);
                 Ok(SyncPoint::NO_SYNC)
             }
-            _ => Err(StepError::InvalidInstruction),
+            &Low::WriteImageToBuffer { source_image, offset, size, target_buffer, ref target_layout } => {
+                let buffer = self.descriptors.buffer(target_buffer, target_layout)?;
+                let entry: PoolImage = self.buffers.entry(source_image)
+                    .ok_or(StepError::InvalidInstruction(line!()))?
+                    .into();
+                let data = entry
+                    .as_bytes()
+                    .ok_or(StepError::InvalidInstruction(line!()))?;
+                self.gpu.queue
+                    .write_buffer(buffer.buffer, 0, data);
+
+                Ok(SyncPoint::NO_SYNC)
+            }
+            &Low::CopyBufferToTexture { source_buffer, ref source_layout, offset, size, target_texture } => {
+                if offset != (0, 0) {
+                    return Err(StepError::InvalidInstruction(line!()));
+                }
+
+                let encoder = match &mut self.command_encoder {
+                    Some(encoder) => encoder,
+                    None => return Err(StepError::InvalidInstruction(line!())),
+                };
+
+                let buffer = self.descriptors.buffer(source_buffer, source_layout)?;
+                let texture = self.descriptors.texture(target_texture)?;
+
+                let extent = wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 0,
+                };
+
+                encoder.copy_buffer_to_texture(
+                    buffer,
+                    texture,
+                    extent,
+                );
+
+                Ok(SyncPoint::NO_SYNC)
+            }
+            &Low::CopyTextureToBuffer { source_texture, offset, size, target_buffer, ref target_layout } => {
+                if offset != (0, 0) {
+                    return Err(StepError::InvalidInstruction(line!()));
+                }
+
+                let encoder = match &mut self.command_encoder {
+                    Some(encoder) => encoder,
+                    None => return Err(StepError::InvalidInstruction(line!())),
+                };
+
+                let texture = self.descriptors.texture(source_texture)?;
+                let buffer = self.descriptors.buffer(target_buffer, target_layout)?;
+
+                let extent = wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 0,
+                };
+
+                encoder.copy_texture_to_buffer(
+                    texture,
+                    buffer,
+                    extent,
+                );
+
+                Ok(SyncPoint::NO_SYNC)
+            }
+            &Low::CopyBufferToBuffer { source_buffer, size, target_buffer } => {
+                let encoder = match &mut self.command_encoder {
+                    Some(encoder) => encoder,
+                    None => return Err(StepError::InvalidInstruction(line!())),
+                };
+
+                let source = self.descriptors.buffers
+                    .get(source_buffer.0)
+                    .ok_or(StepError::InvalidInstruction(line!()))?;
+                let target = self.descriptors.buffers
+                    .get(target_buffer.0)
+                    .ok_or(StepError::InvalidInstruction(line!()))?;
+
+                encoder.copy_buffer_to_buffer(
+                    source, 0,
+                    target, 0,
+                    size,
+                );
+
+                Ok(SyncPoint::NO_SYNC)
+            }
+            &Low::ReadBuffer { source_buffer, ref source_layout, offset, size, target_image } => {
+                let buffer = self.descriptors.buffer(source_buffer, source_layout)?;
+                todo!()
+            }
+            inner => return Err(StepError::BadInstruction(BadInstruction {
+                inner: format!("{:?}", inner),
+            })),
         }
     }
 
@@ -330,7 +431,7 @@ impl Descriptors {
             label: None,
             layout: self.bind_group_layouts
                 .get(desc.layout_idx)
-                .ok_or_else(|| StepError::InvalidInstruction)?,
+                .ok_or_else(|| StepError::InvalidInstruction(line!()))?,
             entries: buf,
         })
     }
@@ -343,7 +444,7 @@ impl Descriptors {
             &Buffer { buffer_idx, offset, size } => {
                 let buffer = self.buffers
                     .get(buffer_idx)
-                    .ok_or_else(|| StepError::InvalidInstruction)?;
+                    .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                 Ok(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer,
                     offset,
@@ -353,13 +454,13 @@ impl Descriptors {
             &Sampler(idx) => {
                 self.sampler
                     .get(idx)
-                    .ok_or_else(|| StepError::InvalidInstruction)
+                    .ok_or_else(|| StepError::InvalidInstruction(line!()))
                     .map(wgpu::BindingResource::Sampler)
             }
             &TextureView(idx) => {
                 self.texture_views
                     .get(idx)
-                    .ok_or_else(|| StepError::InvalidInstruction)
+                    .ok_or_else(|| StepError::InvalidInstruction(line!()))
                     .map(wgpu::BindingResource::TextureView)
             }
         }
@@ -402,7 +503,7 @@ impl Descriptors {
         Ok(wgpu::RenderPassColorAttachment{
             view: self.texture_views
                 .get(desc.texture_view)
-                .ok_or_else(|| StepError::InvalidInstruction)?,
+                .ok_or_else(|| StepError::InvalidInstruction(line!()))?,
             resolve_target: None,
             ops: desc.ops,
         })
@@ -450,7 +551,7 @@ impl Descriptors {
         for &layout in &desc.bind_group_layouts {
             let group = self.bind_group_layouts
                 .get(layout)
-                .ok_or_else(|| StepError::InvalidInstruction)?;
+                .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
             buf.push(group);
         }
 
@@ -470,7 +571,7 @@ impl Descriptors {
         Ok(wgpu::VertexState {
             module: self.modules
                 .get(desc.vertex_module)
-                .ok_or_else(|| StepError::InvalidInstruction)?,
+                .ok_or_else(|| StepError::InvalidInstruction(line!()))?,
             entry_point: desc.entry_point,
             buffers: buf,
         })
@@ -486,9 +587,32 @@ impl Descriptors {
         Ok(wgpu::FragmentState {
             module: self.modules
                 .get(desc.fragment_module)
-                .ok_or_else(|| StepError::InvalidInstruction)?,
+                .ok_or_else(|| StepError::InvalidInstruction(line!()))?,
             entry_point: desc.entry_point,
             targets: buf,
+        })
+    }
+
+    fn buffer(&self, buffer: DeviceBuffer, layout: &BufferLayout)
+        -> Result<wgpu::ImageCopyBuffer<'_>, StepError>
+    {
+        Ok(wgpu::ImageCopyBufferBase {
+            buffer: self.buffers.get(buffer.0).ok_or(StepError::InvalidInstruction(line!()))?,
+            layout: wgpu::ImageDataLayout {
+                bytes_per_row: NonZeroU32::new(layout.bytes_per_row),
+                offset: 0,
+                rows_per_image: NonZeroU32::new(layout.height),
+            },
+        })
+    }
+
+    fn texture(&self, texture: DeviceTexture)
+        -> Result<wgpu::ImageCopyTexture<'_>, StepError>
+    {
+        Ok(wgpu::ImageCopyTextureBase {
+            texture: self.textures.get(texture.0).ok_or(StepError::InvalidInstruction(line!()))?,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
         })
     }
 }
@@ -519,19 +643,19 @@ impl Machine {
                 &Low::SetPipeline(idx) => {
                     let pipeline = descriptors.render_pipelines
                         .get(idx)
-                        .ok_or_else(|| StepError::InvalidInstruction)?;
+                        .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                     pass.set_pipeline(pipeline);
                 }
                 &Low::SetBindGroup{ group, index, ref offsets } => {
                     let group = descriptors.bind_groups
                         .get(group)
-                        .ok_or_else(|| StepError::InvalidInstruction)?;
+                        .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                     pass.set_bind_group(index, group, offsets);
                 }
                 &Low::SetVertexBuffer { slot, buffer } => {
                     let buffer = descriptors.buffers
                         .get(buffer)
-                        .ok_or_else(|| StepError::InvalidInstruction)?;
+                        .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                     pass.set_vertex_buffer(slot, buffer.slice(..));
                 }
                 &Low::DrawOnce { vertices } => {
@@ -544,7 +668,9 @@ impl Machine {
                     pass.set_push_constants(stages, offset, data);
                 }
                 Low::EndRenderPass => return Ok(()),
-                _ => return Err(StepError::InvalidInstruction),
+                inner => return Err(StepError::BadInstruction(BadInstruction {
+                    inner: format!("{:?}", inner),
+                })),
             }
         }
     }

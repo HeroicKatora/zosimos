@@ -152,6 +152,16 @@ impl PoolImage<'_> {
            texel: self.image.texel.clone(),
        }
     }
+
+    /// View the buffer as bytes.
+    ///
+    /// This return `Some` if the image is a host allocated buffer and `None` otherwise.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self.image.data {
+            ImageData::Host(ref buffer) => Some(buffer.as_bytes()),
+            _ => None,
+        }
+    }
 }
 
 impl PoolImageMut<'_> {
