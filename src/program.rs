@@ -61,9 +61,13 @@ pub struct ImageBufferPlan {
     pub(crate) by_layout: HashMap<BufferLayout, Texture>,
 }
 
+/// Contains the data on how images relate to the launcher's pool.
 #[derive(Default, Clone)]
 pub struct ImagePoolPlan {
+    /// Maps registers to the pool image we took it from.
     pub(crate) plan: HashMap<Register, PoolKey>,
+    /// Maps pool images to the texture in the buffer list.
+    pub(crate) buffer: HashMap<PoolKey, Texture>,
 }
 
 #[derive(Clone, Copy)]
@@ -74,11 +78,11 @@ pub struct ImageBufferAssignment {
 
 /// Identifies one layout based buffer in the render pipeline, by an index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct Buffer(usize);
+pub(crate) struct Buffer(pub(crate) usize);
 
 /// Identifies one descriptor based resource in the render pipeline, by an index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct Texture(usize);
+pub(crate) struct Texture(pub(crate) usize);
 
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
 #[derive(Default)]
@@ -115,11 +119,13 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     simple_quad_buffer: Option<usize>,
 
     // Fields regarding the status of registers.
+    /// Describes how registers where mapped to buffers.
     register_map: HashMap<Register, RegisterMap>,
     /// Describes how textures have been mapped to the GPU.
     texture_map: HashMap<Texture, TextureMap>,
     /// Describes how buffers have been mapped to the GPU.
     buffer_map: HashMap<Buffer, BufferMap>,
+    /// Describes which intermediate textures have been mapped to the GPU.
     staging_map: HashMap<Texture, StagingTexture>,
 }
 
@@ -282,14 +288,14 @@ pub(crate) enum Low {
     /// Read a buffer into host image data.
     /// Will map the buffer then do row-wise writes.
     WriteImageToBuffer {
-        source_image: PoolKey,
+        source_image: Texture,
         offset: (u32, u32),
         size: (u32, u32),
         target_buffer: DeviceBuffer,
         target_layout: BufferLayout,
     },
     WriteImageToTexture {
-        source_image: PoolKey,
+        source_image: Texture,
         offset: (u32, u32),
         size: (u32, u32),
         target_texture: DeviceTexture,
@@ -322,7 +328,7 @@ pub(crate) enum Low {
         source_layout: BufferLayout,
         offset: (u32, u32),
         size: (u32, u32),
-        target_image: PoolKey,
+        target_image: Texture,
     },
 }
 
@@ -520,9 +526,12 @@ pub struct MismatchError {
 pub struct Launcher<'program> {
     program: &'program Program,
     pool: &'program mut Pool,
+    /// The host image data for each texture (if any).
+    /// Otherwise this a placeholder image.
     binds: Vec<ImageData>,
     /// Assigns images from the internal pool to registers.
-    /// They may be transferred from an input pool, and conversely we assign outputs.
+    /// They may be transferred from an input pool, and conversely we assign outputs. We can use
+    /// the plan to put back all images into the pool when retiring the execution.
     pool_plan: ImagePoolPlan,
 }
 
@@ -540,7 +549,6 @@ impl ImageBufferPlan {
             buffer,
             texture,
         };
-        let register = self.by_register.len();
         self.by_register.push(assigned);
         assigned
     }
@@ -567,6 +575,13 @@ impl ImagePoolPlan {
         self.plan.get(&idx)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))
             .map(PoolKey::clone)
+    }
+
+    pub(crate) fn get_texture(&self, idx: Register)
+        -> Option<Texture>
+    {
+        let key = self.plan.get(&idx)?;
+        self.buffer.get(key).cloned()
     }
 }
 
@@ -639,8 +654,8 @@ impl Launcher<'_> {
             None => return Err(LaunchError::InternalCommandError(line!())),
         };
 
-        entry.swap(&mut self.binds[texture]);
         self.pool_plan.plan.insert(Register(reg), img);
+        self.pool_plan.buffer.insert(img, Texture(texture));
 
         Ok(self)
     }
@@ -671,8 +686,8 @@ impl Launcher<'_> {
 
         // For all inputs check that they have now been supplied.
         for high in &self.program.ops {
-            if let &High::Input(Register(texture), _) = high {
-                if matches!(self.binds[texture], ImageData::LateBound(_)) {
+            if let &High::Input(register, _) = high {
+                if self.pool_plan.get_texture(register).is_none() {
                     return Err(LaunchError::InternalCommandError(line!()))
                 }
             }
@@ -767,11 +782,14 @@ impl Launcher<'_> {
             }
         }
 
+        let mut buffers = self.binds;
+        encoder.extract_buffers(&mut buffers, &mut self.pool)?;
+
         let init = run::InitialState {
             instructions: encoder.instructions,
             device,
             queue,
-            buffers: core::mem::take(self.pool),
+            buffers,
         };
 
         Ok(run::Execution::new(init))
@@ -794,6 +812,24 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     fn set_pool_plan(&mut self, plan: &ImagePoolPlan) {
         self.pool_plan = plan.clone();
+    }
+
+    fn extract_buffers(&self, buffers: &mut Vec<ImageData>, pool: &mut Pool) -> Result<(), LaunchError> {
+        for (&pool_key, &texture) in &self.pool_plan.buffer {
+            let mut entry = pool.entry(pool_key)
+                .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+            let buffer = &mut buffers[texture.0];
+
+            if buffer.as_bytes().is_none() {
+                entry.swap(buffer);
+
+                if buffer.as_bytes().is_none() {
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Validate and then add the command to the encoder.
@@ -947,7 +983,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             bytes_per_row,
         };
 
-        let (buffer, map_read, map_write) = {
+        let (buffer, map_write, map_read) = {
             let buffer = self.buffers;
             self.push(Low::Buffer(BufferDescriptor {
                 size: buffer_layout.u64_len(),
@@ -1012,16 +1048,28 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(())
     }
 
+    fn ingest_image_data(&mut self, idx: Register) -> Result<Texture, LaunchError> {
+        let source_key = self.pool_plan.get(idx)?;
+        let texture = self.buffer_plan.get(idx)?.texture;
+        self.pool_plan.buffer
+            .entry(source_key)
+            .or_insert(texture);
+        Ok(texture)
+    }
+
     /// Copy from the input to the internal memory visible buffer.
     fn copy_input_to_buffer(&mut self, idx: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
+        let source_image = self.ingest_image_data(idx)?;
+
         let descriptor = &self.buffer_plan.texture[regmap.texture.0];
-        let source_image = self.pool_plan.get(idx)?;
         let size = descriptor.size();
-        let sizeu64 = descriptor.layout.u64_len();
+        // See below, required for direct buffer-to-buffer copy.
+        // let sizeu64 = descriptor.layout.u64_len();
         
-        let target_buffer = regmap.map_write
-            .unwrap_or(regmap.buffer);
+        let target_buffer = regmap.buffer;
+
+        // regmap.map_write .unwrap_or(regmap.buffer);
 
         self.push(Low::WriteImageToBuffer {
             source_image,
@@ -1031,6 +1079,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             target_layout: regmap.buffer_layout,
         })?;
 
+        /*
+        // FIXME: we're using wgpu internal's scheduling for writing the data to the gpu buffer but
+        // this is a separate allocation. We'd instead like to use `regmap.map_write` and do our
+        // own buffer mapping but this requires async scheduling. Soo.. do that later.
         // FIXME: might happen at next call within another command encoder..
         if let Some(map_write) = regmap.map_write {
             self.push(Low::BeginCommands)?;
@@ -1043,6 +1095,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             // TODO: maybe also don't run it immediately?
             self.push(Low::RunTopCommand)?;
         }
+        */
 
         Ok(())
     }
@@ -1112,9 +1165,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// Copy the memory buffer to the output.
     fn copy_buffer_to_output(&mut self, idx: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
+        let target_image = self.ingest_image_data(idx)?;
         let descriptor = &self.buffer_plan.texture[regmap.texture.0];
 
-        let target_image = self.pool_plan.get(idx)?;
         let size = descriptor.size();
         let sizeu64 = descriptor.layout.u64_len();
         

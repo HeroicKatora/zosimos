@@ -2,7 +2,7 @@ use core::{iter::once, num::NonZeroU32};
 
 use crate::buffer::BufferLayout;
 use crate::command::{Rectangle, Register};
-use crate::pool::{Pool, PoolImage, PoolKey};
+use crate::pool::{ImageData, Pool, PoolImage, PoolKey};
 use crate::program::{self, DeviceBuffer, DeviceTexture, Low};
 
 use wgpu::{Device, Queue};
@@ -12,14 +12,14 @@ pub struct Execution {
     pub(crate) gpu: Gpu,
     pub(crate) descriptors: Descriptors,
     pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
-    pub(crate) buffers: Pool,
+    pub(crate) buffers: Vec<ImageData>,
 }
 
 pub(crate) struct InitialState {
     pub(crate) instructions: Vec<Low>,
     pub(crate) device: Device,
     pub(crate) queue: Queue,
-    pub(crate) buffers: Pool,
+    pub(crate) buffers: Vec<ImageData>,
 }
 
 #[derive(Default)]
@@ -95,14 +95,14 @@ pub enum RetireError {
 impl Execution {
     pub(crate) fn new(init: InitialState) -> Self {
         Execution {
-            machine: Machine::new(init.instructions),
+            machine: Machine::new(dbg!(init.instructions)),
             gpu: Gpu {
                 device: init.device,
                 queue: init.queue,
                 modules: vec![],
             },
             descriptors: Descriptors::default(),
-            buffers: init.buffers,
+            buffers: dbg!(init.buffers),
             command_encoder: None,
         }
     }
@@ -113,7 +113,7 @@ impl Execution {
     }
 
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
-        match self.machine.next_instruction()? {
+        match dbg!(self.machine.next_instruction()?) {
             Low::BindGroupLayout(desc) => {
                 let mut entry_buffer = vec![];
                 let group = self.descriptors.bind_group_layout(desc, &mut entry_buffer)?;
@@ -301,12 +301,14 @@ impl Execution {
                 self.gpu.queue.submit(commands);
                 Ok(SyncPoint::NO_SYNC)
             }
-            &Low::WriteImageToBuffer { source_image, offset, size, target_buffer, ref target_layout } => {
+            &Low::WriteImageToBuffer { source_image, offset, size: _, target_buffer, ref target_layout } => {
+                if offset != (0, 0) {
+                    return Err(StepError::InvalidInstruction(line!()));
+                }
+
                 let buffer = self.descriptors.buffer(target_buffer, target_layout)?;
-                let entry: PoolImage = self.buffers.entry(source_image)
+                let data = self.buffers.get(source_image.0)
                     .ok_or(StepError::InvalidInstruction(line!()))?
-                    .into();
-                let data = entry
                     .as_bytes()
                     .ok_or(StepError::InvalidInstruction(line!()))?;
                 self.gpu.queue

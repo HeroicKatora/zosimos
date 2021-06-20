@@ -1,3 +1,4 @@
+use core::fmt;
 use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
@@ -130,6 +131,22 @@ impl Pool {
     }
 }
 
+impl ImageData {
+    pub(crate) fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            ImageData::Host(ref buffer) => Some(buffer.as_bytes()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_bytes_mut(&mut self) -> Option<&mut [u8]> {
+        match self {
+            ImageData::Host(ref mut buffer) => Some(buffer.as_bytes_mut()),
+            _ => None,
+        }
+    }
+}
+
 impl PoolImage<'_> {
     pub fn to_image(&self) -> Option<image::DynamicImage> {
         todo!()
@@ -157,10 +174,7 @@ impl PoolImage<'_> {
     ///
     /// This return `Some` if the image is a host allocated buffer and `None` otherwise.
     pub fn as_bytes(&self) -> Option<&[u8]> {
-        match self.image.data {
-            ImageData::Host(ref buffer) => Some(buffer.as_bytes()),
-            _ => None,
-        }
+        self.image.data.as_bytes()
     }
 }
 
@@ -192,6 +206,11 @@ impl PoolImageMut<'_> {
     pub(crate) fn host_allocate(&mut self) -> ImageData {
         let buffer = ImageBuffer::with_layout(self.layout());
         self.replace(ImageData::Host(buffer))
+    }
+
+    pub(crate) fn take(&mut self) -> ImageData {
+        let late_bound = ImageData::LateBound(self.layout().clone());
+        self.replace(late_bound)
     }
 
     /// TODO: figure out if assert/panicking is ergonomic enough for making it pub.
@@ -254,6 +273,17 @@ impl Default for ImageMeta {
         ImageMeta {
             no_read: false,
             no_write: false,
+        }
+    }
+}
+
+impl fmt::Debug for ImageData {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ImageData::LateBound(layout) => write!(f, "ImageData::LayoutBound({:?})", layout),
+            ImageData::Host(buffer) => write!(f, "ImageData::Host({:?})", buffer.layout()),
+            ImageData::GpuTexture(_, layout) => write!(f, "ImageData::GpuTexture({:?})", layout),
+            ImageData::Gpu(_, layout) => write!(f, "ImageData::GpuBuffer({:?})", layout),
         }
     }
 }
