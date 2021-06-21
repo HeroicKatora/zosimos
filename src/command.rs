@@ -426,6 +426,7 @@ impl CommandBuffer {
                 .unwrap_or(&Descriptor::EMPTY);
             let ImageBufferAssignment { buffer, texture }
                 = textures.allocate_for(descriptor, liveness);
+            dbg!(idx, buffer, texture);
 
             match op {
                 Op::Input { desc } => {

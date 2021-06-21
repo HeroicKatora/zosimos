@@ -116,7 +116,7 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     paint_pipeline_layout: Option<usize>,
     fragment_shaders: HashMap<FragmentShader, usize>,
     vertex_shaders: HashMap<VertexShader, usize>,
-    simple_quad_buffer: Option<usize>,
+    simple_quad_buffer: Option<DeviceBuffer>,
 
     // Fields regarding the status of registers.
     /// Describes how registers where mapped to buffers.
@@ -469,7 +469,7 @@ pub(crate) enum TextureUsage {
 
 #[derive(Debug)]
 pub(crate) struct TextureViewDescriptor {
-    pub texture: usize,
+    pub texture: DeviceTexture,
 }
 
 // FIXME: useless at the moment of writing, for our purposes.
@@ -533,6 +533,12 @@ pub struct Launcher<'program> {
     /// They may be transferred from an input pool, and conversely we assign outputs. We can use
     /// the plan to put back all images into the pool when retiring the execution.
     pool_plan: ImagePoolPlan,
+}
+
+struct RenderableOncePipeline {
+    pipeline: usize,
+    buffer: DeviceBuffer,
+    vertices: u32,
 }
 
 impl ImageBufferPlan {
@@ -730,15 +736,15 @@ impl Launcher<'_> {
                     todo!()
                 }
                 High::Paint { texture, dst, fn_ } => {
+                    let dst_texture = match dst {
+                        Target::Discard(texture) | Target::Load(texture) => *texture,
+                    };
+
+                    encoder.ensure_allocate_texture(dst_texture)?;
                     encoder.copy_staging_to_texture(*texture)?;
 
                     let layout = encoder.make_paint_layout();
-
-                    let dst_view = encoder.texture_view(TextureViewDescriptor {
-                        texture: match dst {
-                            Target::Discard(texture) | Target::Load(texture) => texture.0,
-                        }
-                    });
+                    let dst_view = encoder.texture_view(dst_texture)?;
 
                     let ops = match dst {
                         Target::Discard(_) => {
@@ -761,6 +767,8 @@ impl Launcher<'_> {
                         ops,
                     };
 
+                    let render = encoder.prepare_render(*texture, fn_)?;
+
                     // TODO: we need to remember the attachment format here.
                     // This is need to to automatically construct the shader pipeline.
                     encoder.push(Low::BeginCommands)?;
@@ -768,7 +776,7 @@ impl Launcher<'_> {
                         color_attachments: vec![attachment],
                         depth_stencil: None,
                     }))?;
-                    encoder.render(*texture, fn_)?;
+                    encoder.render(render)?;
                     encoder.push(Low::EndRenderPass)?;
                     encoder.push(Low::EndCommands)?;
 
@@ -916,7 +924,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             | Low::CopyTextureToBuffer { .. }
             | Low::CopyBufferToBuffer { .. } => {
                 if !self.is_in_command_encoder {
-                    dbg!(&low);
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
             }
@@ -1005,11 +1012,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             )
         };
 
-        let texture = {
-            let texture = self.textures;
-            self.push(Low::Texture(texture_format.clone()))?;
-            DeviceTexture(texture)
-        };
+        let texture = self.ensure_allocate_texture(reg_texture)?;
 
         let map_entry = RegisterMap {
             buffer,
@@ -1032,10 +1035,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             device: buffer,
             layout: in_map.buffer_layout.clone(),
         });
-        self.texture_map.insert(reg_texture, TextureMap {
-            device: texture,
-            format: in_map.texture_format.clone(),
-        });
+
         if let Some(staging) = in_map.staging {
             self.staging_map.insert(reg_texture, StagingTexture {
                 device: staging,
@@ -1046,6 +1046,27 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         }
 
         Ok(())
+    }
+
+    fn ensure_allocate_texture(&mut self, reg_texture: Texture) -> Result<DeviceTexture, LaunchError> {
+        let texture_format = self.make_texture_descriptor(reg_texture)?;
+
+        if let Some(texture_map) = self.texture_map.get(&reg_texture) {
+            return Ok(texture_map.device);
+        }
+
+        let texture = {
+            let texture = self.textures;
+            self.push(Low::Texture(texture_format.clone()))?;
+            DeviceTexture(texture)
+        };
+
+        self.texture_map.insert(reg_texture, TextureMap {
+            device: texture,
+            format: texture_format.clone(),
+        });
+
+        Ok(texture)
     }
 
     fn ingest_image_data(&mut self, idx: Register) -> Result<Texture, LaunchError> {
@@ -1196,11 +1217,18 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
-    fn texture_view(&mut self, descriptor: TextureViewDescriptor) -> usize {
+    fn texture_view(&mut self, dst: Texture) -> Result<usize, LaunchError> {
+        let texture = self.texture_map.get(&dst)
+            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
+            .device;
+
+        let descriptor = TextureViewDescriptor { texture };
+
         self.instructions.extend_one(Low::TextureView(descriptor));
         let id = self.texture_views;
         self.texture_views += 1;
-        id
+
+        Ok(id)
     }
 
     fn make_paint_group(&mut self) -> usize {
@@ -1235,12 +1263,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         *self.paint_pipeline_layout.get_or_insert_with(|| {
             let descriptor = PipelineLayoutDescriptor {
                 bind_group_layouts: vec![bind_group],
-                push_constant_ranges: &[
-                    wgpu::PushConstantRange {
-                        stages: wgpu::ShaderStage::FRAGMENT,
-                        range: 0..16,
-                    },
-                ],
+                push_constant_ranges: &[]
             };
 
             instructions.extend_one(Low::PipelineLayout(descriptor));
@@ -1251,10 +1274,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     fn shader(&mut self, desc: ShaderDescriptor) -> Result<usize, LaunchError> {
-        if !self.is_in_command_encoder {
-            return Err(LaunchError::InternalCommandError(line!()));
-        }
-
         self.instructions.extend_one(Low::Shader(desc));
         let idx = self.shaders;
         self.shaders += 1;
@@ -1268,9 +1287,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             return Ok(shader);
         }
 
-        let flags = 0;
-
-        let shader_idx = self.shaders;
         self.shader(ShaderDescriptor {
             name: "",
             flags: wgpu::ShaderFlags::empty(),
@@ -1292,7 +1308,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
-    fn simple_quad_buffer(&mut self) -> usize {
+    fn simple_quad_buffer(&mut self) -> DeviceBuffer {
         let buffers = &mut self.buffers;
         let instructions = &mut self.instructions;
         *self.simple_quad_buffer.get_or_insert_with(|| {
@@ -1313,7 +1329,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             let buffer = *buffers;
             *buffers += 1;
-            buffer
+            DeviceBuffer(buffer)
         })
     }
     
@@ -1349,27 +1365,43 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     /// Render the pipeline, after all customization and buffers were bound..
-    fn render_simple_pipeline(&mut self, texture: Texture, vertex: usize, fragment: usize)
-        -> Result<(), LaunchError>
+    fn prepare_simple_pipeline(&mut self, texture: Texture, vertex: usize, fragment: usize)
+        -> Result<RenderableOncePipeline, LaunchError>
     {
         let format = self.texture_map[&texture].format.format;
 
         let buffer = self.simple_quad_buffer();
-        let render = self.simple_render_pipeline(vertex, fragment, format)?;
+        let pipeline = self.simple_render_pipeline(vertex, fragment, format)?;
 
-        self.push(Low::SetPipeline(render))?;
+        Ok(RenderableOncePipeline {
+            pipeline,
+            buffer,
+            vertices: 6,
+        })
+    }
+
+    fn render(&mut self, pipeline: RenderableOncePipeline) -> Result<(), LaunchError> {
+        let RenderableOncePipeline {
+            pipeline,
+            buffer,
+            vertices,
+        } = pipeline;
+
+        self.push(Low::SetPipeline(pipeline))?;
 
         self.push(Low::SetVertexBuffer {
-            buffer,
+            buffer: buffer.0,
             slot: 0,
         })?;
 
-        self.push(Low::DrawOnce { vertices: 6 })?;
+        self.push(Low::DrawOnce { vertices })?;
 
         Ok(())
     }
 
-    fn render(&mut self, texture: Texture, function: &Function) -> Result<(), LaunchError> {
+    fn prepare_render(&mut self, texture: Texture, function: &Function)
+        -> Result<RenderableOncePipeline, LaunchError>
+    {
         match function {
             Function::PaintOnTop { lower_region, upper_region, paint_on_top } => {
                 let vertex = self.vertex_shader(
@@ -1381,7 +1413,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     Some(FragmentShader::PaintOnTop(paint_on_top.clone())),
                     shader_include_to_spirv(fragment))?;
 
-                self.render_simple_pipeline(texture, vertex, fragment)
+                self.prepare_simple_pipeline(texture, vertex, fragment)
             },
         }
     }
@@ -1406,7 +1438,7 @@ impl BufferUsage {
     pub fn to_wgpu(self) -> wgpu::BufferUsage {
         use wgpu::BufferUsage as U;
         match self {
-            BufferUsage::InVertices => U::MAP_WRITE | U::VERTEX,
+            BufferUsage::InVertices => U::COPY_DST | U::VERTEX,
             BufferUsage::DataIn => U::MAP_WRITE | U::COPY_SRC,
             BufferUsage::DataOut => U::MAP_READ | U::COPY_DST,
             BufferUsage::DataBuffer => {

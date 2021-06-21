@@ -190,8 +190,9 @@ impl Execution {
                 Ok(SyncPoint::NO_SYNC)
             }
             Low::TextureView(desc) => {
+                dbg!(desc);
                 let texture = self.descriptors.textures
-                    .get(desc.texture)
+                    .get(desc.texture.0)
                     .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                 let desc = wgpu::TextureViewDescriptor {
                     label: None,
@@ -671,7 +672,7 @@ impl Machine {
                 }
                 Low::EndRenderPass => return Ok(()),
                 inner => return Err(StepError::BadInstruction(BadInstruction {
-                    inner: format!("{:?}", inner),
+                    inner: format!("Unexpectedly within render pass: {:?}", inner),
                 })),
             }
         }
