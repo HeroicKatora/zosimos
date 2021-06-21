@@ -1,6 +1,11 @@
-use core::{iter::once, num::NonZeroU32};
+use core::{
+    future::Future,
+    iter::once,
+    num::NonZeroU32,
+    pin::Pin,
+};
 
-use crate::buffer::BufferLayout;
+use crate::buffer::{BufferLayout, Descriptor, Texel};
 use crate::command::{Rectangle, Register};
 use crate::pool::{ImageData, Pool, PoolImage, PoolKey};
 use crate::program::{self, DeviceBuffer, DeviceTexture, Low};
@@ -61,6 +66,11 @@ pub(crate) struct PaintRectFragment {
 
 type DynStep = dyn core::future::Future<Output=Result<Cleanup, StepError>>;
 
+struct DevicePolled<'exe> {
+    future: Pin<Box<DynStep>>,
+    execution: &'exe mut Execution,
+}
+
 enum Cleanup {
     Buffers {
         buffers: Vec<wgpu::Buffer>,
@@ -68,9 +78,9 @@ enum Cleanup {
     }
 }
 
-pub struct SyncPoint<'a> {
-    future: Option<(core::pin::Pin<Box<DynStep>>, &'a mut Execution)>,
-    marker: core::marker::PhantomData<&'a mut Execution>,
+pub struct SyncPoint<'exe> {
+    future: Option<DevicePolled<'exe>>,
+    marker: core::marker::PhantomData<&'exe mut Execution>,
 }
 
 /// Represents a stopped execution instance, without information abouts its outputs.
@@ -105,14 +115,14 @@ pub enum RetireError {
 impl Execution {
     pub(crate) fn new(init: InitialState) -> Self {
         Execution {
-            machine: Machine::new(dbg!(init.instructions)),
+            machine: Machine::new(init.instructions),
             gpu: Gpu {
                 device: init.device,
                 queue: init.queue,
                 modules: vec![],
             },
             descriptors: Descriptors::default(),
-            buffers: dbg!(init.buffers),
+            buffers: init.buffers,
             command_encoder: None,
         }
     }
@@ -123,7 +133,7 @@ impl Execution {
     }
 
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
-        match dbg!(self.machine.next_instruction()?) {
+        match self.machine.next_instruction()? {
             Low::BindGroupLayout(desc) => {
                 let mut entry_buffer = vec![];
                 let group = self.descriptors.bind_group_layout(desc, &mut entry_buffer)?;
@@ -200,7 +210,6 @@ impl Execution {
                 Ok(SyncPoint::NO_SYNC)
             }
             Low::TextureView(desc) => {
-                dbg!(desc);
                 let texture = self.descriptors.textures
                     .get(desc.texture.0)
                     .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
@@ -343,7 +352,7 @@ impl Execution {
                 let extent = wgpu::Extent3d {
                     width: size.0,
                     height: size.1,
-                    depth_or_array_layers: 0,
+                    depth_or_array_layers: 1,
                 };
 
                 encoder.copy_buffer_to_texture(
@@ -370,7 +379,7 @@ impl Execution {
                 let extent = wgpu::Extent3d {
                     width: size.0,
                     height: size.1,
-                    depth_or_array_layers: 0,
+                    depth_or_array_layers: 1,
                 };
 
                 encoder.copy_texture_to_buffer(
@@ -428,7 +437,6 @@ impl Execution {
                             .await
                             .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
 
-                        eprintln!("Got buffer..");
                         let data = slice.get_mapped_range();
 
                         // TODO: defensive programming, don't assume cast works.
@@ -440,7 +448,6 @@ impl Execution {
                         let target: &mut [u8] = image.as_bytes_mut().unwrap();
 
                         for x in 0..height {
-                            eprintln!("{}", x);
                             let source_row = &source[(x as usize * source_pitch)..][..source_pitch];
                             let target_row = &mut target[(x as usize * target_pitch)..][..target_pitch];
 
@@ -455,7 +462,10 @@ impl Execution {
                 };
 
                 Ok(SyncPoint {
-                    future: Some((Box::pin(box_me), self)),
+                    future: Some(DevicePolled {
+                        future: Box::pin(box_me),
+                        execution: self,
+                    }),
                     marker: core::marker::PhantomData,
                 })
             }
@@ -587,10 +597,10 @@ impl Descriptors {
                 .get(desc.layout),
             vertex: self.vertex_state(&desc.vertex, vertex_buffers)?,
             primitive: match desc.primitive {
-                program::PrimitiveState::SoleQuad => wgpu::PrimitiveState {
+                program::PrimitiveState::TriangleStrip => wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleStrip,
                     strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
+                    front_face: wgpu::FrontFace::Cw,
                     cull_mode: None,
                     clamp_depth: false,
                     polygon_mode: wgpu::PolygonMode::Fill,
@@ -634,6 +644,17 @@ impl Descriptors {
         buf: &'set mut Vec<wgpu::VertexBufferLayout<'set>>,
     ) -> Result<wgpu::VertexState<'set>, StepError> {
         buf.clear();
+        buf.push(wgpu::VertexBufferLayout {
+            array_stride: 8,
+            step_mode: wgpu::InputStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 0,
+                    shader_location: 0,
+                }
+            ],
+        });
         Ok(wgpu::VertexState {
             module: self.modules
                 .get(desc.vertex_module)
@@ -705,7 +726,7 @@ impl Machine {
         mut pass: wgpu::RenderPass<'pass>,
     ) -> Result<(), StepError> {
         loop {
-            match dbg!(self.next_instruction()?) {
+            match self.next_instruction()? {
                 &Low::SetPipeline(idx) => {
                     let pipeline = descriptors.render_pipelines
                         .get(idx)
@@ -746,9 +767,9 @@ impl Retire<'_> {
     pub fn output(&mut self, _: Register) -> Result<PoolImage<'_>, RetireError> {
         let data = self.execution.buffers.pop().unwrap();
 
-        let descriptor = crate::buffer::Descriptor {
+        let descriptor = Descriptor {
             layout: data.layout().clone(),
-            texel: crate::buffer::Texel::with_srgb_image(&image::DynamicImage::ImageRgb8(Default::default())),
+            texel: Texel::with_srgb_image(&image::DynamicImage::ImageRgba8(Default::default())),
         };
 
         let mut image = self.pool.declare(descriptor);
@@ -763,15 +784,21 @@ impl Retire<'_> {
 }
 
 impl SyncPoint<'_> {
+    /// Block on synchronization, finishing device work.
+    ///
+    /// This will also poll the device if required (on native targets).
     pub fn block_on(&mut self) -> Result<(), StepError> {
         use crate::program::block_on;
         match self.future.take() {
             None => Ok(()),
-            Some((fut, execution)) => match block_on(fut)? {
-                Cleanup::Buffers { buffers, image_data } => {
-                    execution.descriptors.buffers = buffers;
-                    execution.buffers = image_data;
-                    Ok(())
+            Some(polled) => {
+                let execution = polled.execution;
+                match block_on(polled.future, Some(&execution.gpu.device))? {
+                    Cleanup::Buffers { buffers, image_data } => {
+                        execution.descriptors.buffers = buffers;
+                        execution.buffers = image_data;
+                        Ok(())
+                    }
                 }
             },
         }

@@ -149,7 +149,12 @@ impl ImageData {
 
 impl PoolImage<'_> {
     pub fn to_image(&self) -> Option<image::DynamicImage> {
-        todo!()
+        let data = self.as_bytes()?.to_vec();
+        let layout = self.layout();
+        // FIXME: don't assume RGBA8.
+        let image = image::ImageBuffer::from_vec(layout.width, layout.height, data)
+            .expect("Should be fine lmao");
+        Some(image::DynamicImage::ImageRgba8(image))
     }
 
     pub fn key(&self) -> PoolKey {

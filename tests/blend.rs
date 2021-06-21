@@ -43,7 +43,7 @@ fn run_blending() {
     // 0: in (background)
     // 1: in (foreground)
     // 2: inscribe(0, placement, 1)
-    // 3: out(3)
+    // 3: out(2)
     let background = commands.input(background).unwrap();
     let foreground = commands.input(foreground).unwrap();
     let result = commands.inscribe(background, placement, foreground)

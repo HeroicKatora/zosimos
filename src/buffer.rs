@@ -433,12 +433,12 @@ impl BufferLayout {
 
     pub fn u64_len(&self) -> u64 {
         // No overflow due to inner invariant.
-        u64::from(self.width) * u64::from(self.height) * u64::from(self.bytes_per_texel)
+        u64::from(self.bytes_per_row) * u64::from(self.height)
     }
 
     pub fn byte_len(&self) -> usize {
         // No overflow due to inner invariant.
-        (self.width as usize) * (self.height as usize) * usize::from(self.bytes_per_texel)
+        (self.bytes_per_row as usize) * (self.height as usize)
     }
 }
 

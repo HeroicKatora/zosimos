@@ -1,4 +1,4 @@
-use core::{num::NonZeroU32, ops::Range};
+use core::{future::Future, num::NonZeroU32, ops::Range};
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -55,7 +55,7 @@ pub(crate) enum PaintOnTopKind {
     Copy,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone, Debug, Default)]
 pub struct ImageBufferPlan {
     pub(crate) texture: Vec<Descriptor>,
     pub(crate) buffer: Vec<BufferLayout>,
@@ -64,7 +64,7 @@ pub struct ImageBufferPlan {
 }
 
 /// Contains the data on how images relate to the launcher's pool.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct ImagePoolPlan {
     /// Maps registers to the pool image we took it from.
     pub(crate) plan: HashMap<Register, PoolKey>,
@@ -72,7 +72,7 @@ pub struct ImagePoolPlan {
     pub(crate) buffer: HashMap<PoolKey, Texture>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ImageBufferAssignment {
     pub(crate) texture: Texture,
     pub(crate) buffer: Buffer,
@@ -116,6 +116,7 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     pool_plan: ImagePoolPlan,
     paint_group_layout: Option<usize>,
     paint_pipeline_layout: Option<usize>,
+    default_sampler: Option<usize>,
     fragment_shaders: HashMap<FragmentShader, usize>,
     vertex_shaders: HashMap<VertexShader, usize>,
     simple_quad_buffer: Option<DeviceBuffer>,
@@ -398,7 +399,7 @@ pub(crate) struct VertexState {
 
 #[derive(Debug)]
 pub(crate) enum PrimitiveState {
-    SoleQuad,
+    TriangleStrip,
 }
 
 #[derive(Debug)]
@@ -679,11 +680,11 @@ impl Launcher<'_> {
         -> Result<Self, LaunchError>
     {
         for high in &self.program.ops {
-            if let &High::Output(register) = high {
+            if let &High::Output { src: register, dst } = high {
                 let assigned = &self.program.textures.by_register[register.0];
                 let descriptor = &self.program.textures.texture[assigned.texture.0];
                 let key = self.pool_plan.choose_output(&mut *self.pool, descriptor);
-                self.pool_plan.plan.insert(register, key);
+                self.pool_plan.plan.insert(dst, key);
             }
         }
 
@@ -706,7 +707,7 @@ impl Launcher<'_> {
         // Bind remaining outputs.
         self = self.bind_remaining_outputs()?;
 
-        let (device, queue) = match block_on(request) {
+        let (device, queue) = match block_on(request, None) {
             Ok(tuple) => tuple,
             Err(_) => return Err(LaunchError::InternalCommandError(line!())),
         };
@@ -730,11 +731,11 @@ impl Launcher<'_> {
                     encoder.copy_input_to_buffer(dst)?;
                     encoder.copy_buffer_to_staging(dst)?;
                 }
-                &High::Output(dst) => {
+                &High::Output { src, dst } => {
                     // Identify if we need to transform the texture from the internal format to the
                     // one actually chosen for this texture.
-                    encoder.copy_staging_to_buffer(dst)?;
-                    encoder.copy_buffer_to_output(dst)?;
+                    encoder.copy_staging_to_buffer(src)?;
+                    encoder.copy_buffer_to_output(src, dst)?;
                 }
                 High::Construct { dst, op } => {
                     todo!()
@@ -747,14 +748,14 @@ impl Launcher<'_> {
                     encoder.ensure_allocate_texture(dst_texture)?;
                     encoder.copy_staging_to_texture(*texture)?;
 
-                    let layout = encoder.make_paint_layout();
                     let dst_view = encoder.texture_view(dst_texture)?;
+                    // eprintln!("tex{:?} +> tex{:?}", texture, dst_texture);
 
                     let ops = match dst {
                         Target::Discard(_) => {
                             wgpu::Operations {
                                 // TODO: we could let choose a replacement color..
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                load: wgpu::LoadOp::Clear(wgpu::Color::RED),
                                 store: true,
                             }
                         },
@@ -947,7 +948,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         fn validate_size(layout: &BufferLayout) -> Option<(NonZeroU32, NonZeroU32)> {
             Some((
                 NonZeroU32::new(layout.width)?,
-                NonZeroU32::new(layout.width)?,
+                NonZeroU32::new(layout.height)?,
             ))
         }
 
@@ -1147,6 +1148,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             size,
             target_texture: regmap.texture,
         })?;
+        // eprintln!("buf{:?} -> tex{:?} ({:?})", regmap.buffer, regmap.texture, size);
+
         self.push(Low::EndCommands)?;
         // TODO: maybe also don't run it immediately?
         self.push(Low::RunTopCommand)?;
@@ -1180,6 +1183,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let regmap = self.allocate_register(idx)?.clone();
         let descriptor = &self.buffer_plan.texture[regmap.texture.0];
         let size = descriptor.size();
+        // eprintln!("tex{:?} -> buf{:?} ({:?})", regmap.texture, regmap.buffer, size);
 
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyTextureToBuffer {
@@ -1197,9 +1201,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     /// Copy the memory buffer to the output.
-    fn copy_buffer_to_output(&mut self, idx: Register) -> Result<(), LaunchError> {
+    fn copy_buffer_to_output(&mut self, idx: Register, dst: Register)
+        -> Result<(), LaunchError>
+    {
         let regmap = self.allocate_register(idx)?.clone();
-        let target_image = self.ingest_image_data(idx)?;
+        let target_image = self.ingest_image_data(dst)?;
         let descriptor = &self.buffer_plan.texture[regmap.texture.0];
 
         let size = descriptor.size();
@@ -1216,10 +1222,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 size: sizeu64,
                 target_buffer: map_read,
             })?;
+            // eprintln!("buf{:?} -> buf{:?} ({})", regmap.buffer, map_read, sizeu64);
             self.push(Low::EndCommands)?;
             // TODO: maybe also don't run it immediately?
             self.push(Low::RunTopCommand)?;
         }
+        // eprintln!("buf{:?} -> img{:?} ({:?})", source_buffer, target_image, size);
 
         self.push(Low::ReadBuffer {
             source_buffer,
@@ -1234,6 +1242,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let texture = self.texture_map.get(&dst)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
             .device;
+        // eprintln!("tex{:?} == tex{:?}", dst, texture);
 
         let descriptor = TextureViewDescriptor { texture };
 
@@ -1254,11 +1263,18 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                         binding: 0,
                         visibility: wgpu::ShaderStage::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float {
-                                filterable: true,
-                            },
-                            view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler {
+                            filtering: true,
+                            comparison: false,
                         },
                         count: None,
                     },
@@ -1331,10 +1347,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         *self.simple_quad_buffer.get_or_insert_with(|| {
             // Sole quad!
             let content: &'static [f32; 8] = &[
-                0.0, 0.0,
-                0.0, 1.0,
+                1.0, -1.0, 
                 1.0, 1.0,
-                1.0, 0.0,
+                -1.0, -1.0,
+                -1.0, 1.0,
             ];
 
             let descriptor = BufferDescriptorInit {
@@ -1367,12 +1383,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 entry_point: "main",
                 fragment_module: fragment,
                 targets: vec![wgpu::ColorTargetState {
-                    blend: None,
+                    blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrite::ALL,
                     format,
                 }],
             },
-            primitive: PrimitiveState::SoleQuad,
+            primitive: PrimitiveState::TriangleStrip,
             layout,
         }));
 
@@ -1386,11 +1402,27 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     {
         let view = self.texture_view(texture)?;
 
+        let sampler = {
+            let instructions = &mut self.instructions;
+            let sampler = &mut self.sampler;
+            *self.default_sampler.get_or_insert_with(|| {
+                let sampler_id = *sampler;
+                instructions.extend_one(Low::Sampler(SamplerDescriptor {
+                    address_mode: wgpu::AddressMode::default(),
+                    border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+                    resize_filter: wgpu::FilterMode::Linear,
+                }));
+                *sampler += 1;
+                sampler_id
+            })
+        };
+
         let group = self.bind_groups;
         let descriptor = BindGroupDescriptor {
             layout_idx: self.make_paint_group(),
             entries: vec![
                 BindingResource::TextureView(view),
+                BindingResource::Sampler(sampler),
             ],
         };
 
@@ -1413,7 +1445,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             pipeline,
             buffer,
             group,
-            vertices: 6,
+            vertices: 4,
         })
     }
 
@@ -1436,6 +1468,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.push(Low::SetVertexBuffer {
             buffer: buffer.0,
             slot: 0,
+        })?;
+
+        self.push(Low::SetVertexBuffer {
+            buffer: buffer.0,
+            slot: 1,
         })?;
 
         self.push(Low::DrawOnce { vertices })?;
@@ -1503,16 +1540,16 @@ impl LaunchError {
     }
 }
 
-pub(crate) fn block_on<F, T>(future: F) -> T
+/// Block on an async future that may depend on a device being polled.
+pub(crate) fn block_on<F, T>(future: F, device: Option<&wgpu::Device>) -> T
 where
-    F: core::future::Future<Output = T> + 'static
+    F: Future<Output = T> + 'static
 {
     #[cfg(target_arch = "wasm32")] {
         use std::rc::Rc;
         use core::cell::RefCell;
 
         async fn the_thing<F, T>(future: F, buffer: Rc<RefCell<Option<T>>>) {
-            eprintln!("Waiting on thing");
             let result = future.await;
             *buffer.borrow_mut() = result;
         }
@@ -1526,7 +1563,34 @@ where
     }
 
     #[cfg(not(target_arch = "wasm32"))] {
-        eprintln!("Waiting on thing");
-        async_io::block_on(future)
+        if let Some(device) = device {
+            // We have to manually poll the device.  That is, we ensure that it keeps being polled
+            // and each time will also poll the device. This isn't super efficient but a dirty way
+            // to actually finish this future.
+            struct DevicePolled<'dev, F> {
+                future: F,
+                device: &'dev wgpu::Device,
+            }
+
+            impl<F: Future> Future for DevicePolled<'_, F> {
+                type Output = F::Output;
+                fn poll(self: core::pin::Pin<&mut Self>, ctx: &mut core::task::Context)
+                    -> core::task::Poll<F::Output>
+                {
+                    self.as_ref().device.poll(wgpu::Maintain::Poll);
+                    // Ugh, noooo...
+                    ctx.waker().wake_by_ref();
+                    let future = unsafe { self.map_unchecked_mut(|this| &mut this.future) };
+                    future.poll(ctx)
+                }
+            }
+
+            async_io::block_on(DevicePolled {
+                future,
+                device,
+            })
+        } else {
+            async_io::block_on(future)
+        }
     }
 }

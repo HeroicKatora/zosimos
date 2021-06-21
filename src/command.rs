@@ -88,7 +88,12 @@ pub(crate) enum High {
     /// pool into the associated texture buffer.
     Input(Register, Descriptor),
     /// Designate the ith textures as output n, according to the position in sequence of outputs.
-    Output(Register),
+    Output {
+        /// The source register/texture/buffers.
+        src: Register,
+        /// The target texture.
+        dst: Register,
+    },
     #[deprecated = "Should be mapped to of paint with a discarding load or another buffer initialization."]
     Construct {
         dst: Texture,
@@ -430,15 +435,17 @@ impl CommandBuffer {
 
             let ImageBufferAssignment { buffer, texture }
                 = textures.allocate_for(descriptor, liveness);
-            dbg!(idx, buffer, texture);
 
             match op {
                 Op::Input { desc } => {
                     high_ops.push(High::Input(Register(idx), desc.clone()));
                     reg_to_texture.insert(Register(idx), texture);
                 }
-                Op::Output { src: _ } => {
-                    high_ops.push(High::Output(Register(idx)));
+                &Op::Output { src } => {
+                    high_ops.push(High::Output {
+                        src,
+                        dst: Register(idx),
+                    });
                 }
                 Op::Construct { desc: _, op } => {
                     high_ops.push(High::Construct {
