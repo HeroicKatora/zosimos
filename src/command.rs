@@ -422,8 +422,12 @@ impl CommandBuffer {
 
         for (idx, op) in self.ops.iter().enumerate() {
             let liveness = first_use[idx]..last_use[idx];
-            let descriptor = self.describe_reg(Register(idx))
-                .unwrap_or(&Descriptor::EMPTY);
+            let descriptor = self.describe_reg(if let &Op::Output { src } = op {
+                src
+            } else {
+                Register(idx)
+            }).expect("A non-output register");
+
             let ImageBufferAssignment { buffer, texture }
                 = textures.allocate_for(descriptor, liveness);
             dbg!(idx, buffer, texture);
@@ -433,17 +437,17 @@ impl CommandBuffer {
                     high_ops.push(High::Input(Register(idx), desc.clone()));
                     reg_to_texture.insert(Register(idx), texture);
                 }
-                Op::Output { src } => {
+                Op::Output { src: _ } => {
                     high_ops.push(High::Output(Register(idx)));
                 }
-                Op::Construct { desc, op } => {
+                Op::Construct { desc: _, op } => {
                     high_ops.push(High::Construct {
                         dst: texture,
                         op: op.clone(),
                     });
                     reg_to_texture.insert(Register(idx), texture);
                 }
-                Op::Unary { src, desc, op } => {
+                Op::Unary { desc: _, src, op } => {
                     match op {
                         &UnaryOp::Crop(region) => {
                             high_ops.push(High::Paint {
@@ -461,7 +465,7 @@ impl CommandBuffer {
 
                     reg_to_texture.insert(Register(idx), texture);
                 }
-                Op::Binary { desc, lhs, rhs, op } => {
+                Op::Binary { desc: _, lhs, rhs, op } => {
                     let lower_region = [
                         Rectangle::from(self.describe_reg(*lhs).unwrap()),
                         Rectangle::from(self.describe_reg(*rhs).unwrap()),

@@ -258,7 +258,7 @@ impl<'pool> Iterator for IterMut<'pool> {
 }
 
 impl ImageData {
-    fn layout(&self) -> &BufferLayout {
+    pub(crate) fn layout(&self) -> &BufferLayout {
         match self {
             ImageData::Host(canvas) => canvas.layout(),
             ImageData::Gpu(_, layout) => layout,

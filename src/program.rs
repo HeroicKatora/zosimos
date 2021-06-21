@@ -1,6 +1,8 @@
-use core::ops::Range;
+use core::{num::NonZeroU32, ops::Range};
+
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+
 use crate::command::{High, Rectangle, Register, Target};
 use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor};
 use crate::pool::{ImageData, Pool, PoolKey};
@@ -451,7 +453,8 @@ pub(crate) enum BufferUsage {
 /// Ignores mip level, sample count, and some usages.
 #[derive(Clone, Debug)]
 pub(crate) struct TextureDescriptor {
-    pub size: (u32, u32),
+    /// The size, not that zero-sized textures have to be emulated by us.
+    pub size: (NonZeroU32, NonZeroU32),
     pub format: wgpu::TextureFormat,
     pub usage: TextureUsage,
 }
@@ -538,6 +541,7 @@ pub struct Launcher<'program> {
 struct RenderableOncePipeline {
     pipeline: usize,
     buffer: DeviceBuffer,
+    group: usize,
     vertices: u32,
 }
 
@@ -939,7 +943,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         -> Result<TextureDescriptor, LaunchError>
     {
         let descriptor = &self.buffer_plan.texture[texture.0];
-        let size = (descriptor.layout.width, descriptor.layout.height);
+
+        fn validate_size(layout: &BufferLayout) -> Option<(NonZeroU32, NonZeroU32)> {
+            Some((
+                NonZeroU32::new(layout.width)?,
+                NonZeroU32::new(layout.width)?,
+            ))
+        }
+
+        let size = validate_size(&descriptor.layout)
+            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
         let format = match descriptor.texel.color {
             Color::SRGB => wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -977,7 +990,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let descriptor = &self.buffer_plan.texture[reg_texture.0];
 
         let bytes_per_row = (descriptor.layout.bytes_per_texel as u32)
-            .checked_mul(texture_format.size.0)
+            .checked_mul(texture_format.size.0.get())
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
         let bytes_per_row = (bytes_per_row/256 + u32::from(bytes_per_row%256 != 0))
             .checked_mul(256)
@@ -985,8 +998,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let buffer_layout = BufferLayout {
             bytes_per_texel: descriptor.layout.bytes_per_texel,
-            width: texture_format.size.0,
-            height: texture_format.size.1,
+            width: texture_format.size.0.get(),
+            height: texture_format.size.1.get(),
             bytes_per_row,
         };
 
@@ -1240,9 +1253,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStage::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler {
-                            filtering: true,
-                            comparison: true,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float {
+                                filterable: true,
+                            },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
                         },
                         count: None,
                     },
@@ -1260,6 +1276,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let bind_group = self.make_paint_group();
         let layouts = &mut self.pipeline_layouts;
         let instructions = &mut self.instructions;
+
         *self.paint_pipeline_layout.get_or_insert_with(|| {
             let descriptor = PipelineLayoutDescriptor {
                 bind_group_layouts: vec![bind_group],
@@ -1364,6 +1381,23 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(pipeline)
     }
 
+    fn make_bind_group_sampled_texture(&mut self, texture: Texture)
+        -> Result<usize, LaunchError>
+    {
+        let view = self.texture_view(texture)?;
+
+        let group = self.bind_groups;
+        let descriptor = BindGroupDescriptor {
+            layout_idx: self.make_paint_group(),
+            entries: vec![
+                BindingResource::TextureView(view),
+            ],
+        };
+
+        self.push(Low::BindGroup(descriptor))?;
+        Ok(group)
+    }
+
     /// Render the pipeline, after all customization and buffers were bound..
     fn prepare_simple_pipeline(&mut self, texture: Texture, vertex: usize, fragment: usize)
         -> Result<RenderableOncePipeline, LaunchError>
@@ -1373,9 +1407,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let buffer = self.simple_quad_buffer();
         let pipeline = self.simple_render_pipeline(vertex, fragment, format)?;
 
+        let group = self.make_bind_group_sampled_texture(texture)?;
+
         Ok(RenderableOncePipeline {
             pipeline,
             buffer,
+            group,
             vertices: 6,
         })
     }
@@ -1383,11 +1420,18 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn render(&mut self, pipeline: RenderableOncePipeline) -> Result<(), LaunchError> {
         let RenderableOncePipeline {
             pipeline,
+            group,
             buffer,
             vertices,
         } = pipeline;
 
         self.push(Low::SetPipeline(pipeline))?;
+
+        self.push(Low::SetBindGroup {
+            group,
+            index: 0,
+            offsets: Cow::Borrowed(&[]),
+        })?;
 
         self.push(Low::SetVertexBuffer {
             buffer: buffer.0,
@@ -1459,7 +1503,7 @@ impl LaunchError {
     }
 }
 
-fn block_on<F, T>(future: F) -> T
+pub(crate) fn block_on<F, T>(future: F) -> T
 where
     F: core::future::Future<Output = T> + 'static
 {
@@ -1468,6 +1512,7 @@ where
         use core::cell::RefCell;
 
         async fn the_thing<F, T>(future: F, buffer: Rc<RefCell<Option<T>>>) {
+            eprintln!("Waiting on thing");
             let result = future.await;
             *buffer.borrow_mut() = result;
         }
@@ -1481,6 +1526,7 @@ where
     }
 
     #[cfg(not(target_arch = "wasm32"))] {
+        eprintln!("Waiting on thing");
         async_io::block_on(future)
     }
 }

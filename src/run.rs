@@ -59,7 +59,17 @@ pub(crate) struct PaintRectFragment {
     fragment_shader: &'static [u8],
 }
 
+type DynStep = dyn core::future::Future<Output=Result<Cleanup, StepError>>;
+
+enum Cleanup {
+    Buffers {
+        buffers: Vec<wgpu::Buffer>,
+        image_data: Vec<ImageData>,
+    }
+}
+
 pub struct SyncPoint<'a> {
+    future: Option<(core::pin::Pin<Box<DynStep>>, &'a mut Execution)>,
     marker: core::marker::PhantomData<&'a mut Execution>,
 }
 
@@ -213,8 +223,8 @@ impl Execution {
                 let desc = wgpu::TextureDescriptor {
                     label: None,
                     size: wgpu::Extent3d {
-                        width: desc.size.0,
-                        height: desc.size.1,
+                        width: desc.size.0.get(),
+                        height: desc.size.1.get(),
                         depth_or_array_layers: 1
                     },
                     mip_level_count: 1,
@@ -393,8 +403,61 @@ impl Execution {
                 Ok(SyncPoint::NO_SYNC)
             }
             &Low::ReadBuffer { source_buffer, ref source_layout, offset, size, target_image } => {
-                let buffer = self.descriptors.buffer(source_buffer, source_layout)?;
-                todo!()
+                let mut buffers = core::mem::take(&mut self.descriptors.buffers);
+                let mut image_data = core::mem::take(&mut self.buffers);
+
+                if offset != (0, 0) {
+                    return Err(StepError::InvalidInstruction(line!()));
+                }
+
+                if size != (source_layout.width, source_layout.height) {
+                    return Err(StepError::InvalidInstruction(line!()));
+                }
+
+                let (width, height) = size;
+                let bytes_per_row = source_layout.bytes_per_row;
+                let bytes_per_texel = source_layout.bytes_per_texel;
+
+                let box_me = async move {
+                    {
+                        let buffer = &buffers[source_buffer.0];
+                        let image = &mut image_data[target_image.0];
+
+                        let slice = buffer.slice(..);
+                        slice.map_async(wgpu::MapMode::Read)
+                            .await
+                            .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
+
+                        eprintln!("Got buffer..");
+                        let data = slice.get_mapped_range();
+
+                        // TODO: defensive programming, don't assume cast works.
+                        let source_pitch = bytes_per_row as usize;
+                        let target_pitch = image.layout().bytes_per_row as usize;
+                        let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
+
+                        let source: &[u8] = &data[..];
+                        let target: &mut [u8] = image.as_bytes_mut().unwrap();
+
+                        for x in 0..height {
+                            eprintln!("{}", x);
+                            let source_row = &source[(x as usize * source_pitch)..][..source_pitch];
+                            let target_row = &mut target[(x as usize * target_pitch)..][..target_pitch];
+
+                            target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
+                        }
+                    }
+
+                    Ok(Cleanup::Buffers {
+                        buffers,
+                        image_data,
+                    })
+                };
+
+                Ok(SyncPoint {
+                    future: Some((Box::pin(box_me), self)),
+                    marker: core::marker::PhantomData,
+                })
             }
             inner => return Err(StepError::BadInstruction(BadInstruction {
                 inner: format!("{:?}", inner),
@@ -642,7 +705,7 @@ impl Machine {
         mut pass: wgpu::RenderPass<'pass>,
     ) -> Result<(), StepError> {
         loop {
-            match self.next_instruction()? {
+            match dbg!(self.next_instruction()?) {
                 &Low::SetPipeline(idx) => {
                     let pipeline = descriptors.render_pipelines
                         .get(idx)
@@ -680,8 +743,18 @@ impl Machine {
 }
 
 impl Retire<'_> {
-    pub fn output(&self, _: Register) -> Result<PoolImage<'_>, RetireError> {
-        todo!()
+    pub fn output(&mut self, _: Register) -> Result<PoolImage<'_>, RetireError> {
+        let data = self.execution.buffers.pop().unwrap();
+
+        let descriptor = crate::buffer::Descriptor {
+            layout: data.layout().clone(),
+            texel: crate::buffer::Texel::with_srgb_image(&image::DynamicImage::ImageRgb8(Default::default())),
+        };
+
+        let mut image = self.pool.declare(descriptor);
+        image.replace(data);
+
+        Ok(image.into())
     }
 
     pub fn output_key(&self, _: Register) -> Result<PoolKey, RetireError> {
@@ -690,5 +763,30 @@ impl Retire<'_> {
 }
 
 impl SyncPoint<'_> {
-    const NO_SYNC: Self = SyncPoint { marker: core::marker::PhantomData };
+    pub fn block_on(&mut self) -> Result<(), StepError> {
+        use crate::program::block_on;
+        match self.future.take() {
+            None => Ok(()),
+            Some((fut, execution)) => match block_on(fut)? {
+                Cleanup::Buffers { buffers, image_data } => {
+                    execution.descriptors.buffers = buffers;
+                    execution.buffers = image_data;
+                    Ok(())
+                }
+            },
+        }
+    }
+
+    const NO_SYNC: Self = SyncPoint {
+        future: None,
+        marker: core::marker::PhantomData,
+    };
+}
+
+impl Drop for SyncPoint<'_> {
+    fn drop(&mut self) {
+        if self.future.is_some() {
+            let _ = self.block_on();
+        }
+    }
 }

@@ -66,7 +66,7 @@ fn run_blending() {
         let _wait_point = execution.step().expect("Shouldn't fail but");
     }
 
-    let retire = execution
+    let mut retire = execution
         .retire_gracefully(&mut pool);
     let image = retire.output(result)
         .expect("A valid image output")
