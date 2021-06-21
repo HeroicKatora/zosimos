@@ -9,7 +9,7 @@ license = "MPL-2.0"
 bytemuck = "1.4"
 image-canvas = { path = "../image-canvas" }
 slotmap = "1"
-wgpu = "0.8"
+wgpu = "0.9"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 async-io = "1.3"
