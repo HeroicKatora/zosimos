@@ -321,20 +321,97 @@ impl Execution {
                 self.gpu.queue.submit(commands);
                 Ok(SyncPoint::NO_SYNC)
             }
-            &Low::WriteImageToBuffer { source_image, offset, size: _, target_buffer, ref target_layout } => {
+            &Low::WriteImageToBuffer { source_image, offset, size, target_buffer, ref target_layout } => {
                 if offset != (0, 0) {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let buffer = self.descriptors.buffer(target_buffer, target_layout)?;
-                let data = self.buffers.get(source_image.0)
-                    .ok_or(StepError::InvalidInstruction(line!()))?
-                    .as_bytes()
+                let source = self.buffers.get(source_image.0)
                     .ok_or(StepError::InvalidInstruction(line!()))?;
-                self.gpu.queue
-                    .write_buffer(buffer.buffer, 0, data);
 
-                Ok(SyncPoint::NO_SYNC)
+                if source.as_bytes().is_none() {
+                    return Err(StepError::InvalidInstruction(line!()));
+                }
+
+                let layout = source.layout().clone();
+
+                if (target_layout.width, target_layout.height) != (layout.width, layout.height) {
+                    return Err(StepError::InvalidInstruction(line!()));
+                }
+
+                /* FIXME: we could use this, which would integrate it in the next command encoder,
+                 * but this requires the target buffer to be COPY_DST which the read buffer is NOT.
+                 * In other words we would have to point to the image buffer directly. This is,
+                 * however, not quite desirable as it breaks the layering.
+                 * Instead, we could have the `program` module decide to to a direct write or the
+                 * encoder could fuse it in its `extend_one` call with limited lookback. Fun
+                 * optimization ideas.
+                if layout.bytes_per_row == target_layout.bytes_per_row {
+                    // Simply case, just write the whole buffer.
+                    self.gpu.queue.write_buffer(buffer.buffer, 0, data);
+                    return Ok(SyncPoint::NO_SYNC)
+                }
+                */
+
+                if size != (target_layout.width, target_layout.height) {
+                    // Not yet supported (or needed).
+                    return Err(StepError::InvalidInstruction(line!()));
+                }
+
+                let (width, height) = size;
+                let bytes_per_row = target_layout.bytes_per_row;
+                let bytes_per_texel = target_layout.bytes_per_texel;
+
+                // Complex case, we need to instrument our own copy.
+                let buffers = core::mem::take(&mut self.descriptors.buffers);
+                let mut image_data = core::mem::take(&mut self.buffers);
+
+                let box_me = async move {
+                    {
+                        let image = &mut image_data[source_image.0];
+                        let buffer = &buffers[target_buffer.0];
+
+                        let slice = buffer.slice(..);
+                        slice.map_async(wgpu::MapMode::Write)
+                            .await
+                            .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
+
+                        let mut data = slice.get_mapped_range_mut();
+
+                        // TODO: defensive programming, don't assume cast works.
+                        let target_pitch = bytes_per_row as usize;
+                        let source_pitch = image.layout().bytes_per_row as usize;
+                        let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
+
+                        // We've checked that this image can be seen as host bytes.
+                        let source: &[u8] = image.as_bytes().unwrap();
+                        let target : &mut [u8] = &mut data[..];
+
+                        for x in 0..height {
+                            let source_row = &source[(x as usize * source_pitch)..][..source_pitch];
+                            let target_row = &mut target[(x as usize * target_pitch)..][..target_pitch];
+
+                            target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
+                        }
+
+                    }
+
+                    buffers[target_buffer.0].unmap();
+
+                    Ok(Cleanup::Buffers {
+                        buffers,
+                        image_data,
+                    })
+                };
+
+                Ok(SyncPoint {
+                    future: Some(DevicePolled {
+                        future: Box::pin(box_me),
+                        execution: self,
+                    }),
+                    marker: core::marker::PhantomData,
+                })
+
             }
             &Low::CopyBufferToTexture { source_buffer, ref source_layout, offset, size, target_texture } => {
                 if offset != (0, 0) {

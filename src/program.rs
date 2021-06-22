@@ -1099,12 +1099,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let descriptor = &self.buffer_plan.texture[regmap.texture.0];
         let size = descriptor.size();
-        // See below, required for direct buffer-to-buffer copy.
-        // let sizeu64 = descriptor.layout.u64_len();
-        
-        let target_buffer = regmap.buffer;
 
-        // regmap.map_write .unwrap_or(regmap.buffer);
+        // See below, required for direct buffer-to-buffer copy.
+        let sizeu64 = descriptor.layout.u64_len();
+        
+        // FIXME: if it is a simple copy we can use regmap.buffer directly.
+        let target_buffer = regmap.map_write.unwrap_or(regmap.buffer);
 
         self.push(Low::WriteImageToBuffer {
             source_image,
@@ -1114,7 +1114,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             target_layout: regmap.buffer_layout,
         })?;
 
-        /*
         // FIXME: we're using wgpu internal's scheduling for writing the data to the gpu buffer but
         // this is a separate allocation. We'd instead like to use `regmap.map_write` and do our
         // own buffer mapping but this requires async scheduling. Soo.. do that later.
@@ -1130,7 +1129,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             // TODO: maybe also don't run it immediately?
             self.push(Low::RunTopCommand)?;
         }
-        */
 
         Ok(())
     }

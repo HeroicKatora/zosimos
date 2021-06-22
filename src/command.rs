@@ -492,7 +492,7 @@ impl CommandBuffer {
 
                             high_ops.push(High::Paint {
                                 dst: Target::Load(texture),
-                                texture: reg_to_texture[lhs],
+                                texture: reg_to_texture[rhs],
                                 fn_: Function::PaintOnTop {
                                     lower_region: lower_region,
                                     upper_region: *placement,
