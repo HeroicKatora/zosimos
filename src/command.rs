@@ -382,14 +382,14 @@ impl CommandBuffer {
     ///
     /// Outputs MUST later be bound from the pool during launch.
     pub fn output(&mut self, src: Register)
-        -> Result<Descriptor, CommandError>
+        -> Result<(Register, Descriptor), CommandError>
     {
         let outformat = self.describe_reg(src)?.clone();
         // Ignore this, it doesn't really produce a register.
-        let _ = self.push(Op::Output {
+        let register = self.push(Op::Output {
             src,
         });
-        Ok(outformat)
+        Ok((register, outformat))
     }
 
     pub fn compile(&self) -> Result<Program, CompileError> {
@@ -698,7 +698,7 @@ fn simple_program() {
 
     let result = commands.inscribe(background, placement, foreground)
         .expect("Valid to inscribe");
-    let outformat = commands.output(result)
+    let (_, outformat) = commands.output(result)
         .expect("Valid for output");
 
     let _ = commands.compile()

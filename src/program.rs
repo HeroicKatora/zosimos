@@ -115,6 +115,7 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     /// Howe we mapped registers to images in the pool.
     pool_plan: ImagePoolPlan,
     paint_group_layout: Option<usize>,
+    quad_group_layout: Option<usize>,
     paint_pipeline_layout: Option<usize>,
     default_sampler: Option<usize>,
     fragment_shaders: HashMap<FragmentShader, usize>,
@@ -543,6 +544,7 @@ struct RenderableOncePipeline {
     pipeline: usize,
     buffer: DeviceBuffer,
     group: usize,
+    quad: usize,
     vertices: u32,
 }
 
@@ -1101,7 +1103,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let size = descriptor.size();
 
         // See below, required for direct buffer-to-buffer copy.
-        let sizeu64 = descriptor.layout.u64_len();
+        let sizeu64 = regmap.buffer_layout.u64_len();
         
         // FIXME: if it is a simple copy we can use regmap.buffer directly.
         let target_buffer = regmap.map_write.unwrap_or(regmap.buffer);
@@ -1207,7 +1209,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let descriptor = &self.buffer_plan.texture[regmap.texture.0];
 
         let size = descriptor.size();
-        let sizeu64 = descriptor.layout.u64_len();
+        let sizeu64 = regmap.buffer_layout.u64_len();
         
         let source_buffer = regmap.map_read
             .unwrap_or(regmap.buffer);
@@ -1251,6 +1253,23 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(id)
     }
 
+    fn make_quad_bind_group(&mut self) -> usize {
+        let bind_group_layouts = &mut self.bind_group_layouts;
+        let instructions = &mut self.instructions;
+        *self.quad_group_layout.get_or_insert_with(|| {
+            let descriptor = BindGroupLayoutDescriptor {
+                entries: vec![
+                    // TODO
+                ],
+            };
+
+            instructions.extend_one(Low::BindGroupLayout(descriptor));
+            let descriptor_id = *bind_group_layouts;
+            *bind_group_layouts += 1;
+            descriptor_id
+        })
+    }
+
     fn make_paint_group(&mut self) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
@@ -1287,13 +1306,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     fn make_paint_layout(&mut self) -> usize {
-        let bind_group = self.make_paint_group();
+        let quad_bind_group = self.make_quad_bind_group();
+        let paint_bind_group = self.make_paint_group();
         let layouts = &mut self.pipeline_layouts;
         let instructions = &mut self.instructions;
 
         *self.paint_pipeline_layout.get_or_insert_with(|| {
             let descriptor = PipelineLayoutDescriptor {
-                bind_group_layouts: vec![bind_group],
+                bind_group_layouts: vec![
+                    quad_bind_group,
+                    paint_bind_group,
+                ],
                 push_constant_ranges: &[]
             };
 
@@ -1345,10 +1368,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         *self.simple_quad_buffer.get_or_insert_with(|| {
             // Sole quad!
             let content: &'static [f32; 8] = &[
-                1.0, -1.0, 
                 1.0, 1.0,
-                -1.0, -1.0,
-                -1.0, 1.0,
+                1.0, 0.0,
+                0.0, 1.0,
+                0.0, 0.0,
             ];
 
             let descriptor = BufferDescriptorInit {
@@ -1428,6 +1451,21 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(group)
     }
 
+    fn make_bind_group_quad_parameter(&mut self)
+        -> Result<usize, LaunchError>
+    {
+        let group = self.bind_groups;
+        let descriptor = BindGroupDescriptor {
+            layout_idx: self.make_quad_bind_group(),
+            entries: vec![
+                // FIXME: in lockstep with make_quad_bind_group
+            ],
+        };
+
+        self.push(Low::BindGroup(descriptor))?;
+        Ok(group)
+    }
+
     /// Render the pipeline, after all customization and buffers were bound..
     fn prepare_simple_pipeline(&mut self, texture: Texture, vertex: usize, fragment: usize)
         -> Result<RenderableOncePipeline, LaunchError>
@@ -1438,11 +1476,13 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let pipeline = self.simple_render_pipeline(vertex, fragment, format)?;
 
         let group = self.make_bind_group_sampled_texture(texture)?;
+        let quad = self.make_bind_group_quad_parameter()?;
 
         Ok(RenderableOncePipeline {
             pipeline,
             buffer,
             group,
+            quad,
             vertices: 4,
         })
     }
@@ -1451,26 +1491,30 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let RenderableOncePipeline {
             pipeline,
             group,
+            quad,
             buffer,
             vertices,
         } = pipeline;
 
         self.push(Low::SetPipeline(pipeline))?;
 
+        // FIXME: not here, prepare it.
+        // FIXME: upload actual parameter?
+        self.push(Low::SetBindGroup {
+            group: quad,
+            index: 0,
+            offsets: Cow::Borrowed(&[]),
+        })?;
+
         self.push(Low::SetBindGroup {
             group,
-            index: 0,
+            index: 1,
             offsets: Cow::Borrowed(&[]),
         })?;
 
         self.push(Low::SetVertexBuffer {
             buffer: buffer.0,
             slot: 0,
-        })?;
-
-        self.push(Low::SetVertexBuffer {
-            buffer: buffer.0,
-            slot: 1,
         })?;
 
         self.push(Low::DrawOnce { vertices })?;

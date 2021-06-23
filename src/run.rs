@@ -1,5 +1,4 @@
 use core::{
-    future::Future,
     iter::once,
     num::NonZeroU32,
     pin::Pin,
@@ -33,7 +32,7 @@ pub(crate) struct Descriptors {
     bind_group_layouts: Vec<wgpu::BindGroupLayout>,
     buffers: Vec<wgpu::Buffer>,
     command_buffers: Vec<wgpu::CommandBuffer>,
-    modules: Vec<wgpu::ShaderModule>,
+    shaders: Vec<wgpu::ShaderModule>,
     pipeline_layouts: Vec<wgpu::PipelineLayout>,
     render_pipelines: Vec<wgpu::RenderPipeline>,
     sampler: Vec<wgpu::Sampler>,
@@ -44,7 +43,6 @@ pub(crate) struct Descriptors {
 pub(crate) struct Gpu {
     pub(crate) device: Device,
     pub(crate) queue: Queue,
-    pub(crate) modules: Vec<wgpu::ShaderModule>,
 }
 
 /// One fragment shader execution with pipeline:
@@ -119,7 +117,6 @@ impl Execution {
             gpu: Gpu {
                 device: init.device,
                 queue: init.queue,
-                modules: vec![],
             },
             descriptors: Descriptors::default(),
             buffers: init.buffers,
@@ -179,8 +176,8 @@ impl Execution {
                     flags: desc.flags,
                 };
 
-                let module = self.gpu.device.create_shader_module(&desc);
-                self.descriptors.modules.push(module);
+                let shader = self.gpu.device.create_shader_module(&desc);
+                self.descriptors.shaders.push(shader);
                 Ok(SyncPoint::NO_SYNC)
             }
             Low::PipelineLayout(desc) => {
@@ -361,6 +358,7 @@ impl Execution {
                 let (width, height) = size;
                 let bytes_per_row = target_layout.bytes_per_row;
                 let bytes_per_texel = target_layout.bytes_per_texel;
+                let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
                 // Complex case, we need to instrument our own copy.
                 let buffers = core::mem::take(&mut self.descriptors.buffers);
@@ -381,7 +379,6 @@ impl Execution {
                         // TODO: defensive programming, don't assume cast works.
                         let target_pitch = bytes_per_row as usize;
                         let source_pitch = image.layout().bytes_per_row as usize;
-                        let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
                         // We've checked that this image can be seen as host bytes.
                         let source: &[u8] = image.as_bytes().unwrap();
@@ -503,6 +500,7 @@ impl Execution {
                 let (width, height) = size;
                 let bytes_per_row = source_layout.bytes_per_row;
                 let bytes_per_texel = source_layout.bytes_per_texel;
+                let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
                 let box_me = async move {
                     {
@@ -519,7 +517,6 @@ impl Execution {
                         // TODO: defensive programming, don't assume cast works.
                         let source_pitch = bytes_per_row as usize;
                         let target_pitch = image.layout().bytes_per_row as usize;
-                        let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
                         let source: &[u8] = &data[..];
                         let target: &mut [u8] = image.as_bytes_mut().unwrap();
@@ -733,7 +730,7 @@ impl Descriptors {
             ],
         });
         Ok(wgpu::VertexState {
-            module: self.modules
+            module: self.shaders
                 .get(desc.vertex_module)
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))?,
             entry_point: desc.entry_point,
@@ -749,7 +746,7 @@ impl Descriptors {
         buf.clear();
         buf.extend_from_slice(&desc.targets);
         Ok(wgpu::FragmentState {
-            module: self.modules
+            module: self.shaders
                 .get(desc.fragment_module)
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))?,
             entry_point: desc.entry_point,

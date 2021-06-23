@@ -48,7 +48,7 @@ fn run_blending() {
     let foreground = commands.input(foreground).unwrap();
     let result = commands.inscribe(background, placement, foreground)
         .expect("Valid to inscribe");
-    let outformat = commands.output(result)
+    let (output, _outformat) = commands.output(result)
         .expect("Valid for output");
 
     let plan = commands.compile()
@@ -68,7 +68,7 @@ fn run_blending() {
 
     let mut retire = execution
         .retire_gracefully(&mut pool);
-    let image = retire.output(result)
+    let image = retire.output(output)
         .expect("A valid image output")
         .to_image()
         .expect("An `image` image");
