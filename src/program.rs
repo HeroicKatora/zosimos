@@ -1,10 +1,10 @@
-use core::{future::Future, num::NonZeroU32, ops::Range};
+use core::{future::Future, num::{NonZeroU32, NonZeroU64}, ops::Range};
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::command::{High, Rectangle, Register, Target};
-use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor};
+use crate::buffer::{BufferLayout, Color, Descriptor};
 use crate::pool::{ImageData, Pool, PoolKey};
 use crate::{run, shaders};
 use crate::util::ExtendOne;
@@ -42,10 +42,13 @@ pub(crate) enum Function {
     ///   bind: sampler2D[2]
     ///   out: vec4 (color)
     PaintOnTop {
-        // Source selection.
-        lower_region: [Rectangle; 2],
-        // Target viewport.
-        upper_region: Rectangle,
+        /// Source selection (relative to texture coordinates).
+        selection: Rectangle,
+        /// Target location in target texture.
+        target: Rectangle,
+        /// Rectangle that the draw call targets in the target texture.
+        /// This gives the coordinate basis.
+        viewport: Rectangle,
         paint_on_top: PaintOnTopKind,
     },
 }
@@ -131,6 +134,8 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     buffer_map: HashMap<Buffer, BufferMap>,
     /// Describes which intermediate textures have been mapped to the GPU.
     staging_map: HashMap<Texture, StagingTexture>,
+
+    // Arena style allocators.
 }
 
 /// The GPU buffers associated with a register.
@@ -540,7 +545,23 @@ pub struct Launcher<'program> {
     pool_plan: ImagePoolPlan,
 }
 
-struct RenderableOncePipeline {
+struct SimpleRenderPipelineDescriptor<'data> {
+    vertex_bind_data: QuadBufferBind<'data>,
+    fragment_texture: Texture,
+    vertex: usize,
+    fragment: usize,
+}
+
+enum QuadBufferBind<'data> {
+    /// Upload the data, then bind the buffer.
+    Set {
+        data: &'data [u8],
+    },
+    /// The data is already there, simply bind the buffer.
+    Load(DeviceBuffer),
+}
+
+struct SimpleRenderPipeline {
     pipeline: usize,
     buffer: DeviceBuffer,
     group: usize,
@@ -1161,7 +1182,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// Note that this may be a no-op for buffers that need no staging buffer, i.e. where
     /// quantization happens as part of the pipeline.
     fn copy_staging_to_texture(&mut self, idx: Texture) -> Result<(), LaunchError> {
-        if let Some(staging) = self.staging_map.get(&idx) {
+        if let Some(_) = self.staging_map.get(&idx) {
             todo!()
         } else {
             Ok(())
@@ -1171,7 +1192,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// Quantize the texture to the staging buffer.
     /// May be a no-op, see reverse operation.
     fn copy_texture_to_staging(&mut self, idx: Texture) -> Result<(), LaunchError> {
-        if let Some(staging) = self.staging_map.get(&idx) {
+        if let Some(_) = self.staging_map.get(&idx) {
             todo!()
         } else {
             Ok(())
@@ -1259,7 +1280,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         *self.quad_group_layout.get_or_insert_with(|| {
             let descriptor = BindGroupLayoutDescriptor {
                 entries: vec![
-                    // TODO
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStage::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(2 * 8 * 4),
+                            ty: wgpu::BufferBindingType::Uniform,
+                        },
+                        count: None,
+                    },
                 ],
             };
 
@@ -1451,14 +1481,31 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(group)
     }
 
-    fn make_bind_group_quad_parameter(&mut self)
+    fn make_bind_group_quad_parameter(&mut self, bind: QuadBufferBind<'_>)
         -> Result<usize, LaunchError>
     {
+        let buffer = match bind {
+            QuadBufferBind::Load(buffer) => buffer,
+            QuadBufferBind::Set { data } => {
+                let buffer = self.buffers;
+                self.push(Low::BufferInit(BufferDescriptorInit {
+                    // FIXME: avoid the allocation here?
+                    content: Cow::Owned(data.to_vec()),
+                    usage: BufferUsage::Uniform,
+                }))?;
+                DeviceBuffer(buffer)
+            },
+        };
+
         let group = self.bind_groups;
         let descriptor = BindGroupDescriptor {
             layout_idx: self.make_quad_bind_group(),
             entries: vec![
-                // FIXME: in lockstep with make_quad_bind_group
+                BindingResource::Buffer {
+                    buffer_idx: buffer.0,
+                    offset: 0,
+                    size: None,
+                }
             ],
         };
 
@@ -1467,18 +1514,25 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     /// Render the pipeline, after all customization and buffers were bound..
-    fn prepare_simple_pipeline(&mut self, texture: Texture, vertex: usize, fragment: usize)
-        -> Result<RenderableOncePipeline, LaunchError>
+    fn prepare_simple_pipeline(&mut self, descriptor: SimpleRenderPipelineDescriptor)
+        -> Result<SimpleRenderPipeline, LaunchError>
     {
+        let SimpleRenderPipelineDescriptor {
+            vertex_bind_data,
+            fragment_texture: texture,
+            vertex,
+            fragment,
+        } = descriptor;
+
         let format = self.texture_map[&texture].format.format;
 
         let buffer = self.simple_quad_buffer();
         let pipeline = self.simple_render_pipeline(vertex, fragment, format)?;
 
         let group = self.make_bind_group_sampled_texture(texture)?;
-        let quad = self.make_bind_group_quad_parameter()?;
+        let quad = self.make_bind_group_quad_parameter(vertex_bind_data)?;
 
-        Ok(RenderableOncePipeline {
+        Ok(SimpleRenderPipeline {
             pipeline,
             buffer,
             group,
@@ -1487,8 +1541,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
-    fn render(&mut self, pipeline: RenderableOncePipeline) -> Result<(), LaunchError> {
-        let RenderableOncePipeline {
+    fn render(&mut self, pipeline: SimpleRenderPipeline) -> Result<(), LaunchError> {
+        let SimpleRenderPipeline {
             pipeline,
             group,
             quad,
@@ -1498,8 +1552,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         self.push(Low::SetPipeline(pipeline))?;
 
-        // FIXME: not here, prepare it.
-        // FIXME: upload actual parameter?
         self.push(Low::SetBindGroup {
             group: quad,
             index: 0,
@@ -1523,10 +1575,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     fn prepare_render(&mut self, texture: Texture, function: &Function)
-        -> Result<RenderableOncePipeline, LaunchError>
+        -> Result<SimpleRenderPipeline, LaunchError>
     {
         match function {
-            Function::PaintOnTop { lower_region, upper_region, paint_on_top } => {
+            Function::PaintOnTop { selection, target, viewport, paint_on_top } => {
+                let (tex_width, tex_height) = self.texture_map[&texture].format.size;
+
                 let vertex = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
@@ -1536,7 +1590,39 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     Some(FragmentShader::PaintOnTop(paint_on_top.clone())),
                     shader_include_to_spirv(fragment))?;
 
-                self.prepare_simple_pipeline(texture, vertex, fragment)
+                // FIXME: there seems to be two floats padding after each vec2.
+                let min_u = (selection.x as f32) / (tex_width.get() as f32);
+                let max_u = (selection.max_x as f32) / (tex_width.get() as f32);
+                let min_v = (selection.y as f32) / (tex_height.get() as f32);
+                let max_v = (selection.max_y as f32) / (tex_height.get() as f32);
+
+                let target = viewport.meet_in_local_coordinates(*target);
+                let min_a = (target.x as f32) / (viewport.width() as f32);
+                let max_a = (target.max_x as f32) / (viewport.width() as f32);
+                let min_b = (target.y as f32) / (viewport.height() as f32);
+                let max_b = (target.max_y as f32) / (viewport.height() as f32);
+
+                // I'm pretty sure this wrong.
+                let buffer: [[f32; 2]; 16] = [
+                    [min_u, min_v], [0.0, 0.0],
+                    [max_u, min_v], [0.0, 0.0],
+                    [max_u, max_v], [0.0, 0.0],
+                    [min_u, max_v], [0.0, 0.0],
+
+                    [min_a, min_b], [0.0, 0.0],
+                    [max_a, min_b], [0.0, 0.0],
+                    [max_a, max_b], [0.0, 0.0],
+                    [min_a, max_b], [0.0, 0.0],
+                ];
+
+                self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
+                    vertex_bind_data: QuadBufferBind::Set {
+                        data: bytemuck::cast_slice(&buffer[..]),
+                    },
+                    fragment_texture: texture,
+                    vertex,
+                    fragment,
+                })
             },
         }
     }
@@ -1567,7 +1653,7 @@ impl BufferUsage {
             BufferUsage::DataBuffer => {
                 U::STORAGE | U::COPY_SRC | U::COPY_DST
             }
-            BufferUsage::Uniform => U::MAP_WRITE | U::STORAGE | U::COPY_SRC,
+            BufferUsage::Uniform => U::COPY_DST | U::UNIFORM,
         }
     }
 }

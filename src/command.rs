@@ -457,12 +457,14 @@ impl CommandBuffer {
                 Op::Unary { desc: _, src, op } => {
                     match op {
                         &UnaryOp::Crop(region) => {
+                            let target = Rectangle::with_width_height(region.width(), region.height());
                             high_ops.push(High::Paint {
                                 texture: reg_to_texture[src],
                                 dst: Target::Discard(texture),
                                 fn_: Function::PaintOnTop {
-                                    lower_region: [region, region],
-                                    upper_region: Rectangle::with_width_height(region.width(), region.height()),
+                                    selection: region,
+                                    target,
+                                    viewport: target,
                                     paint_on_top: PaintOnTopKind::Copy,
                                 },
                             });
@@ -473,10 +475,8 @@ impl CommandBuffer {
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 Op::Binary { desc: _, lhs, rhs, op } => {
-                    let lower_region = [
-                        Rectangle::from(self.describe_reg(*lhs).unwrap()),
-                        Rectangle::from(self.describe_reg(*rhs).unwrap()),
-                    ];
+                    let lower_region = Rectangle::from(self.describe_reg(*lhs).unwrap());
+                    let upper_region = Rectangle::from(self.describe_reg(*rhs).unwrap());
 
                     match op {
                         BinaryOp::Inscribe { placement } => {
@@ -484,8 +484,9 @@ impl CommandBuffer {
                                 dst: Target::Discard(texture),
                                 texture: reg_to_texture[lhs],
                                 fn_: Function::PaintOnTop {
-                                    lower_region: [lower_region[0], lower_region[0]],
-                                    upper_region: lower_region[0],
+                                    selection: lower_region,
+                                    target: lower_region,
+                                    viewport: lower_region,
                                     paint_on_top: PaintOnTopKind::Copy,
                                 },
                             });
@@ -494,8 +495,9 @@ impl CommandBuffer {
                                 dst: Target::Load(texture),
                                 texture: reg_to_texture[rhs],
                                 fn_: Function::PaintOnTop {
-                                    lower_region: lower_region,
-                                    upper_region: *placement,
+                                    selection: upper_region,
+                                    target: *placement,
+                                    viewport: lower_region,
                                     paint_on_top: PaintOnTopKind::Copy,
                                 },
                             });
@@ -592,6 +594,19 @@ impl Rectangle {
             y: self.y.max(other.y),
             max_x: self.max_x.min(other.max_x),
             max_y: self.max_y.min(other.max_y),
+        }
+    }
+
+    /// The meet, relative to the coordinates of this rectangle.
+    #[must_use]
+    pub fn meet_in_local_coordinates(self, other: Self) -> Rectangle {
+        // Normalize to ensure that max_{x,y} is not less than {x,y}
+        let meet = self.normalize().meet(other);
+        Rectangle {
+            x: meet.x - self.x,
+            y: meet.y - self.y,
+            max_x: meet.max_x - self.x,
+            max_y: meet.max_y - self.y,
         }
     }
 
