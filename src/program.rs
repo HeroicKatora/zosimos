@@ -635,7 +635,7 @@ impl Program {
         while let Some(adapter) = from.next() {
             // FIXME: check limits.
             // FIXME: collect required texture formats from `self.textures`
-            let basic_format = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8Uint);
+            let basic_format = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8UnormSrgb);
             if !basic_format.allowed_usages.contains(wgpu::TextureUsage::all()) {
                 continue;
             }
