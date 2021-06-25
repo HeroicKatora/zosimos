@@ -171,18 +171,30 @@ pub enum Color {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Transfer {
+    /// Non-linear electrical data of Bt.709
     Bt709,
     Bt470M,
+    /// Non-linear electrical data of Bt.601
     Bt601,
+    /// Non-linear electrical data of Smpte-240
     Smpte240,
+    /// Linear color in display luminance.
     Linear,
+    /// Non-linear electrical data of Srgb
     Srgb,
+    /// Non-linear electrical data of Bt2020 that was 10-bit quantized
     Bt2020_10bit,
+    /// Non-linear electrical data of Bt2020 that was 12-bit quantized
     Bt2020_12bit,
+    /// Non-linear electrical data of Smpte-2048
     Smpte2084,
     /// Another name for Smpte2084.
     Bt2100Pq,
+    /// Non-linear electrical data of Bt2100 Hybrid-Log-Gamma.
     Bt2100Hlg,
+    /// Linear color in scene luminance.
+    /// This is perfect for an artistic composition pipeline.
+    LinearScene,
 }
 
 /// The reference brightness of the color specification.

@@ -548,8 +548,8 @@ pub struct Launcher<'program> {
 struct SimpleRenderPipelineDescriptor<'data> {
     vertex_bind_data: QuadBufferBind<'data>,
     fragment_texture: Texture,
-    vertex: usize,
-    fragment: usize,
+    vertex: ShaderBind,
+    fragment: ShaderBind,
 }
 
 enum QuadBufferBind<'data> {
@@ -557,8 +557,16 @@ enum QuadBufferBind<'data> {
     Set {
         data: &'data [u8],
     },
-    /// The data is already there, simply bind the buffer.
-    Load(DeviceBuffer),
+    // /// The data is already there, simply bind the buffer.
+    // Load(DeviceBuffer),
+}
+
+enum ShaderBind{
+    ShaderMain(usize),
+    Shader {
+        id: usize,
+        entry_point: &'static str,
+    },
 }
 
 struct SimpleRenderPipeline {
@@ -1419,19 +1427,28 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     
     fn simple_render_pipeline(
         &mut self,
-        vertex: usize,
-        fragment: usize,
+        vertex: ShaderBind,
+        fragment: ShaderBind,
         format: wgpu::TextureFormat,
     ) -> Result<usize, LaunchError> {
         let layout = self.make_paint_layout();
 
+        let (vertex, vertex_entry_point) = match vertex {
+            ShaderBind::ShaderMain(shader) => (shader, "main"),
+            ShaderBind::Shader { id, entry_point } => (id, entry_point)
+        };
+        let (fragment, fragment_entry_point) = match fragment {
+            ShaderBind::ShaderMain(shader) => (shader, "main"),
+            ShaderBind::Shader { id, entry_point } => (id, entry_point)
+        };
+
         self.instructions.extend_one(Low::RenderPipeline(RenderPipelineDescriptor {
             vertex: VertexState {
-                entry_point: "main",
+                entry_point: vertex_entry_point,
                 vertex_module: vertex,
             },
             fragment: FragmentState {
-                entry_point: "main",
+                entry_point: fragment_entry_point,
                 fragment_module: fragment,
                 targets: vec![wgpu::ColorTargetState {
                     blend: Some(wgpu::BlendState::REPLACE),
@@ -1485,7 +1502,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         -> Result<usize, LaunchError>
     {
         let buffer = match bind {
-            QuadBufferBind::Load(buffer) => buffer,
             QuadBufferBind::Set { data } => {
                 let buffer = self.buffers;
                 self.push(Low::BufferInit(BufferDescriptorInit {
@@ -1602,7 +1618,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let min_b = (target.y as f32) / (viewport.height() as f32);
                 let max_b = (target.max_y as f32) / (viewport.height() as f32);
 
-                // I'm pretty sure this wrong.
+                // FIXME: I'm pretty sure this layout should be wrong.
+                // However, it appears to work correctly on my stack:
+                // wgpu=0.9,shaderc=0.7.2,nvidia=465.27-5,GeForce GTX 960
                 let buffer: [[f32; 2]; 16] = [
                     [min_u, min_v], [0.0, 0.0],
                     [max_u, min_v], [0.0, 0.0],
@@ -1620,8 +1638,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                         data: bytemuck::cast_slice(&buffer[..]),
                     },
                     fragment_texture: texture,
-                    vertex,
-                    fragment,
+                    vertex: ShaderBind::ShaderMain(vertex),
+                    fragment: ShaderBind::ShaderMain(fragment),
                 })
             },
         }
