@@ -1485,7 +1485,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 instructions.extend_one(Low::Sampler(SamplerDescriptor {
                     address_mode: wgpu::AddressMode::default(),
                     border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
-                    resize_filter: wgpu::FilterMode::Linear,
+                    resize_filter: wgpu::FilterMode::Nearest,
                 }));
                 *sampler += 1;
                 sampler_id
