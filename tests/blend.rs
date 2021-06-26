@@ -1,9 +1,9 @@
 use stealth_paint::command::{CommandBuffer, Rectangle};
 use stealth_paint::pool::Pool;
 
-const BACKGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/background.png");
-const FOREGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/foreground.png");
-const OUTPUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/composed.png");
+const BACKGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/background.png");
+const FOREGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/foreground.png");
+const OUTPUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/reference/composed.png");
 
 #[test]
 fn run_blending() {
@@ -73,6 +73,14 @@ fn run_blending() {
         .to_image()
         .expect("An `image` image");
 
-    image.save(OUTPUT)
-        .expect("Successfully saved");
+    if std::env::var_os("STEALTH_PAINT_BLESS").is_some() {
+        image.save(OUTPUT).expect("Successfully saved");
+        return;
+    }
+
+    let reference = image::io::Reader::open(OUTPUT)
+        .expect("Found file")
+        .decode()
+        .expect("Successfully opened reference");
+    assert_eq!(reference, image);
 }

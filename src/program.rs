@@ -632,11 +632,18 @@ impl Program {
     pub fn choose_adapter(&self, mut from: impl Iterator<Item=wgpu::Adapter>)
         -> Result<wgpu::Adapter, MismatchError>
     {
+        #[allow(non_snake_case)]
+        let ALL_TEXTURE_USAGE: wgpu::TextureUsage =
+            wgpu::TextureUsage::COPY_DST
+            | wgpu::TextureUsage::COPY_SRC
+            | wgpu::TextureUsage::SAMPLED
+            | wgpu::TextureUsage::RENDER_ATTACHMENT;
+
         while let Some(adapter) = from.next() {
             // FIXME: check limits.
             // FIXME: collect required texture formats from `self.textures`
             let basic_format = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8UnormSrgb);
-            if !basic_format.allowed_usages.contains(wgpu::TextureUsage::all()) {
+            if !basic_format.allowed_usages.contains(ALL_TEXTURE_USAGE) {
                 continue;
             }
 
