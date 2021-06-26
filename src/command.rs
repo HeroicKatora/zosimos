@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, Texel};
+use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, Texel, Whitepoint};
 use crate::program::{
     CompileError, Function, ImageBufferPlan, ImageBufferAssignment, PaintOnTopKind, Program,
     Texture,
@@ -165,6 +165,63 @@ pub struct Affine {
     transformation: [f32; 9],
 }
 
+/// Reference of matrices and more: http://brucelindbloom.com/index.html?Eqn_ChromAdapt.html
+///
+/// A similar technique can simulate cone deficiencies:
+/// * deuteranomaly (green cone cells defective),
+/// * protanomaly (red cone cells defective),
+/// * and tritanomaly (blue cone cells defective).
+/// More information here: http://colorspace.r-forge.r-project.org/articles/color_vision_deficiency.html
+///
+/// Matrix for transforming cone response into the opponent color space which is assumed to be a
+/// mostly sufficient input to recreate a particular color impression. In other words, simulate a
+/// dichromacy response to a color by matching it for a 'standard' human. We can also estimate if a
+/// particular color can be made visible for someone afflicted with a cone deficiency etc.
+/// (see: Gustavo M. Machado, et.al A Physiologically-based Model for Simulation of Color Vision Deficiency)
+/// 
+/// ```text
+/// 0.600    0.400    0.000
+/// 0.240    0.105   −0.700
+/// 1.200   −1.600    0.400
+/// ```
+pub enum ChromaticAdaptation {
+    /// Naive adaptation based on component-wise linear transform in XYZ.
+    Xyz { target: Whitepoint },
+    /// A component-wise transform in LMS (cone response) coordinates.
+    ///
+    /// The matrix for whitepoint E (equal intensity) is:
+    ///
+    /// ```latex
+    /// \begin{bmatrix}
+    /// 0.38971 & 0.68898 & -0.07868\\
+    /// -0.22981 & 1.18340 & 0.04641\\
+    /// 0.00000 & 0.00000 & 1.00000
+    /// \end{bmatrix}
+    /// ```
+    ///
+    /// The D65 normalized XYZ -> LMS matrix is:
+    ///
+    /// ```text
+    /// 0.4002400  0.7076000 -0.0808100
+    /// -0.2263000  1.1653200  0.0457000
+    /// 0.0000000  0.0000000  0.9182200
+    /// ```
+    VonKries { target: Whitepoint },
+    /// Bradford's modified (sharpened) LMS definition with linear VonKries adaptation.
+    /// Used in ICC.
+    ///
+    /// ```latex
+    /// \begin{bmatrix}
+    /// 0.8951 & 0.2664 & -0.1614 \\
+    /// -0.7502 & 1.7135 & 0.0367 \\
+    /// 0.0389 & -0.0685 & 1.0296
+    /// \end{bmatrix}
+    /// ```
+    BradfordVonKries { target: Whitepoint },
+    /// Bradford's originally intended adaptation.
+    BradfordNonLinear { target: Whitepoint },
+}
+
 #[derive(Debug)]
 pub struct CommandError {
     inner: CommandErrorKind,
@@ -216,6 +273,8 @@ impl CommandBuffer {
     }
 
     /// Create an image with different color encoding.
+    ///
+    /// This goes through linear RGB, not ICC, and requires the two models to have same whitepoint.
     pub fn color_convert(&mut self, src: Register, texel: Texel)
         -> Result<Register, CommandError>
     {
@@ -256,6 +315,13 @@ impl CommandBuffer {
         };
 
         Ok(self.push(op))
+    }
+
+    /// Perform a whitepoint adaptation.
+    pub fn chromatic_adaptation(&mut self, _: Register, _: Whitepoint)
+        -> Result<Register, CommandError>
+    {
+        todo!()
     }
 
     /// Embed this image as part of a larger one.
