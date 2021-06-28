@@ -20,13 +20,6 @@ void main() {
     mix(paint_coordinates.rect_position[3], paint_coordinates.rect_position[2], vertPosition.x),
     vertPosition.y);
 
-/** Fixed rendering everything.
-  vec2 innerPos = mix(
-    mix(vec2(0.0, 0.0), vec2(1.0, 0.0), vertPosition.x),
-    mix(vec2(0.0, 1.0), vec2(1.0, 1.0), vertPosition.x),
-    vertPosition.y);
-*/
-
   vec2 glslPos = 2.0*vec2(innerPos.x, 1.0 - innerPos.y) - 1.0;
 
   gl_Position = vec4(glslPos, 0.0, 1.0);

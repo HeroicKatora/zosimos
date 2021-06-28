@@ -184,9 +184,16 @@ pub struct Affine {
 /// 0.240    0.105   −0.700
 /// 1.200   −1.600    0.400
 /// ```
-pub enum ChromaticAdaptation {
+pub struct ChromaticAdaptation {
+    /// The target whitepoint of the adaptation.
+    target: Whitepoint,
+    /// The method to use.
+    method: ChromaticAdaptationMethod,
+}
+
+pub enum ChromaticAdaptationMethod {
     /// Naive adaptation based on component-wise linear transform in XYZ.
-    Xyz { target: Whitepoint },
+    Xyz,
     /// A component-wise transform in LMS (cone response) coordinates.
     ///
     /// The matrix for whitepoint E (equal intensity) is:
@@ -206,7 +213,7 @@ pub enum ChromaticAdaptation {
     /// -0.2263000  1.1653200  0.0457000
     /// 0.0000000  0.0000000  0.9182200
     /// ```
-    VonKries { target: Whitepoint },
+    VonKries,
     /// Bradford's modified (sharpened) LMS definition with linear VonKries adaptation.
     /// Used in ICC.
     ///
@@ -217,9 +224,9 @@ pub enum ChromaticAdaptation {
     /// 0.0389 & -0.0685 & 1.0296
     /// \end{bmatrix}
     /// ```
-    BradfordVonKries { target: Whitepoint },
+    BradfordVonKries,
     /// Bradford's originally intended adaptation.
-    BradfordNonLinear { target: Whitepoint },
+    BradfordNonLinear,
 }
 
 #[derive(Debug)]

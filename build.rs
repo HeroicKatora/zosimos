@@ -15,7 +15,7 @@ fn main() -> Result<(), BuildError> {
 
     const SHADERS: &[SimpleSource] = &[
         SimpleSource {
-            path: "src/shaders/noop.vert",
+            path: "src/shaders/box.vert",
             kind: ShaderKind::Vertex,
         },
         SimpleSource {
@@ -24,6 +24,10 @@ fn main() -> Result<(), BuildError> {
         },
         SimpleSource {
             path: "src/shaders/inject.frag",
+            kind: ShaderKind::Fragment,
+        },
+        SimpleSource {
+            path: "src/shaders/linear.frag",
             kind: ShaderKind::Fragment,
         },
         SimpleSource {
