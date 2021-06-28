@@ -30,16 +30,24 @@ pub struct Program {
     pub(crate) textures: ImageBufferPlan,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// Describes a function call in more common terms.
+///
+/// The bind sets follow the logic that functions will use the same setup for the vertex shader to
+/// pain a source rectangle at a target rectangle location. Then the required images are bound. And
+/// finally we have the various dynamic/uniform parameters of the differing functions.
+///
+/// A single command might be translated to multiple functions.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Function {
     /// VS: id
     ///   in: vec3 position
     ///   in: vec2 vertUv
+    ///   bind(0,1): rectangles
     ///   out: vec2 uv
     /// FS:
     ///   in: vec2 uv
-    ///   pc: vec4 (parameter)
-    ///   bind: sampler2D[2]
+    ///   bind(1,0): texture
+    ///   bind(1,1): sampler2D
     ///   out: vec4 (color)
     PaintOnTop {
         /// Source selection (relative to texture coordinates).
@@ -50,6 +58,20 @@ pub(crate) enum Function {
         /// This gives the coordinate basis.
         viewport: Rectangle,
         paint_on_top: PaintOnTopKind,
+    },
+    /// VS: id
+    ///   in: vec3 position
+    ///   in: vec2 vertUv
+    ///   bind(0,1): rectangles
+    ///   out: vec2 uv
+    /// FS:
+    ///   in: vec2 uv
+    ///   bind(1,0): texture
+    ///   bind(1,1): sampler2D
+    ///   bind(2,0): transform matrix
+    ///   out: vec4 (color)
+    Transform {
+        matrix: [f32; 9],
     },
 }
 
@@ -210,6 +232,8 @@ enum VertexShader {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum FragmentShader {
     PaintOnTop(PaintOnTopKind),
+    /// Linear color transformation.
+    LinearColorMatrix,
 }
 
 #[derive(Debug)]
@@ -1564,6 +1588,22 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
+    pub const FULL_VERTEX_BUFFER: [[f32; 2]; 16] = [
+        // [min_u, min_v], [0.0, 0.0],
+        [0.0, 0.0], [0.0, 0.0],
+        // [max_u, 0.0], [0.0, 0.0],
+        [1.0, 0.0], [0.0, 0.0],
+        // [max_u, max_v], [0.0, 0.0],
+        [1.0, 1.0], [0.0, 0.0],
+        // [min_u, max_v], [0.0, 0.0],
+        [0.0, 1.0], [0.0, 0.0],
+
+        [0.0, 0.0], [0.0, 0.0],
+        [1.0, 0.0], [0.0, 0.0],
+        [1.0, 1.0], [0.0, 0.0],
+        [0.0, 1.0], [0.0, 0.0],
+    ];
+
     fn render(&mut self, pipeline: SimpleRenderPipeline) -> Result<(), LaunchError> {
         let SimpleRenderPipeline {
             pipeline,
@@ -1643,6 +1683,24 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
                     vertex_bind_data: QuadBufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
+                    },
+                    fragment_texture: texture,
+                    vertex: ShaderBind::ShaderMain(vertex),
+                    fragment: ShaderBind::ShaderMain(fragment),
+                })
+            },
+            Function::Transform { matrix } => {
+                let vertex = self.vertex_shader(
+                    Some(VertexShader::Noop),
+                    shader_include_to_spirv(shaders::VERT_NOOP))?;
+
+                let fragment = self.fragment_shader(
+                    Some(FragmentShader::LinearColorMatrix),
+                    shader_include_to_spirv(shaders::FRAG_LINEAR))?;
+
+                self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
+                    vertex_bind_data: QuadBufferBind::Set {
+                        data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
                     fragment_texture: texture,
                     vertex: ShaderBind::ShaderMain(vertex),
