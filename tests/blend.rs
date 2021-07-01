@@ -1,4 +1,5 @@
-use stealth_paint::command::{CommandBuffer, Rectangle};
+use stealth_paint::buffer::Whitepoint;
+use stealth_paint::command::{self, CommandBuffer, Rectangle};
 use stealth_paint::pool::Pool;
 
 const BACKGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/background.png");
@@ -46,9 +47,17 @@ fn run_blending() {
     // 3: out(2)
     let background = commands.input(background).unwrap();
     let foreground = commands.input(foreground).unwrap();
+
     let result = commands.inscribe(background, placement, foreground)
         .expect("Valid to inscribe");
-    let (output, _outformat) = commands.output(result)
+
+    let adapted = commands.chromatic_adaptation(
+        result,
+        command::ChromaticAdaptationMethod::VonKries,
+        Whitepoint::D50,
+    ).unwrap();
+
+    let (output, _outformat) = commands.output(adapted)
         .expect("Valid for output");
 
     let plan = commands.compile()

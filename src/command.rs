@@ -129,6 +129,10 @@ pub(crate) enum UnaryOp {
     ColorConvert(Color),
     /// Op(T) = T[.color=select(channel, color)]
     Extract { channel: ColorChannel },
+    /// Op(T) = T[.whitepoint=target]
+    /// This is a partial method for CIE XYZ-ish color spaces. Note that ICC requires adaptation to
+    /// D50 for example as the reference color space.
+    ChromaticAdaptation(ChromaticAdaptation)
 }
 
 #[derive(Clone)]
@@ -184,13 +188,18 @@ pub struct Affine {
 /// 0.240    0.105   −0.700
 /// 1.200   −1.600    0.400
 /// ```
-pub struct ChromaticAdaptation {
+#[derive(Clone, Debug)]
+pub(crate) struct ChromaticAdaptation {
     /// The target whitepoint of the adaptation.
-    target: Whitepoint,
+    source: Whitepoint,
     /// The method to use.
     method: ChromaticAdaptationMethod,
+    /// The target whitepoint of the adaptation.
+    target: Whitepoint,
 }
 
+#[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum ChromaticAdaptationMethod {
     /// Naive adaptation based on component-wise linear transform in XYZ.
     Xyz,
@@ -325,10 +334,54 @@ impl CommandBuffer {
     }
 
     /// Perform a whitepoint adaptation.
-    pub fn chromatic_adaptation(&mut self, _: Register, _: Whitepoint)
-        -> Result<Register, CommandError>
-    {
-        todo!()
+    ///
+    /// The `function` describes the method and target whitepoint of the chromatic adaptation.
+    pub fn chromatic_adaptation(
+        &mut self,
+        src: Register,
+        method: ChromaticAdaptationMethod,
+        target: Whitepoint,
+    ) -> Result<Register, CommandError> {
+        let desc_src = self.describe_reg(src)?;
+        let texel_color;
+        let source_wp;
+
+        match desc_src.texel.color {
+            Color::Xyz { whitepoint, primary, transfer, luminance } => {
+                texel_color = Color::Xyz {
+                    whitepoint: target,
+                    primary,
+                    transfer,
+                    luminance,
+                };
+
+                source_wp = whitepoint;
+            },
+            _ => return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(desc_src.clone()),
+            }),
+        };
+
+        let layout = BufferLayout { .. desc_src.layout };
+        let texel = Texel {
+            color: texel_color,
+            ..desc_src.texel
+        };
+
+        let op = Op::Unary {
+            src,
+            op: UnaryOp::ChromaticAdaptation(ChromaticAdaptation {
+                source: source_wp,
+                target,
+                method,
+            }),
+            desc: Descriptor {
+                layout,
+                texel,
+            },
+        };
+
+        Ok(self.push(op))
     }
 
     /// Embed this image as part of a larger one.
@@ -542,6 +595,17 @@ impl CommandBuffer {
                                 },
                             });
                         },
+                        UnaryOp::ChromaticAdaptation(adaptation) => {
+                            let matrix = adaptation.into_matrix()?;
+
+                            high_ops.push(High::Paint {
+                                texture: reg_to_texture[src],
+                                dst: Target::Discard(texture),
+                                fn_: Function::Transform {
+                                    matrix,
+                                },
+                            });
+                        },
                         _ => return Err(CompileError::NotYetImplemented),
                     }
 
@@ -612,6 +676,63 @@ impl CommandBuffer {
         let reg = Register(self.ops.len());
         self.ops.push(op);
         reg
+    }
+}
+
+impl ChromaticAdaptation {
+    pub(crate) fn into_matrix(&self) -> Result<[f32; 9], CompileError> {
+        use palette::{
+            chromatic_adaptation::{ConeResponseMatrices, Method, TransformMatrix},
+            white_point as wp,
+        };
+
+        // FIXME: when you adjust the value-to-type translation, also adjust it within `method`.
+        macro_rules! translate_matrix {
+            ($source:expr, $target:expr, $($lhs:ident => $lhsty:ty)|*) => {
+                $(
+                    translate_matrix!(
+                        @$source, $target, $lhs => $lhsty : 
+                        A => wp::A | B => wp::B | C => wp::C
+                        | D50 => wp::D50 | D55 => wp::D55 | D65 => wp::D65
+                        | D75 => wp::D75 | E => wp::E | F2 => wp::F2
+                        | F7 => wp::F7 | F11 => wp::F11
+                    );
+                )*
+            };
+            (@$source:expr, $target:expr, $lhs:ident => $lhsty:ty : $($rhs:ident => $ty:ty)|*) => {
+                $(
+                    if let (Whitepoint::$lhs, Whitepoint::$rhs) = ($source, $target) {
+                        return Ok(<Method as TransformMatrix<$lhsty, $ty, f32>>::get_cone_response
+                                  as fn(&Method) -> ConeResponseMatrices<f32>);
+                    }
+                )*
+            };
+        }
+
+        // FIXME: when you adjust the value-to-type translation, also adjust it within
+        // `translate_matrix!`
+        let method = (|| {
+            translate_matrix! {
+                self.source, self.target,
+                A => wp::A | B => wp::B | C => wp::C
+                | D50 => wp::D50 | D55 => wp::D55 | D65 => wp::D65
+                | D75 => wp::D75 | E => wp::E | F2 => wp::F2
+                | F7 => wp::F7 | F11 => wp::F11
+            };
+
+            Err(CompileError::NotYetImplemented)
+        })()?;
+
+        let matrices = method(match self.method {
+            // Bradford's original method that does slight blue non-linearity is not yet supported.
+            // Please implement the paper if you feel compelled to.
+            ChromaticAdaptationMethod::BradfordNonLinear => return Err(CompileError::NotYetImplemented),
+            ChromaticAdaptationMethod::BradfordVonKries => &Method::Bradford,
+            ChromaticAdaptationMethod::VonKries => &Method::VonKries,
+            ChromaticAdaptationMethod::Xyz => &Method::XyzScaling,
+        });
+
+        Ok(matrices.ma)
     }
 }
 
