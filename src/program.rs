@@ -1754,15 +1754,16 @@ impl LaunchError {
 /// Block on an async future that may depend on a device being polled.
 pub(crate) fn block_on<F, T>(future: F, device: Option<&wgpu::Device>) -> T
 where
-    F: Future<Output = T> + 'static
+    F: Future<Output = T> + 'static,
+    T: 'static,
 {
     #[cfg(target_arch = "wasm32")] {
         use std::rc::Rc;
         use core::cell::RefCell;
 
-        async fn the_thing<F, T>(future: F, buffer: Rc<RefCell<Option<T>>>) {
+        async fn the_thing<T: 'static, F: Future<Output=T> + 'static>(future: F, buffer: Rc<RefCell<Option<T>>>) {
             let result = future.await;
-            *buffer.borrow_mut() = result;
+            *buffer.borrow_mut() = Some(result);
         }
 
         let result = Rc::new(RefCell::new(None));
@@ -1770,7 +1771,13 @@ where
 
         wasm_bindgen_futures::spawn_local(the_thing(future, mover));
 
-        result.try_unwrap().unwrap()
+        match Rc::try_unwrap(result) {
+            Ok(cell) => match cell.into_inner() {
+                Some(result) => result,
+                None => unreachable!("In this case we shouldn't have returned here"),
+            },
+            _ => unreachable!("There should be no reference to mover left"),
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))] {
