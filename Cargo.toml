@@ -7,7 +7,6 @@ license = "MPL-2.0"
 
 [dependencies]
 bytemuck = "1.4"
-image-canvas = { path = "../image-canvas" }
 slotmap = "1"
 wgpu = "0.9"
 
@@ -21,9 +20,14 @@ wasm-bindgen-futures = "0.4.19"
 version = "0.23.12"
 default-features = false
 
+[dependencies.image-canvas]
+git = "https://github.com/image-rs/canvas"
+rev = "a9eb1ff32715d5eb909bc09f33f24a6415bde905"
+
 [dependencies.palette]
 version = "0.5.0"
 default-features = false
+features = ["libm"]
 
 [build-dependencies]
 shaderc = "0.7"
