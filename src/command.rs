@@ -702,13 +702,14 @@ impl ChromaticAdaptation {
             (@$source:expr, $target:expr, $lhs:ident => $lhsty:ty : $($rhs:ident => $ty:ty)|*) => {
                 $(
                     if let (Whitepoint::$lhs, Whitepoint::$rhs) = ($source, $target) {
-                        return Ok(<Method as TransformMatrix<$lhsty, $ty, f32>>::get_cone_response
-                                  as fn(&Method) -> ConeResponseMatrices<f32>);
+                        return Ok(<Method as TransformMatrix<$lhsty, $ty, f32>>::generate_transform_matrix
+                                  as fn(&Method) -> [f32;9]);
                     }
                 )*
             };
         }
 
+        dbg!(self.source, self.target);
         // FIXME: when you adjust the value-to-type translation, also adjust it within
         // `translate_matrix!`
         let method = (|| {
@@ -732,7 +733,7 @@ impl ChromaticAdaptation {
             ChromaticAdaptationMethod::Xyz => &Method::XyzScaling,
         });
 
-        Ok(matrices.ma)
+        Ok(matrices)
     }
 }
 

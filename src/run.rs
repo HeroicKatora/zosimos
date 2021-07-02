@@ -94,7 +94,13 @@ pub(crate) struct Machine {
 }
 
 #[derive(Debug)]
-pub enum StepError {
+pub struct StepError {
+    inner: StepErrorKind,
+    instruction_pointer: usize,
+}
+
+#[derive(Debug)]
+enum StepErrorKind {
     InvalidInstruction(u32),
     BadInstruction(BadInstruction),
     ProgramEnd,
@@ -130,6 +136,19 @@ impl Execution {
     }
 
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
+        let instruction_pointer = self.machine.instruction_pointer;
+        eprintln!("{:?}", self.machine.instructions.get(self.machine.instruction_pointer));
+        match self.step_inner() {
+            Ok(sync) => Ok(sync),
+            Err(mut error) => {
+                // Add tracing information..
+                error.instruction_pointer = instruction_pointer;
+                Err(error)
+            }
+        }
+    }
+
+    fn step_inner(&mut self) -> Result<SyncPoint<'_>, StepError> {
         match self.machine.next_instruction()? {
             Low::BindGroupLayout(desc) => {
                 let mut entry_buffer = vec![];
@@ -835,6 +854,37 @@ impl Machine {
             }
         }
     }
+}
+
+impl StepError {
+    fn InvalidInstruction(line: u32) -> Self {
+        StepError {
+            inner: StepErrorKind::InvalidInstruction(line),
+            .. Self::DEFAULT
+        }
+    }
+
+    fn BadInstruction(bad: BadInstruction) -> Self {
+        StepError {
+            inner: StepErrorKind::BadInstruction(bad),
+            .. Self::DEFAULT
+        }
+    }
+
+    pub(crate) const ProgramEnd: Self = StepError {
+        inner: StepErrorKind::ProgramEnd,
+        .. Self::DEFAULT
+    };
+
+    pub(crate) const RenderPassDidNotEnd: Self = StepError {
+        inner: StepErrorKind::RenderPassDidNotEnd,
+        .. Self::DEFAULT
+    };
+
+    pub(crate) const DEFAULT: Self = StepError {
+        inner: StepErrorKind::ProgramEnd,
+        instruction_pointer: 0,
+    };
 }
 
 impl Retire<'_> {

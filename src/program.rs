@@ -4,7 +4,17 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::command::{High, Rectangle, Register, Target};
-use crate::buffer::{BufferLayout, Color, Descriptor};
+use crate::buffer::{
+    Block,
+    BufferLayout,
+    Color,
+    Descriptor,
+    Samples,
+    SampleBits,
+    SampleParts,
+    Transfer,
+    Texel,
+};
 use crate::pool::{ImageData, Pool, PoolKey};
 use crate::{run, shaders};
 use crate::util::ExtendOne;
@@ -141,6 +151,7 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     pool_plan: ImagePoolPlan,
     paint_group_layout: Option<usize>,
     quad_group_layout: Option<usize>,
+    fragment_data_group_layout: Option<usize>,
     paint_pipeline_layout: Option<usize>,
     default_sampler: Option<usize>,
     fragment_shaders: HashMap<FragmentShader, usize>,
@@ -570,17 +581,22 @@ pub struct Launcher<'program> {
 }
 
 struct SimpleRenderPipelineDescriptor<'data> {
-    vertex_bind_data: QuadBufferBind<'data>,
+    // Bind data for (set 0, binding 0).
+    vertex_bind_data: BufferBind<'data>,
+    // Texture for (set 1, binding 0) 
     fragment_texture: Texture,
+    // Texture for (set 2, binding 0)
+    fragment_bind_data: BufferBind<'data>,
     vertex: ShaderBind,
     fragment: ShaderBind,
 }
 
-enum QuadBufferBind<'data> {
+enum BufferBind<'data> {
     /// Upload the data, then bind the buffer.
     Set {
         data: &'data [u8],
     },
+    None,
     // /// The data is already there, simply bind the buffer.
     // Load(DeviceBuffer),
 }
@@ -597,8 +613,9 @@ struct SimpleRenderPipeline {
     pipeline: usize,
     buffer: DeviceBuffer,
     group: usize,
-    quad: usize,
+    vertex_bind: Option<usize>,
     vertices: u32,
+    fragment_bind: Option<usize>,
 }
 
 impl ImageBufferPlan {
@@ -1017,9 +1034,20 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let size = validate_size(&descriptor.layout)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
-        let format = match descriptor.texel.color {
-            Color::SRGB => wgpu::TextureFormat::Rgba8UnormSrgb,
-            Color::Xyz { .. } => return Err(LaunchError::InternalCommandError(line!())),
+        let format = match descriptor.texel {
+            Texel {
+                block: Block::Pixel,
+                samples: Samples {
+                    bits: SampleBits::Int8x4,
+                    parts: SampleParts::Rgba,
+                },
+                color: Color::Xyz {
+                    // Match only that which is necessary to get the right numbers in the shader.
+                    transfer: Transfer::Srgb,
+                    ..
+                },
+            } => wgpu::TextureFormat::Rgba8UnormSrgb,
+            _ => return Err(LaunchError::InternalCommandError(line!())),
         };
 
         // TODO: be more precise?
@@ -1339,6 +1367,32 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
+    fn make_generic_fragment_bind_group(&mut self) -> usize {
+        let bind_group_layouts = &mut self.bind_group_layouts;
+        let instructions = &mut self.instructions;
+        *self.fragment_data_group_layout.get_or_insert_with(|| {
+            let descriptor = BindGroupLayoutDescriptor {
+                entries: vec![
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                            ty: wgpu::BufferBindingType::Uniform,
+                        },
+                        count: None,
+                    },
+                ],
+            };
+
+            instructions.extend_one(Low::BindGroupLayout(descriptor));
+            let descriptor_id = *bind_group_layouts;
+            *bind_group_layouts += 1;
+            descriptor_id
+        })
+    }
+
     fn make_paint_group(&mut self) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
@@ -1374,18 +1428,38 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
-    fn make_paint_layout(&mut self) -> usize {
+    fn make_paint_layout(&mut self, desc: &SimpleRenderPipelineDescriptor) -> usize {
         let quad_bind_group = self.make_quad_bind_group();
         let paint_bind_group = self.make_paint_group();
-        let layouts = &mut self.pipeline_layouts;
-        let instructions = &mut self.instructions;
 
-        *self.paint_pipeline_layout.get_or_insert_with(|| {
+        let mut bind_group_layouts = vec![
+            quad_bind_group,
+            paint_bind_group,
+        ];
+
+        if let BufferBind::None = desc.fragment_bind_data {
+            let layouts = &mut self.pipeline_layouts;
+            let instructions = &mut self.instructions;
+
+            *self.paint_pipeline_layout.get_or_insert_with(|| {
+                let descriptor = PipelineLayoutDescriptor {
+                    bind_group_layouts,
+                    push_constant_ranges: &[]
+                };
+
+                instructions.extend_one(Low::PipelineLayout(descriptor));
+                let descriptor_id = *layouts;
+                *layouts += 1;
+                descriptor_id
+            })
+        } else {
+            bind_group_layouts.push(self.make_generic_fragment_bind_group());
+
+            let layouts = &mut self.pipeline_layouts;
+            let instructions = &mut self.instructions;
+
             let descriptor = PipelineLayoutDescriptor {
-                bind_group_layouts: vec![
-                    quad_bind_group,
-                    paint_bind_group,
-                ],
+                bind_group_layouts,
                 push_constant_ranges: &[]
             };
 
@@ -1393,7 +1467,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             let descriptor_id = *layouts;
             *layouts += 1;
             descriptor_id
-        })
+        }
     }
 
     fn shader(&mut self, desc: ShaderDescriptor) -> Result<usize, LaunchError> {
@@ -1458,17 +1532,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     
     fn simple_render_pipeline(
         &mut self,
-        vertex: ShaderBind,
-        fragment: ShaderBind,
+        desc: &SimpleRenderPipelineDescriptor,
         format: wgpu::TextureFormat,
     ) -> Result<usize, LaunchError> {
-        let layout = self.make_paint_layout();
+        let layout = self.make_paint_layout(desc);
 
-        let (vertex, vertex_entry_point) = match vertex {
+        let (vertex, vertex_entry_point) = match desc.vertex {
             ShaderBind::ShaderMain(shader) => (shader, "main"),
             ShaderBind::Shader { id, entry_point } => (id, entry_point)
         };
-        let (fragment, fragment_entry_point) = match fragment {
+        let (fragment, fragment_entry_point) = match desc.fragment {
             ShaderBind::ShaderMain(shader) => (shader, "main"),
             ShaderBind::Shader { id, entry_point } => (id, entry_point)
         };
@@ -1529,11 +1602,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(group)
     }
 
-    fn make_bind_group_quad_parameter(&mut self, bind: QuadBufferBind<'_>)
-        -> Result<usize, LaunchError>
+    fn make_bound_buffer(&mut self, bind: &BufferBind<'_>, layout_idx: usize)
+        -> Result<Option<usize>, LaunchError>
     {
         let buffer = match bind {
-            QuadBufferBind::Set { data } => {
+            BufferBind::None => return Ok(None),
+            BufferBind::Set { data } => {
                 let buffer = self.buffers;
                 self.push(Low::BufferInit(BufferDescriptorInit {
                     // FIXME: avoid the allocation here?
@@ -1546,7 +1620,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let group = self.bind_groups;
         let descriptor = BindGroupDescriptor {
-            layout_idx: self.make_quad_bind_group(),
+            layout_idx,
             entries: vec![
                 BindingResource::Buffer {
                     buffer_idx: buffer.0,
@@ -1557,7 +1631,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         };
 
         self.push(Low::BindGroup(descriptor))?;
-        Ok(group)
+        Ok(Some(group))
     }
 
     /// Render the pipeline, after all customization and buffers were bound..
@@ -1567,24 +1641,31 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let SimpleRenderPipelineDescriptor {
             vertex_bind_data,
             fragment_texture: texture,
-            vertex,
-            fragment,
-        } = descriptor;
+            fragment_bind_data,
+            vertex: _,
+            fragment: _,
+        } = &descriptor;
 
         let format = self.texture_map[&texture].format.format;
 
         let buffer = self.simple_quad_buffer();
-        let pipeline = self.simple_render_pipeline(vertex, fragment, format)?;
+        let pipeline = self.simple_render_pipeline(&descriptor, format)?;
 
-        let group = self.make_bind_group_sampled_texture(texture)?;
-        let quad = self.make_bind_group_quad_parameter(vertex_bind_data)?;
+        let group = self.make_bind_group_sampled_texture(*texture)?;
+        let vertex_layout = self.make_quad_bind_group();
+        let vertex_bind = self.make_bound_buffer(vertex_bind_data, vertex_layout)?;
+
+        // FIXME: this builds the layout even when it is not required.
+        let vertex_layout = self.make_generic_fragment_bind_group();
+        let fragment_bind = self.make_bound_buffer(fragment_bind_data, vertex_layout)?;
 
         Ok(SimpleRenderPipeline {
             pipeline,
             buffer,
             group,
-            quad,
+            vertex_bind,
             vertices: 4,
+            fragment_bind,
         })
     }
 
@@ -1608,18 +1689,21 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let SimpleRenderPipeline {
             pipeline,
             group,
-            quad,
             buffer,
+            vertex_bind,
             vertices,
+            fragment_bind,
         } = pipeline;
 
         self.push(Low::SetPipeline(pipeline))?;
 
-        self.push(Low::SetBindGroup {
-            group: quad,
-            index: 0,
-            offsets: Cow::Borrowed(&[]),
-        })?;
+        if let Some(quad) = vertex_bind {
+            self.push(Low::SetBindGroup {
+                group: quad,
+                index: 0,
+                offsets: Cow::Borrowed(&[]),
+            })?;
+        }
 
         self.push(Low::SetBindGroup {
             group,
@@ -1631,6 +1715,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             buffer: buffer.0,
             slot: 0,
         })?;
+
+        if let Some(bind) = fragment_bind {
+            self.push(Low::SetBindGroup {
+                group: bind,
+                index: 2,
+                offsets: Cow::Borrowed(&[]),
+            })?;
+        }
 
         self.push(Low::DrawOnce { vertices })?;
 
@@ -1665,9 +1757,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let min_b = (target.y as f32) / (viewport.height() as f32);
                 let max_b = (target.max_y as f32) / (viewport.height() as f32);
 
-                // FIXME: I'm pretty sure this layout should be wrong.
-                // However, it appears to work correctly on my stack:
-                // wgpu=0.9,shaderc=0.7.2,nvidia=465.27-5,GeForce GTX 960
+                // std140, always pad to 16 bytes.
                 let buffer: [[f32; 2]; 16] = [
                     [min_u, min_v], [0.0, 0.0],
                     [max_u, min_v], [0.0, 0.0],
@@ -1681,10 +1771,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 ];
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
-                    vertex_bind_data: QuadBufferBind::Set {
+                    vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
                     },
                     fragment_texture: texture,
+                    fragment_bind_data: BufferBind::None,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
@@ -1698,11 +1789,22 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     Some(FragmentShader::LinearColorMatrix),
                     shader_include_to_spirv(shaders::FRAG_LINEAR))?;
 
+                // std140, always pad to 16 bytes.
+                // matrix is an array of its columns.
+                let rgb_matrix: [f32; 12] = [
+                   matrix[0], matrix[3], matrix[6], 0.0, 
+                   matrix[1], matrix[4], matrix[7], 0.0, 
+                   matrix[2], matrix[5], matrix[8], 0.0, 
+                ];
+
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
-                    vertex_bind_data: QuadBufferBind::Set {
+                    vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
                     fragment_texture: texture,
+                    fragment_bind_data: BufferBind::Set {
+                        data: bytemuck::cast_slice(&rgb_matrix[..]),
+                    },
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
                 })

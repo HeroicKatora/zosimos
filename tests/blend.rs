@@ -51,15 +51,14 @@ fn run_blending() {
     let result = commands.inscribe(background, placement, foreground)
         .expect("Valid to inscribe");
 
-    /*
     let adapted = commands.chromatic_adaptation(
         result,
         command::ChromaticAdaptationMethod::VonKries,
-        Whitepoint::D50,
+        // to itself..
+        Whitepoint::D65,
     ).unwrap();
-    */
 
-    let (output, _outformat) = commands.output(result)
+    let (output, _outformat) = commands.output(adapted)
         .expect("Valid for output");
 
     let plan = commands.compile()
