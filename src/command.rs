@@ -1,10 +1,10 @@
-use std::collections::HashMap;
-use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, Texel, Whitepoint};
+use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint};
+use crate::pool::PoolImage;
 use crate::program::{
-    CompileError, Function, ImageBufferPlan, ImageBufferAssignment, PaintOnTopKind, Program,
+    CompileError, Function, ImageBufferAssignment, ImageBufferPlan, PaintOnTopKind, Program,
     Texture,
 };
-use crate::pool::PoolImage;
+use std::collections::HashMap;
 
 /// A reference to one particular value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -35,22 +35,15 @@ pub struct CommandBuffer {
 #[derive(Clone)]
 enum Op {
     /// i := in()
-    Input {
-        desc: Descriptor,
-    },
+    Input { desc: Descriptor },
     /// out(src)
     ///
     /// WIP: and is_cpu_type(desc)
     /// for the eventuality of gpu-only buffer layouts.
-    Output {
-        src: Register,
-    },
+    Output { src: Register },
     /// i := op()
     /// where type(i) = desc
-    Construct {
-        desc: Descriptor,
-        op: ConstructOp,
-    },
+    Construct { desc: Descriptor, op: ConstructOp },
     /// i := unary(src)
     /// where type(i) =? Op[type(src)]
     Unary {
@@ -95,10 +88,7 @@ pub(crate) enum High {
         dst: Register,
     },
     #[deprecated = "Should be mapped to of paint with a discarding load or another buffer initialization."]
-    Construct {
-        dst: Texture,
-        op: ConstructOp,
-    },
+    Construct { dst: Texture, op: ConstructOp },
     Paint {
         texture: Texture,
         dst: Target,
@@ -132,7 +122,7 @@ pub(crate) enum UnaryOp {
     /// Op(T) = T[.whitepoint=target]
     /// This is a partial method for CIE XYZ-ish color spaces. Note that ICC requires adaptation to
     /// D50 for example as the reference color space.
-    ChromaticAdaptation(ChromaticAdaptation)
+    ChromaticAdaptation(ChromaticAdaptation),
 }
 
 #[derive(Clone)]
@@ -143,7 +133,7 @@ pub(crate) enum BinaryOp {
     /// Replace a channel T with U itself.
     /// Op[T, U] = T
     /// where select(channel, T.color) = U.color
-    Inject { channel: ColorChannel }
+    Inject { channel: ColorChannel },
 }
 
 /// A rectangle in `u32` space.
@@ -182,7 +172,7 @@ pub struct Affine {
 /// dichromacy response to a color by matching it for a 'standard' human. We can also estimate if a
 /// particular color can be made visible for someone afflicted with a cone deficiency etc.
 /// (see: Gustavo M. Machado, et.al A Physiologically-based Model for Simulation of Color Vision Deficiency)
-/// 
+///
 /// ```text
 /// 0.600    0.400    0.000
 /// 0.240    0.105   −0.700
@@ -190,10 +180,14 @@ pub struct Affine {
 /// ```
 #[derive(Clone, Debug)]
 pub(crate) struct ChromaticAdaptation {
+    /// The matrix converting source to XYZ.
+    to_xyz_matrix: RowMatrix,
     /// The target whitepoint of the adaptation.
     source: Whitepoint,
     /// The method to use.
     method: ChromaticAdaptationMethod,
+    /// The matrix converting from XYZ to target.
+    from_xyz_matrix: RowMatrix,
     /// The target whitepoint of the adaptation.
     target: Whitepoint,
 }
@@ -268,18 +262,14 @@ impl CommandBuffer {
     /// Declare an image as input.
     ///
     /// Returns its register if the image has a valid descriptor, otherwise returns an error.
-    pub fn input_from(&mut self, img: PoolImage)
-        -> Register
-    {
+    pub fn input_from(&mut self, img: PoolImage) -> Register {
         let descriptor = img.descriptor();
         self.input(descriptor)
             .expect("Pool image descriptor should be valid")
     }
 
     /// Select a rectangular part of an image.
-    pub fn crop(&mut self, src: Register, rect: Rectangle)
-        -> Result<Register, CommandError>
-    {
+    pub fn crop(&mut self, src: Register, rect: Rectangle) -> Result<Register, CommandError> {
         let desc = self.describe_reg(src)?.clone();
         Ok(self.push(Op::Unary {
             src,
@@ -291,9 +281,7 @@ impl CommandBuffer {
     /// Create an image with different color encoding.
     ///
     /// This goes through linear RGB, not ICC, and requires the two models to have same whitepoint.
-    pub fn color_convert(&mut self, src: Register, texel: Texel)
-        -> Result<Register, CommandError>
-    {
+    pub fn color_convert(&mut self, src: Register, texel: Texel) -> Result<Register, CommandError> {
         let desc_src = self.describe_reg(src)?;
 
         // Pretend that all colors with the same whitepoint will be mapped from encoded to
@@ -303,12 +291,18 @@ impl CommandBuffer {
         // cases, we will later add some temporary conversion.
         match (&desc_src.texel.color, &texel.color) {
             (
-                Color::Xyz { whitepoint: wp_src, .. },
-                Color::Xyz { whitepoint: wp_dst, .. },
-            ) if wp_src == wp_dst => {},
-            _ => return Err(CommandError {
-                inner: CommandErrorKind::BadDescriptor(desc_src.clone()),
-            }),
+                Color::Xyz {
+                    whitepoint: wp_src, ..
+                },
+                Color::Xyz {
+                    whitepoint: wp_dst, ..
+                },
+            ) if wp_src == wp_dst => {}
+            _ => {
+                return Err(CommandError {
+                    inner: CommandErrorKind::BadDescriptor(desc_src.clone()),
+                })
+            }
         }
 
         // FIXME: validate memory condition.
@@ -324,10 +318,7 @@ impl CommandBuffer {
         let op = Op::Unary {
             src,
             op: UnaryOp::ColorConvert(texel.color.clone()),
-            desc: Descriptor {
-                layout,
-                texel,
-            },
+            desc: Descriptor { layout, texel },
         };
 
         Ok(self.push(op))
@@ -345,9 +336,15 @@ impl CommandBuffer {
         let desc_src = self.describe_reg(src)?;
         let texel_color;
         let source_wp;
+        let (to_xyz_matrix, from_xyz_matrix);
 
         match desc_src.texel.color {
-            Color::Xyz { whitepoint, primary, transfer, luminance } => {
+            Color::Xyz {
+                whitepoint,
+                primary,
+                transfer,
+                luminance,
+            } => {
                 texel_color = Color::Xyz {
                     whitepoint: target,
                     primary,
@@ -355,14 +352,18 @@ impl CommandBuffer {
                     luminance,
                 };
 
+                to_xyz_matrix = primary.to_xyz(whitepoint);
+                from_xyz_matrix = primary.to_xyz(target).inv();
                 source_wp = whitepoint;
-            },
-            _ => return Err(CommandError {
-                inner: CommandErrorKind::BadDescriptor(desc_src.clone()),
-            }),
+            }
+            _ => {
+                return Err(CommandError {
+                    inner: CommandErrorKind::BadDescriptor(desc_src.clone()),
+                })
+            }
         };
 
-        let layout = BufferLayout { .. desc_src.layout };
+        let layout = BufferLayout { ..desc_src.layout };
         let texel = Texel {
             color: texel_color,
             ..desc_src.texel
@@ -371,23 +372,25 @@ impl CommandBuffer {
         let op = Op::Unary {
             src,
             op: UnaryOp::ChromaticAdaptation(ChromaticAdaptation {
+                to_xyz_matrix,
                 source: source_wp,
                 target,
+                from_xyz_matrix,
                 method,
             }),
-            desc: Descriptor {
-                layout,
-                texel,
-            },
+            desc: Descriptor { layout, texel },
         };
 
         Ok(self.push(op))
     }
 
     /// Embed this image as part of a larger one.
-    pub fn inscribe(&mut self, below: Register, rect: Rectangle, above: Register)
-        -> Result<Register, CommandError>
-    {
+    pub fn inscribe(
+        &mut self,
+        below: Register,
+        rect: Rectangle,
+        above: Register,
+    ) -> Result<Register, CommandError> {
         let desc_below = self.describe_reg(below)?;
         let desc_above = self.describe_reg(above)?;
 
@@ -418,11 +421,14 @@ impl CommandBuffer {
     }
 
     /// Extract some channels from an image data into a new view.
-    pub fn extract(&mut self, src: Register, channel: ColorChannel)
-        -> Result<Register, CommandError>
-    {
+    pub fn extract(
+        &mut self,
+        src: Register,
+        channel: ColorChannel,
+    ) -> Result<Register, CommandError> {
         let desc = self.describe_reg(src)?;
-        let texel = desc.channel_texel(channel)
+        let texel = desc
+            .channel_texel(channel)
             .ok_or_else(|| CommandError::OTHER)?;
         let op = Op::Unary {
             src,
@@ -437,11 +443,15 @@ impl CommandBuffer {
     }
 
     /// Overwrite some channels with overlaid data.
-    pub fn inject(&mut self, below: Register, channel: ColorChannel, above: Register)
-        -> Result<Register, CommandError>
-    {
+    pub fn inject(
+        &mut self,
+        below: Register,
+        channel: ColorChannel,
+        above: Register,
+    ) -> Result<Register, CommandError> {
         let desc_below = self.describe_reg(below)?;
-        let expected_texel = desc_below.channel_texel(channel)
+        let expected_texel = desc_below
+            .channel_texel(channel)
             .ok_or_else(|| CommandError::OTHER)?;
         let desc_above = self.describe_reg(above)?;
 
@@ -462,17 +472,19 @@ impl CommandBuffer {
     }
 
     /// Overlay this image as part of a larger one, performing blending.
-    pub fn blend(&mut self, _below: Register, _rect: Rectangle, _above: Register, _blend: Blend)
-        -> Result<Register, CommandError>
-    {
+    pub fn blend(
+        &mut self,
+        _below: Register,
+        _rect: Rectangle,
+        _above: Register,
+        _blend: Blend,
+    ) -> Result<Register, CommandError> {
         // TODO: What blending should we support
         Err(CommandError::OTHER)
     }
 
     /// A solid color image, from a descriptor and a single texel.
-    pub fn solid(&mut self, describe: Descriptor, data: &[u8])
-        -> Result<Register, CommandError>
-    {
+    pub fn solid(&mut self, describe: Descriptor, data: &[u8]) -> Result<Register, CommandError> {
         if !describe.is_consistent() {
             return Err(CommandError {
                 inner: CommandErrorKind::BadDescriptor(describe),
@@ -492,9 +504,7 @@ impl CommandBuffer {
     }
 
     /// An affine transformation of the image.
-    pub fn affine(&mut self, src: Register, affine: Affine)
-        -> Result<Register, CommandError>
-    {
+    pub fn affine(&mut self, src: Register, affine: Affine) -> Result<Register, CommandError> {
         // TODO: should we check affine here?
         let desc = self.describe_reg(src)?.clone();
         Ok(self.push(Op::Unary {
@@ -507,14 +517,10 @@ impl CommandBuffer {
     /// Declare an output.
     ///
     /// Outputs MUST later be bound from the pool during launch.
-    pub fn output(&mut self, src: Register)
-        -> Result<(Register, Descriptor), CommandError>
-    {
+    pub fn output(&mut self, src: Register) -> Result<(Register, Descriptor), CommandError> {
         let outformat = self.describe_reg(src)?.clone();
         // Ignore this, it doesn't really produce a register.
-        let register = self.push(Op::Output {
-            src,
-        });
+        let register = self.push(Op::Output { src });
         Ok((register, outformat))
     }
 
@@ -530,21 +536,27 @@ impl CommandBuffer {
         for (back_idx, op) in self.ops.iter().rev().enumerate() {
             let idx = self.ops.len() - 1 - back_idx;
             match op {
-                Op::Input { .. } | Op::Construct { .. } => {},
+                Op::Input { .. } | Op::Construct { .. } => {}
                 &Op::Output { src: Register(src) } => {
                     last_use[src] = last_use[src].max(idx);
                     first_use[src] = first_use[src].min(idx);
-                },
-                &Op::Unary { src: Register(src), .. } => {
+                }
+                &Op::Unary {
+                    src: Register(src), ..
+                } => {
                     last_use[src] = last_use[src].max(idx);
                     first_use[src] = first_use[src].min(idx);
-                },
-                &Op::Binary { lhs: Register(lhs), rhs: Register(rhs), .. } => {
+                }
+                &Op::Binary {
+                    lhs: Register(lhs),
+                    rhs: Register(rhs),
+                    ..
+                } => {
                     last_use[rhs] = last_use[rhs].max(idx);
                     first_use[rhs] = first_use[rhs].min(idx);
                     last_use[lhs] = last_use[lhs].max(idx);
                     first_use[lhs] = first_use[lhs].min(idx);
-                },
+                }
             }
         }
 
@@ -553,14 +565,16 @@ impl CommandBuffer {
 
         for (idx, op) in self.ops.iter().enumerate() {
             let liveness = first_use[idx]..last_use[idx];
-            let descriptor = self.describe_reg(if let &Op::Output { src } = op {
-                src
-            } else {
-                Register(idx)
-            }).expect("A non-output register");
+            let descriptor = self
+                .describe_reg(if let &Op::Output { src } = op {
+                    src
+                } else {
+                    Register(idx)
+                })
+                .expect("A non-output register");
 
-            let ImageBufferAssignment { buffer, texture }
-                = textures.allocate_for(descriptor, liveness);
+            let ImageBufferAssignment { buffer, texture } =
+                textures.allocate_for(descriptor, liveness);
 
             match op {
                 Op::Input { desc } => {
@@ -583,7 +597,8 @@ impl CommandBuffer {
                 Op::Unary { desc: _, src, op } => {
                     match op {
                         &UnaryOp::Crop(region) => {
-                            let target = Rectangle::with_width_height(region.width(), region.height());
+                            let target =
+                                Rectangle::with_width_height(region.width(), region.height());
                             high_ops.push(High::Paint {
                                 texture: reg_to_texture[src],
                                 dst: Target::Discard(texture),
@@ -594,24 +609,38 @@ impl CommandBuffer {
                                     paint_on_top: PaintOnTopKind::Copy,
                                 },
                             });
-                        },
+                        }
                         UnaryOp::ChromaticAdaptation(adaptation) => {
-                            let matrix = adaptation.into_matrix()?;
+                            // Determine matrix for converting to xyz, then adapt, then back.
+                            let adapt = RowMatrix::new(adaptation.into_matrix()?);
+                            let output = adapt.multiply_right(adaptation.to_xyz_matrix.into());
+                            let matrix = adaptation.from_xyz_matrix.multiply_right(output);
+
+                            // If you want to debug this (for comparison to reference):
+                            // eprintln!("{:?}", adaptation.to_xyz_matrix);
+                            // eprintln!("{:?}", adaptation.from_xyz_matrix);
+                            // eprintln!("{:?}", adapt);
+                            // eprintln!("{:?}", matrix);
 
                             high_ops.push(High::Paint {
                                 texture: reg_to_texture[src],
                                 dst: Target::Discard(texture),
                                 fn_: Function::Transform {
-                                    matrix,
+                                    matrix: matrix.into(),
                                 },
                             });
-                        },
+                        }
                         _ => return Err(CompileError::NotYetImplemented),
                     }
 
                     reg_to_texture.insert(Register(idx), texture);
                 }
-                Op::Binary { desc: _, lhs, rhs, op } => {
+                Op::Binary {
+                    desc: _,
+                    lhs,
+                    rhs,
+                    op,
+                } => {
                     let lower_region = Rectangle::from(self.describe_reg(*lhs).unwrap());
                     let upper_region = Rectangle::from(self.describe_reg(*rhs).unwrap());
 
@@ -638,7 +667,7 @@ impl CommandBuffer {
                                     paint_on_top: PaintOnTopKind::Copy,
                                 },
                             });
-                        },
+                        }
                         _ => return Err(CompileError::NotYetImplemented),
                     }
 
@@ -656,19 +685,13 @@ impl CommandBuffer {
     }
 
     /// Get the descriptor for a register.
-    fn describe_reg(&self, Register(reg): Register)
-        -> Result<&Descriptor, CommandError>
-    {
+    fn describe_reg(&self, Register(reg): Register) -> Result<&Descriptor, CommandError> {
         match self.ops.get(reg) {
-            None | Some(Op::Output { .. }) => {
-                Err(CommandError::BAD_REGISTER)
-            }
+            None | Some(Op::Output { .. }) => Err(CommandError::BAD_REGISTER),
             Some(Op::Input { desc })
             | Some(Op::Construct { desc, .. })
             | Some(Op::Unary { desc, .. })
-            | Some(Op::Binary { desc, .. }) => {
-                Ok(desc)
-            }
+            | Some(Op::Binary { desc, .. }) => Ok(desc),
         }
     }
 
@@ -691,7 +714,7 @@ impl ChromaticAdaptation {
             ($source:expr, $target:expr, $($lhs:ident => $lhsty:ty)|*) => {
                 $(
                     translate_matrix!(
-                        @$source, $target, $lhs => $lhsty : 
+                        @$source, $target, $lhs => $lhsty :
                         A => wp::A | B => wp::B | C => wp::C
                         | D50 => wp::D50 | D55 => wp::D55 | D65 => wp::D65
                         | D75 => wp::D75 | E => wp::E | F2 => wp::F2
@@ -702,8 +725,8 @@ impl ChromaticAdaptation {
             (@$source:expr, $target:expr, $lhs:ident => $lhsty:ty : $($rhs:ident => $ty:ty)|*) => {
                 $(
                     if let (Whitepoint::$lhs, Whitepoint::$rhs) = ($source, $target) {
-                        return Ok(<Method as TransformMatrix<$lhsty, $ty, f32>>::get_cone_response
-                                  as fn(&Method) -> ConeResponseMatrices<f32>);
+                        return Ok(<Method as TransformMatrix<$lhsty, $ty, f32>>::generate_transform_matrix
+                                  as fn(&Method) -> [f32;9]);
                     }
                 )*
             };
@@ -726,20 +749,27 @@ impl ChromaticAdaptation {
         let matrices = method(match self.method {
             // Bradford's original method that does slight blue non-linearity is not yet supported.
             // Please implement the paper if you feel compelled to.
-            ChromaticAdaptationMethod::BradfordNonLinear => return Err(CompileError::NotYetImplemented),
+            ChromaticAdaptationMethod::BradfordNonLinear => {
+                return Err(CompileError::NotYetImplemented)
+            }
             ChromaticAdaptationMethod::BradfordVonKries => &Method::Bradford,
             ChromaticAdaptationMethod::VonKries => &Method::VonKries,
             ChromaticAdaptationMethod::Xyz => &Method::XyzScaling,
         });
 
-        Ok(matrices.ma)
+        Ok(matrices)
     }
 }
 
 impl Rectangle {
     /// A rectangle at the origin with given width (x) and height (y).
     pub fn with_width_height(width: u32, height: u32) -> Self {
-        Rectangle { x: 0, y: 0, max_x: width, max_y: height }
+        Rectangle {
+            x: 0,
+            y: 0,
+            max_x: width,
+            max_y: height,
+        }
     }
 
     /// A rectangle describing a complete buffer.
@@ -857,10 +887,12 @@ impl CommandError {
     const BAD_REGISTER: Self = Self::OTHER;
 
     pub fn is_type_err(&self) -> bool {
-        matches!(self.inner,
+        matches!(
+            self.inner,
             CommandErrorKind::GenericTypeError
-            | CommandErrorKind::ConflictingTypes(_, _)
-            | CommandErrorKind::BadDescriptor(_))
+                | CommandErrorKind::ConflictingTypes(_, _)
+                | CommandErrorKind::BadDescriptor(_)
+        )
     }
 }
 
@@ -886,10 +918,8 @@ fn simple_program() {
     let mut pool = Pool::new();
     let mut commands = CommandBuffer::default();
 
-    let background = image::open(BACKGROUND)
-        .expect("Background image opened");
-    let foreground = image::open(FOREGROUND)
-        .expect("Background image opened");
+    let background = image::open(BACKGROUND).expect("Background image opened");
+    let foreground = image::open(FOREGROUND).expect("Background image opened");
     let expected = BufferLayout::from(&background);
 
     let placement = Rectangle {
@@ -905,12 +935,11 @@ fn simple_program() {
     let foreground = pool.insert_srgb(&foreground);
     let foreground = commands.input_from(foreground.into());
 
-    let result = commands.inscribe(background, placement, foreground)
+    let result = commands
+        .inscribe(background, placement, foreground)
         .expect("Valid to inscribe");
-    let (_, outformat) = commands.output(result)
-        .expect("Valid for output");
+    let (_, outformat) = commands.output(result).expect("Valid for output");
 
-    let _ = commands.compile()
-        .expect("Could build command buffer");
+    let _ = commands.compile().expect("Could build command buffer");
     assert_eq!(outformat.layout, expected);
 }

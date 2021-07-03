@@ -16,10 +16,8 @@ fn run_blending() {
     let mut pool = Pool::new();
     let mut commands = CommandBuffer::default();
 
-    let background = image::open(BACKGROUND)
-        .expect("Background image opened");
-    let foreground = image::open(FOREGROUND)
-        .expect("Background image opened");
+    let background = image::open(BACKGROUND).expect("Background image opened");
+    let foreground = image::open(FOREGROUND).expect("Background image opened");
 
     let (bg_key, background) = {
         let entry = pool.insert_srgb(&background);
@@ -48,28 +46,32 @@ fn run_blending() {
     let background = commands.input(background).unwrap();
     let foreground = commands.input(foreground).unwrap();
 
-    let result = commands.inscribe(background, placement, foreground)
+    let result = commands
+        .inscribe(background, placement, foreground)
         .expect("Valid to inscribe");
 
-    /*
-    let adapted = commands.chromatic_adaptation(
-        result,
-        command::ChromaticAdaptationMethod::VonKries,
-        Whitepoint::D50,
-    ).unwrap();
-    */
+    let adapted = commands
+        .chromatic_adaptation(
+            result,
+            command::ChromaticAdaptationMethod::VonKries,
+            // to itself..
+            Whitepoint::D65,
+        )
+        .unwrap();
 
-    let (output, _outformat) = commands.output(result)
-        .expect("Valid for output");
+    let (output, _outformat) = commands.output(adapted).expect("Valid for output");
 
-    let plan = commands.compile()
-        .expect("Could build command buffer");
-    let adapter = plan.choose_adapter(adapters)
+    let plan = commands.compile().expect("Could build command buffer");
+    let adapter = plan
+        .choose_adapter(adapters)
         .expect("Did not find any adapter for executing the blend operation");
 
-    let mut execution = plan.launch(&mut pool)
-        .bind(background, bg_key).unwrap()
-        .bind(foreground, fg_key).unwrap()
+    let mut execution = plan
+        .launch(&mut pool)
+        .bind(background, bg_key)
+        .unwrap()
+        .bind(foreground, fg_key)
+        .unwrap()
         .launch(&adapter)
         .expect("Launching failed");
 
@@ -77,9 +79,9 @@ fn run_blending() {
         let _wait_point = execution.step().expect("Shouldn't fail but");
     }
 
-    let mut retire = execution
-        .retire_gracefully(&mut pool);
-    let image = retire.output(output)
+    let mut retire = execution.retire_gracefully(&mut pool);
+    let image = retire
+        .output(output)
         .expect("A valid image output")
         .to_image()
         .expect("An `image` image");

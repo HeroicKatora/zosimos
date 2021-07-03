@@ -1,13 +1,20 @@
-use core::{future::Future, num::{NonZeroU32, NonZeroU64}, ops::Range};
+use core::{
+    future::Future,
+    num::{NonZeroU32, NonZeroU64},
+    ops::Range,
+};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use crate::buffer::{
+    Block, BufferLayout, Color, Descriptor, RowMatrix, SampleBits, SampleParts, Samples, Texel,
+    Transfer,
+};
 use crate::command::{High, Rectangle, Register, Target};
-use crate::buffer::{BufferLayout, Color, Descriptor};
 use crate::pool::{ImageData, Pool, PoolKey};
-use crate::{run, shaders};
 use crate::util::ExtendOne;
+use crate::{run, shaders};
 
 /// Planned out and intrinsically validated command buffer.
 ///
@@ -70,9 +77,7 @@ pub(crate) enum Function {
     ///   bind(1,1): sampler2D
     ///   bind(2,0): transform matrix
     ///   out: vec4 (color)
-    Transform {
-        matrix: [f32; 9],
-    },
+    Transform { matrix: RowMatrix },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -115,7 +120,7 @@ pub(crate) struct Texture(pub(crate) usize);
 #[derive(Default)]
 struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     instructions: Instructions,
-    
+
     // Replicated fields from `run::Descriptors` but only length.
     bind_groups: usize,
     bind_group_layouts: usize,
@@ -141,6 +146,7 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     pool_plan: ImagePoolPlan,
     paint_group_layout: Option<usize>,
     quad_group_layout: Option<usize>,
+    fragment_data_group_layout: Option<usize>,
     paint_pipeline_layout: Option<usize>,
     default_sampler: Option<usize>,
     fragment_shaders: HashMap<FragmentShader, usize>,
@@ -156,7 +162,6 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     buffer_map: HashMap<Buffer, BufferMap>,
     /// Describes which intermediate textures have been mapped to the GPU.
     staging_map: HashMap<Texture, StagingTexture>,
-
     // Arena style allocators.
 }
 
@@ -550,8 +555,7 @@ pub enum CompileError {
 /// Something won't work with this program and pool combination, no matter the amount of
 /// configuration.
 #[derive(Debug)]
-pub struct MismatchError {
-}
+pub struct MismatchError {}
 
 /// Prepare program execution with a specific pool.
 ///
@@ -570,22 +574,27 @@ pub struct Launcher<'program> {
 }
 
 struct SimpleRenderPipelineDescriptor<'data> {
-    vertex_bind_data: QuadBufferBind<'data>,
+    // Bind data for (set 0, binding 0).
+    vertex_bind_data: BufferBind<'data>,
+    // Texture for (set 1, binding 0)
     fragment_texture: Texture,
+    // Texture for (set 2, binding 0)
+    fragment_bind_data: BufferBind<'data>,
     vertex: ShaderBind,
     fragment: ShaderBind,
 }
 
-enum QuadBufferBind<'data> {
+enum BufferBind<'data> {
     /// Upload the data, then bind the buffer.
     Set {
         data: &'data [u8],
     },
+    None,
     // /// The data is already there, simply bind the buffer.
     // Load(DeviceBuffer),
 }
 
-enum ShaderBind{
+enum ShaderBind {
     ShaderMain(usize),
     Shader {
         id: usize,
@@ -597,32 +606,31 @@ struct SimpleRenderPipeline {
     pipeline: usize,
     buffer: DeviceBuffer,
     group: usize,
-    quad: usize,
+    vertex_bind: Option<usize>,
     vertices: u32,
+    fragment_bind: Option<usize>,
 }
 
 impl ImageBufferPlan {
-    pub(crate) fn allocate_for(&mut self, desc: &Descriptor, _: Range<usize>)
-        -> ImageBufferAssignment
-    {
+    pub(crate) fn allocate_for(
+        &mut self,
+        desc: &Descriptor,
+        _: Range<usize>,
+    ) -> ImageBufferAssignment {
         // FIXME: we could de-duplicate textures using liveness information.
         let texture = Texture(self.texture.len());
         self.texture.push(desc.clone());
         let buffer = Buffer(self.buffer.len());
         self.buffer.push(desc.layout.clone());
         self.by_layout.insert(desc.layout.clone(), texture);
-        let assigned = ImageBufferAssignment {
-            buffer,
-            texture,
-        };
+        let assigned = ImageBufferAssignment { buffer, texture };
         self.by_register.push(assigned);
         assigned
     }
 
-    pub(crate) fn get(&self, idx: Register)
-        -> Result<ImageBufferAssignment, LaunchError>
-    {
-        self.by_register.get(idx.0)
+    pub(crate) fn get(&self, idx: Register) -> Result<ImageBufferAssignment, LaunchError> {
+        self.by_register
+            .get(idx.0)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))
             .map(ImageBufferAssignment::clone)
     }
@@ -635,17 +643,14 @@ impl ImagePoolPlan {
         entry.key()
     }
 
-    pub(crate) fn get(&self, idx: Register)
-        -> Result<PoolKey, LaunchError>
-    {
-        self.plan.get(&idx)
+    pub(crate) fn get(&self, idx: Register) -> Result<PoolKey, LaunchError> {
+        self.plan
+            .get(&idx)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))
             .map(PoolKey::clone)
     }
 
-    pub(crate) fn get_texture(&self, idx: Register)
-        -> Option<Texture>
-    {
+    pub(crate) fn get_texture(&self, idx: Register) -> Option<Texture> {
         let key = self.plan.get(&idx)?;
         self.buffer.get(key).cloned()
     }
@@ -653,12 +658,12 @@ impl ImagePoolPlan {
 
 impl Program {
     /// Choose an applicable adapter from one of the presented ones.
-    pub fn choose_adapter(&self, mut from: impl Iterator<Item=wgpu::Adapter>)
-        -> Result<wgpu::Adapter, MismatchError>
-    {
+    pub fn choose_adapter(
+        &self,
+        mut from: impl Iterator<Item = wgpu::Adapter>,
+    ) -> Result<wgpu::Adapter, MismatchError> {
         #[allow(non_snake_case)]
-        let ALL_TEXTURE_USAGE: wgpu::TextureUsage =
-            wgpu::TextureUsage::COPY_DST
+        let ALL_TEXTURE_USAGE: wgpu::TextureUsage = wgpu::TextureUsage::COPY_DST
             | wgpu::TextureUsage::COPY_SRC
             | wgpu::TextureUsage::SAMPLED
             | wgpu::TextureUsage::RENDER_ATTACHMENT;
@@ -666,13 +671,14 @@ impl Program {
         while let Some(adapter) = from.next() {
             // FIXME: check limits.
             // FIXME: collect required texture formats from `self.textures`
-            let basic_format = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8UnormSrgb);
+            let basic_format =
+                adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8UnormSrgb);
             if !basic_format.allowed_usages.contains(ALL_TEXTURE_USAGE) {
                 continue;
             }
 
             from.for_each(drop);
-            return Ok(adapter)
+            return Ok(adapter);
         }
 
         Err(MismatchError {})
@@ -691,11 +697,11 @@ impl Program {
     ///
     /// Required input and output image descriptors must match those declared, or be convertible
     /// to them when a normalization operation was declared.
-    pub fn launch<'pool>(&'pool self, pool: &'pool mut Pool)
-        -> Launcher<'pool>
-    {
+    pub fn launch<'pool>(&'pool self, pool: &'pool mut Pool) -> Launcher<'pool> {
         // Create empty bind assignments as a start, with respective layouts.
-        let binds = self.textures.texture
+        let binds = self
+            .textures
+            .texture
             .iter()
             .map(|desciptor| ImageData::LateBound(desciptor.layout.clone()))
             .collect();
@@ -714,9 +720,7 @@ impl Launcher<'_> {
     ///
     /// Returns an error if the register does not specify an input, or when there is no image under
     /// the key in the pool, or when the image in the pool does not match the declared format.
-    pub fn bind(mut self, Register(reg): Register, img: PoolKey)
-        -> Result<Self, LaunchError>
-    {
+    pub fn bind(mut self, Register(reg): Register, img: PoolKey) -> Result<Self, LaunchError> {
         let mut entry = match self.pool.entry(img) {
             Some(entry) => entry,
             None => return Err(LaunchError::InternalCommandError(line!())),
@@ -738,9 +742,7 @@ impl Launcher<'_> {
     /// You do not need to call this prior to launching as it will be performed automatically.
     /// However, you might get more detailed error information and in a future version might
     /// pre-determine the keys that will be used.
-    pub fn bind_remaining_outputs(mut self)
-        -> Result<Self, LaunchError>
-    {
+    pub fn bind_remaining_outputs(mut self) -> Result<Self, LaunchError> {
         for high in &self.program.ops {
             if let &High::Output { src: register, dst } = high {
                 let assigned = &self.program.textures.by_register[register.0];
@@ -761,7 +763,7 @@ impl Launcher<'_> {
         for high in &self.program.ops {
             if let &High::Input(register, _) = high {
                 if self.pool_plan.get_texture(register).is_none() {
-                    return Err(LaunchError::InternalCommandError(line!()))
+                    return Err(LaunchError::InternalCommandError(line!()));
                 }
             }
         }
@@ -820,12 +822,10 @@ impl Launcher<'_> {
                                 load: wgpu::LoadOp::Clear(wgpu::Color::RED),
                                 store: true,
                             }
-                        },
-                        Target::Load(_) => {
-                            wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: true,
-                            }
+                        }
+                        Target::Load(_) => wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: true,
                         },
                     };
 
@@ -889,9 +889,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.pool_plan = plan.clone();
     }
 
-    fn extract_buffers(&self, buffers: &mut Vec<ImageData>, pool: &mut Pool) -> Result<(), LaunchError> {
+    fn extract_buffers(
+        &self,
+        buffers: &mut Vec<ImageData>,
+        pool: &mut Pool,
+    ) -> Result<(), LaunchError> {
         for (&pool_key, &texture) in &self.pool_plan.buffer {
-            let mut entry = pool.entry(pool_key)
+            let mut entry = pool
+                .entry(pool_key)
                 .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
             let buffer = &mut buffers[texture.0];
 
@@ -929,7 +934,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 }
 
                 self.is_in_command_encoder = true;
-            },
+            }
             Low::BeginRenderPass(_) => {
                 if self.is_in_render_pass {
                     return Err(LaunchError::InternalCommandError(line!()));
@@ -940,7 +945,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 }
 
                 self.is_in_render_pass = true;
-            },
+            }
             Low::EndCommands => {
                 if !self.is_in_command_encoder {
                     return Err(LaunchError::InternalCommandError(line!()));
@@ -948,7 +953,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 self.is_in_command_encoder = false;
                 self.commands += 1;
-            },
+            }
             Low::EndRenderPass => {
                 if !self.is_in_render_pass {
                     return Err(LaunchError::InternalCommandError(line!()));
@@ -956,7 +961,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 self.is_in_render_pass = false;
             }
-            Low::SetPipeline(_) => {},
+            Low::SetPipeline(_) => {}
             Low::SetBindGroup { group, .. } => {
                 if group >= self.bind_groups {
                     return Err(LaunchError::InternalCommandError(line!()));
@@ -968,11 +973,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 }
             }
             // TODO: could validate indices.
-            Low::DrawOnce { .. }
-            | Low::DrawIndexedZero { .. }
-            | Low::SetPushConstants { .. } => {},
+            Low::DrawOnce { .. } | Low::DrawIndexedZero { .. } | Low::SetPushConstants { .. } => {}
             Low::RunTopCommand => {
-                if self.commands == 0{
+                if self.commands == 0 {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
 
@@ -994,17 +997,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
             }
-            Low::WriteImageToBuffer { .. }
-            | Low::ReadBuffer { .. } => {},
+            Low::WriteImageToBuffer { .. } | Low::ReadBuffer { .. } => {}
         }
 
         self.instructions.extend_one(low);
         Ok(())
     }
 
-    fn make_texture_descriptor(&mut self, texture: Texture)
-        -> Result<TextureDescriptor, LaunchError>
-    {
+    fn make_texture_descriptor(
+        &mut self,
+        texture: Texture,
+    ) -> Result<TextureDescriptor, LaunchError> {
         let descriptor = &self.buffer_plan.texture[texture.0];
 
         fn validate_size(layout: &BufferLayout) -> Option<(NonZeroU32, NonZeroU32)> {
@@ -1017,9 +1020,22 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let size = validate_size(&descriptor.layout)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
-        let format = match descriptor.texel.color {
-            Color::SRGB => wgpu::TextureFormat::Rgba8UnormSrgb,
-            Color::Xyz { .. } => return Err(LaunchError::InternalCommandError(line!())),
+        let format = match descriptor.texel {
+            Texel {
+                block: Block::Pixel,
+                samples:
+                    Samples {
+                        bits: SampleBits::Int8x4,
+                        parts: SampleParts::Rgba,
+                    },
+                color:
+                    Color::Xyz {
+                        // Match only that which is necessary to get the right numbers in the shader.
+                        transfer: Transfer::Srgb,
+                        ..
+                    },
+            } => wgpu::TextureFormat::Rgba8UnormSrgb,
+            _ => return Err(LaunchError::InternalCommandError(line!())),
         };
 
         // TODO: be more precise?
@@ -1055,7 +1071,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let bytes_per_row = (descriptor.layout.bytes_per_texel as u32)
             .checked_mul(texture_format.size.0.get())
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-        let bytes_per_row = (bytes_per_row/256 + u32::from(bytes_per_row%256 != 0))
+        let bytes_per_row = (bytes_per_row / 256 + u32::from(bytes_per_row % 256 != 0))
             .checked_mul(256)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
@@ -1083,8 +1099,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             (
                 DeviceBuffer(buffer),
-                DeviceBuffer(buffer+1),
-                DeviceBuffer(buffer+2),
+                DeviceBuffer(buffer + 1),
+                DeviceBuffer(buffer + 2),
             )
         };
 
@@ -1102,29 +1118,37 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         };
 
         // TODO do a match instead?
-        let in_map = self.register_map
-            .entry(idx)
-            .or_insert(map_entry.clone());
+        let in_map = self.register_map.entry(idx).or_insert(map_entry.clone());
         *in_map = map_entry.clone();
 
-        self.buffer_map.insert(reg_buffer, BufferMap {
-            device: buffer,
-            layout: in_map.buffer_layout.clone(),
-        });
+        self.buffer_map.insert(
+            reg_buffer,
+            BufferMap {
+                device: buffer,
+                layout: in_map.buffer_layout.clone(),
+            },
+        );
 
         if let Some(staging) = in_map.staging {
-            self.staging_map.insert(reg_texture, StagingTexture {
-                device: staging,
-                format: in_map.staging_format
-                    .clone()
-                    .expect("Have a format for staging texture when we have staging texture"),
-            });
+            self.staging_map.insert(
+                reg_texture,
+                StagingTexture {
+                    device: staging,
+                    format: in_map
+                        .staging_format
+                        .clone()
+                        .expect("Have a format for staging texture when we have staging texture"),
+                },
+            );
         }
 
         Ok(())
     }
 
-    fn ensure_allocate_texture(&mut self, reg_texture: Texture) -> Result<DeviceTexture, LaunchError> {
+    fn ensure_allocate_texture(
+        &mut self,
+        reg_texture: Texture,
+    ) -> Result<DeviceTexture, LaunchError> {
         let texture_format = self.make_texture_descriptor(reg_texture)?;
 
         if let Some(texture_map) = self.texture_map.get(&reg_texture) {
@@ -1137,10 +1161,13 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             DeviceTexture(texture)
         };
 
-        self.texture_map.insert(reg_texture, TextureMap {
-            device: texture,
-            format: texture_format.clone(),
-        });
+        self.texture_map.insert(
+            reg_texture,
+            TextureMap {
+                device: texture,
+                format: texture_format.clone(),
+            },
+        );
 
         Ok(texture)
     }
@@ -1148,9 +1175,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn ingest_image_data(&mut self, idx: Register) -> Result<Texture, LaunchError> {
         let source_key = self.pool_plan.get(idx)?;
         let texture = self.buffer_plan.get(idx)?.texture;
-        self.pool_plan.buffer
-            .entry(source_key)
-            .or_insert(texture);
+        self.pool_plan.buffer.entry(source_key).or_insert(texture);
         Ok(texture)
     }
 
@@ -1164,7 +1189,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         // See below, required for direct buffer-to-buffer copy.
         let sizeu64 = regmap.buffer_layout.u64_len();
-        
+
         // FIXME: if it is a simple copy we can use regmap.buffer directly.
         let target_buffer = regmap.map_write.unwrap_or(regmap.buffer);
 
@@ -1261,18 +1286,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     /// Copy the memory buffer to the output.
-    fn copy_buffer_to_output(&mut self, idx: Register, dst: Register)
-        -> Result<(), LaunchError>
-    {
+    fn copy_buffer_to_output(&mut self, idx: Register, dst: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
         let target_image = self.ingest_image_data(dst)?;
         let descriptor = &self.buffer_plan.texture[regmap.texture.0];
 
         let size = descriptor.size();
         let sizeu64 = regmap.buffer_layout.u64_len();
-        
-        let source_buffer = regmap.map_read
-            .unwrap_or(regmap.buffer);
+
+        let source_buffer = regmap.map_read.unwrap_or(regmap.buffer);
 
         // FIXME: might happen at next call within another command encoder..
         if let Some(map_read) = regmap.map_read {
@@ -1299,7 +1321,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     fn texture_view(&mut self, dst: Texture) -> Result<usize, LaunchError> {
-        let texture = self.texture_map.get(&dst)
+        let texture = self
+            .texture_map
+            .get(&dst)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
             .device;
         // eprintln!("tex{:?} == tex{:?}", dst, texture);
@@ -1318,18 +1342,40 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let instructions = &mut self.instructions;
         *self.quad_group_layout.get_or_insert_with(|| {
             let descriptor = BindGroupLayoutDescriptor {
-                entries: vec![
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStage::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            has_dynamic_offset: false,
-                            min_binding_size: NonZeroU64::new(2 * 8 * 4),
-                            ty: wgpu::BufferBindingType::Uniform,
-                        },
-                        count: None,
+                entries: vec![wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStage::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(2 * 8 * 4),
+                        ty: wgpu::BufferBindingType::Uniform,
                     },
-                ],
+                    count: None,
+                }],
+            };
+
+            instructions.extend_one(Low::BindGroupLayout(descriptor));
+            let descriptor_id = *bind_group_layouts;
+            *bind_group_layouts += 1;
+            descriptor_id
+        })
+    }
+
+    fn make_generic_fragment_bind_group(&mut self) -> usize {
+        let bind_group_layouts = &mut self.bind_group_layouts;
+        let instructions = &mut self.instructions;
+        *self.fragment_data_group_layout.get_or_insert_with(|| {
+            let descriptor = BindGroupLayoutDescriptor {
+                entries: vec![wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                        ty: wgpu::BufferBindingType::Uniform,
+                    },
+                    count: None,
+                }],
             };
 
             instructions.extend_one(Low::BindGroupLayout(descriptor));
@@ -1374,26 +1420,43 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
-    fn make_paint_layout(&mut self) -> usize {
+    fn make_paint_layout(&mut self, desc: &SimpleRenderPipelineDescriptor) -> usize {
         let quad_bind_group = self.make_quad_bind_group();
         let paint_bind_group = self.make_paint_group();
-        let layouts = &mut self.pipeline_layouts;
-        let instructions = &mut self.instructions;
 
-        *self.paint_pipeline_layout.get_or_insert_with(|| {
+        let mut bind_group_layouts = vec![quad_bind_group, paint_bind_group];
+
+        if let BufferBind::None = desc.fragment_bind_data {
+            let layouts = &mut self.pipeline_layouts;
+            let instructions = &mut self.instructions;
+
+            *self.paint_pipeline_layout.get_or_insert_with(|| {
+                let descriptor = PipelineLayoutDescriptor {
+                    bind_group_layouts,
+                    push_constant_ranges: &[],
+                };
+
+                instructions.extend_one(Low::PipelineLayout(descriptor));
+                let descriptor_id = *layouts;
+                *layouts += 1;
+                descriptor_id
+            })
+        } else {
+            bind_group_layouts.push(self.make_generic_fragment_bind_group());
+
+            let layouts = &mut self.pipeline_layouts;
+            let instructions = &mut self.instructions;
+
             let descriptor = PipelineLayoutDescriptor {
-                bind_group_layouts: vec![
-                    quad_bind_group,
-                    paint_bind_group,
-                ],
-                push_constant_ranges: &[]
+                bind_group_layouts,
+                push_constant_ranges: &[],
             };
 
             instructions.extend_one(Low::PipelineLayout(descriptor));
             let descriptor_id = *layouts;
             *layouts += 1;
             descriptor_id
-        })
+        }
     }
 
     fn shader(&mut self, desc: ShaderDescriptor) -> Result<usize, LaunchError> {
@@ -1403,9 +1466,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(idx)
     }
 
-    fn fragment_shader(&mut self, kind: Option<FragmentShader>, source: Cow<'static, [u32]>)
-        -> Result<usize, LaunchError>
-    {
+    fn fragment_shader(
+        &mut self,
+        kind: Option<FragmentShader>,
+        source: Cow<'static, [u32]>,
+    ) -> Result<usize, LaunchError> {
         if let Some(&shader) = kind.and_then(|k| self.fragment_shaders.get(&k)) {
             return Ok(shader);
         }
@@ -1417,9 +1482,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
-    fn vertex_shader(&mut self, kind: Option<VertexShader>, source: Cow<'static, [u32]>)
-        -> Result<usize, LaunchError>
-    {
+    fn vertex_shader(
+        &mut self,
+        kind: Option<VertexShader>,
+        source: Cow<'static, [u32]>,
+    ) -> Result<usize, LaunchError> {
         if let Some(&shader) = kind.and_then(|k| self.vertex_shaders.get(&k)) {
             return Ok(shader);
         }
@@ -1431,6 +1498,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
+    #[rustfmt::skip]
     fn simple_quad_buffer(&mut self) -> DeviceBuffer {
         let buffers = &mut self.buffers;
         let instructions = &mut self.instructions;
@@ -1455,50 +1523,48 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             DeviceBuffer(buffer)
         })
     }
-    
+
     fn simple_render_pipeline(
         &mut self,
-        vertex: ShaderBind,
-        fragment: ShaderBind,
+        desc: &SimpleRenderPipelineDescriptor,
         format: wgpu::TextureFormat,
     ) -> Result<usize, LaunchError> {
-        let layout = self.make_paint_layout();
+        let layout = self.make_paint_layout(desc);
 
-        let (vertex, vertex_entry_point) = match vertex {
+        let (vertex, vertex_entry_point) = match desc.vertex {
             ShaderBind::ShaderMain(shader) => (shader, "main"),
-            ShaderBind::Shader { id, entry_point } => (id, entry_point)
+            ShaderBind::Shader { id, entry_point } => (id, entry_point),
         };
-        let (fragment, fragment_entry_point) = match fragment {
+        let (fragment, fragment_entry_point) = match desc.fragment {
             ShaderBind::ShaderMain(shader) => (shader, "main"),
-            ShaderBind::Shader { id, entry_point } => (id, entry_point)
+            ShaderBind::Shader { id, entry_point } => (id, entry_point),
         };
 
-        self.instructions.extend_one(Low::RenderPipeline(RenderPipelineDescriptor {
-            vertex: VertexState {
-                entry_point: vertex_entry_point,
-                vertex_module: vertex,
-            },
-            fragment: FragmentState {
-                entry_point: fragment_entry_point,
-                fragment_module: fragment,
-                targets: vec![wgpu::ColorTargetState {
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrite::ALL,
-                    format,
-                }],
-            },
-            primitive: PrimitiveState::TriangleStrip,
-            layout,
-        }));
+        self.instructions
+            .extend_one(Low::RenderPipeline(RenderPipelineDescriptor {
+                vertex: VertexState {
+                    entry_point: vertex_entry_point,
+                    vertex_module: vertex,
+                },
+                fragment: FragmentState {
+                    entry_point: fragment_entry_point,
+                    fragment_module: fragment,
+                    targets: vec![wgpu::ColorTargetState {
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrite::ALL,
+                        format,
+                    }],
+                },
+                primitive: PrimitiveState::TriangleStrip,
+                layout,
+            }));
 
         let pipeline = self.render_pipelines;
         self.render_pipelines += 1;
         Ok(pipeline)
     }
 
-    fn make_bind_group_sampled_texture(&mut self, texture: Texture)
-        -> Result<usize, LaunchError>
-    {
+    fn make_bind_group_sampled_texture(&mut self, texture: Texture) -> Result<usize, LaunchError> {
         let view = self.texture_view(texture)?;
 
         let sampler = {
@@ -1529,11 +1595,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(group)
     }
 
-    fn make_bind_group_quad_parameter(&mut self, bind: QuadBufferBind<'_>)
-        -> Result<usize, LaunchError>
-    {
+    fn make_bound_buffer(
+        &mut self,
+        bind: &BufferBind<'_>,
+        layout_idx: usize,
+    ) -> Result<Option<usize>, LaunchError> {
         let buffer = match bind {
-            QuadBufferBind::Set { data } => {
+            BufferBind::None => return Ok(None),
+            BufferBind::Set { data } => {
                 let buffer = self.buffers;
                 self.push(Low::BufferInit(BufferDescriptorInit {
                     // FIXME: avoid the allocation here?
@@ -1541,53 +1610,60 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     usage: BufferUsage::Uniform,
                 }))?;
                 DeviceBuffer(buffer)
-            },
+            }
         };
 
         let group = self.bind_groups;
         let descriptor = BindGroupDescriptor {
-            layout_idx: self.make_quad_bind_group(),
-            entries: vec![
-                BindingResource::Buffer {
-                    buffer_idx: buffer.0,
-                    offset: 0,
-                    size: None,
-                }
-            ],
+            layout_idx,
+            entries: vec![BindingResource::Buffer {
+                buffer_idx: buffer.0,
+                offset: 0,
+                size: None,
+            }],
         };
 
         self.push(Low::BindGroup(descriptor))?;
-        Ok(group)
+        Ok(Some(group))
     }
 
     /// Render the pipeline, after all customization and buffers were bound..
-    fn prepare_simple_pipeline(&mut self, descriptor: SimpleRenderPipelineDescriptor)
-        -> Result<SimpleRenderPipeline, LaunchError>
-    {
+    fn prepare_simple_pipeline(
+        &mut self,
+        descriptor: SimpleRenderPipelineDescriptor,
+    ) -> Result<SimpleRenderPipeline, LaunchError> {
         let SimpleRenderPipelineDescriptor {
             vertex_bind_data,
             fragment_texture: texture,
-            vertex,
-            fragment,
-        } = descriptor;
+            fragment_bind_data,
+            vertex: _,
+            fragment: _,
+        } = &descriptor;
 
         let format = self.texture_map[&texture].format.format;
 
         let buffer = self.simple_quad_buffer();
-        let pipeline = self.simple_render_pipeline(vertex, fragment, format)?;
+        let pipeline = self.simple_render_pipeline(&descriptor, format)?;
 
-        let group = self.make_bind_group_sampled_texture(texture)?;
-        let quad = self.make_bind_group_quad_parameter(vertex_bind_data)?;
+        let group = self.make_bind_group_sampled_texture(*texture)?;
+        let vertex_layout = self.make_quad_bind_group();
+        let vertex_bind = self.make_bound_buffer(vertex_bind_data, vertex_layout)?;
+
+        // FIXME: this builds the layout even when it is not required.
+        let vertex_layout = self.make_generic_fragment_bind_group();
+        let fragment_bind = self.make_bound_buffer(fragment_bind_data, vertex_layout)?;
 
         Ok(SimpleRenderPipeline {
             pipeline,
             buffer,
             group,
-            quad,
+            vertex_bind,
             vertices: 4,
+            fragment_bind,
         })
     }
 
+    #[rustfmt::skip]
     pub const FULL_VERTEX_BUFFER: [[f32; 2]; 16] = [
         // [min_u, min_v], [0.0, 0.0],
         [0.0, 0.0], [0.0, 0.0],
@@ -1608,18 +1684,21 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let SimpleRenderPipeline {
             pipeline,
             group,
-            quad,
             buffer,
+            vertex_bind,
             vertices,
+            fragment_bind,
         } = pipeline;
 
         self.push(Low::SetPipeline(pipeline))?;
 
-        self.push(Low::SetBindGroup {
-            group: quad,
-            index: 0,
-            offsets: Cow::Borrowed(&[]),
-        })?;
+        if let Some(quad) = vertex_bind {
+            self.push(Low::SetBindGroup {
+                group: quad,
+                index: 0,
+                offsets: Cow::Borrowed(&[]),
+            })?;
+        }
 
         self.push(Low::SetBindGroup {
             group,
@@ -1632,11 +1711,20 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             slot: 0,
         })?;
 
+        if let Some(bind) = fragment_bind {
+            self.push(Low::SetBindGroup {
+                group: bind,
+                index: 2,
+                offsets: Cow::Borrowed(&[]),
+            })?;
+        }
+
         self.push(Low::DrawOnce { vertices })?;
 
         Ok(())
     }
 
+    #[rustfmt::skip]
     fn prepare_render(&mut self, texture: Texture, function: &Function)
         -> Result<SimpleRenderPipeline, LaunchError>
     {
@@ -1665,9 +1753,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let min_b = (target.y as f32) / (viewport.height() as f32);
                 let max_b = (target.max_y as f32) / (viewport.height() as f32);
 
-                // FIXME: I'm pretty sure this layout should be wrong.
-                // However, it appears to work correctly on my stack:
-                // wgpu=0.9,shaderc=0.7.2,nvidia=465.27-5,GeForce GTX 960
+                // std140, always pad to 16 bytes.
                 let buffer: [[f32; 2]; 16] = [
                     [min_u, min_v], [0.0, 0.0],
                     [max_u, min_v], [0.0, 0.0],
@@ -1681,10 +1767,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 ];
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
-                    vertex_bind_data: QuadBufferBind::Set {
+                    vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
                     },
                     fragment_texture: texture,
+                    fragment_bind_data: BufferBind::None,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
@@ -1698,11 +1785,24 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     Some(FragmentShader::LinearColorMatrix),
                     shader_include_to_spirv(shaders::FRAG_LINEAR))?;
 
+                let matrix = matrix.into_inner();
+
+                // std140, always pad to 16 bytes.
+                // matrix is an array of its columns.
+                let rgb_matrix: [f32; 12] = [
+                   matrix[0], matrix[3], matrix[6], 0.0,
+                   matrix[1], matrix[4], matrix[7], 0.0,
+                   matrix[2], matrix[5], matrix[8], 0.0,
+                ];
+
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
-                    vertex_bind_data: QuadBufferBind::Set {
+                    vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
                     fragment_texture: texture,
+                    fragment_bind_data: BufferBind::Set {
+                        data: bytemuck::cast_slice(&rgb_matrix[..]),
+                    },
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
@@ -1733,9 +1833,7 @@ impl BufferUsage {
             BufferUsage::InVertices => U::COPY_DST | U::VERTEX,
             BufferUsage::DataIn => U::MAP_WRITE | U::COPY_SRC,
             BufferUsage::DataOut => U::MAP_READ | U::COPY_DST,
-            BufferUsage::DataBuffer => {
-                U::STORAGE | U::COPY_SRC | U::COPY_DST
-            }
+            BufferUsage::DataBuffer => U::STORAGE | U::COPY_SRC | U::COPY_DST,
             BufferUsage::Uniform => U::COPY_DST | U::UNIFORM,
         }
     }
@@ -1757,11 +1855,15 @@ where
     F: Future<Output = T> + 'static,
     T: 'static,
 {
-    #[cfg(target_arch = "wasm32")] {
-        use std::rc::Rc;
+    #[cfg(target_arch = "wasm32")]
+    {
         use core::cell::RefCell;
+        use std::rc::Rc;
 
-        async fn the_thing<T: 'static, F: Future<Output=T> + 'static>(future: F, buffer: Rc<RefCell<Option<T>>>) {
+        async fn the_thing<T: 'static, F: Future<Output = T> + 'static>(
+            future: F,
+            buffer: Rc<RefCell<Option<T>>>,
+        ) {
             let result = future.await;
             *buffer.borrow_mut() = Some(result);
         }
@@ -1780,7 +1882,8 @@ where
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))] {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
         if let Some(device) = device {
             // We have to manually poll the device.  That is, we ensure that it keeps being polled
             // and each time will also poll the device. This isn't super efficient but a dirty way
@@ -1792,9 +1895,10 @@ where
 
             impl<F: Future> Future for DevicePolled<'_, F> {
                 type Output = F::Output;
-                fn poll(self: core::pin::Pin<&mut Self>, ctx: &mut core::task::Context)
-                    -> core::task::Poll<F::Output>
-                {
+                fn poll(
+                    self: core::pin::Pin<&mut Self>,
+                    ctx: &mut core::task::Context,
+                ) -> core::task::Poll<F::Output> {
                     self.as_ref().device.poll(wgpu::Maintain::Poll);
                     // Ugh, noooo...
                     ctx.waker().wake_by_ref();
@@ -1803,10 +1907,7 @@ where
                 }
             }
 
-            async_io::block_on(DevicePolled {
-                future,
-                device,
-            })
+            async_io::block_on(DevicePolled { future, device })
         } else {
             async_io::block_on(future)
         }

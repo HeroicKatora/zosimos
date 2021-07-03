@@ -1,5 +1,5 @@
-use std::{env, fs, io, io::Read as _, path};
 use shaderc::{Compiler, ShaderKind};
+use std::{env, fs, io, io::Read as _, path};
 
 #[derive(Debug)]
 enum BuildError {
@@ -49,13 +49,9 @@ fn main() -> Result<(), BuildError> {
         let mut file = fs::File::open(shader.path)?;
         str_source.clear();
         file.read_to_string(&mut str_source)?;
-        
-        let binary = compiler.compile_into_spirv(
-            &str_source,
-            shader.kind, 
-            shader.path,
-            "main",
-            None)?;
+
+        let binary =
+            compiler.compile_into_spirv(&str_source, shader.kind, shader.path, "main", None)?;
 
         let spirv = binary.as_binary_u8();
 

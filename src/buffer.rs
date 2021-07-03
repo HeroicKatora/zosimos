@@ -1,5 +1,5 @@
 //! Defines layout and buffer of our images.
-use canvas::{Canvas, layout::Layout};
+use canvas::{layout::Layout, Canvas};
 
 /// The byte layout of a buffer.
 ///
@@ -252,6 +252,14 @@ pub enum Whitepoint {
     F11,
 }
 
+/// A column major matrix.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ColMatrix([[f32; 3]; 3]);
+
+/// A row major matrix.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RowMatrix([f32; 9]);
+
 impl Descriptor {
     pub const EMPTY: Self = Descriptor {
         layout: BufferLayout {
@@ -357,8 +365,8 @@ impl Texel {
     /// Returns None if the channel is not contained, or if it can not be extracted on its own.
     pub fn channel_texel(&self, channel: ColorChannel) -> Option<Texel> {
         use Block::*;
-        use SampleParts::*;
         use SampleBits::*;
+        use SampleParts::*;
         let parts = match self.samples.parts {
             Rgb | Rgbx | Rgba | Bgrx | Bgra | Abgr | Argb | Xrgb | Xbgr => match channel {
                 ColorChannel::R => R,
@@ -377,18 +385,14 @@ impl Texel {
             _ => return None,
         };
         Some(Texel {
-            samples: Samples {
-                bits,
-                parts
-            },
+            samples: Samples { bits, parts },
             block,
             color: self.color.clone(),
         })
     }
 }
 
-impl Samples {
-}
+impl Samples {}
 
 impl SampleBits {
     /// Determine the number of bytes for texels containing these samples.
@@ -413,6 +417,173 @@ impl Color {
         transfer: Transfer::Srgb,
         whitepoint: Whitepoint::D65,
     };
+}
+
+#[rustfmt::skip]
+impl Primaries {
+    pub(crate) fn to_xyz(&self, white: Whitepoint) -> RowMatrix {
+        use Primaries::*;
+        // Rec.BT.601
+        // https://en.wikipedia.org/wiki/Color_spaces_with_RGB_primaries#Specifications_with_RGB_primaries
+        let xy: [[f32; 2]; 3] = match *self {
+            Bt601_525 | Smpte240 => [[0.63, 0.34], [0.31, 0.595], [0.155, 0.07]],
+            Bt601_625 => [[0.64, 0.33], [0.29, 0.6], [0.15, 0.06]],
+            Bt709 => [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06]],
+            Bt2020 | Bt2100 => [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]],
+        };
+
+        // A column of CIE XYZ intensities for that primary.
+        let xyz = |[x, y]: [f32; 2]| {
+            return [x / y, 1.0, (1.0 - x - y)/y];
+        };
+
+        let xyz_r = xyz(xy[0]);
+        let xyz_g = xyz(xy[1]);
+        let xyz_b = xyz(xy[2]);
+
+        // Virtually, N = [xyz_r | xyz_g | xyz_b]
+        // As the unweighted conversion matrix for:
+        //  XYZ = N · RGB
+        let RowMatrix(n1) = ColMatrix([xyz_r, xyz_g, xyz_b]).inv();
+
+        // http://www.brucelindbloom.com/index.html
+        let w = white.to_xyz();
+
+        // s is the weights that give the whitepoint when converted to xyz.
+        // That is we're solving:
+        //  W = N · S
+        let s = [
+            (w[0]*n1[0] + w[1]*n1[1] + w[2]*n1[2]),
+            (w[0]*n1[3] + w[1]*n1[4] + w[2]*n1[5]),
+            (w[0]*n1[6] + w[1]*n1[7] + w[2]*n1[8]),
+        ];
+
+        /* If you want to debug this (for comparison to reference):
+        eprintln!("{:?} for {:?}", self, white);
+        eprintln!("{:?}", ColMatrix([xyz_r, xyz_g, xyz_b]));
+        eprintln!("W: {:?}", w);
+        eprintln!("N1: {:?}", RowMatrix(n1));
+        eprintln!("S: {:?}", s);
+        */
+
+        RowMatrix([
+            s[0]*xyz_r[0], s[1]*xyz_g[0], s[2]*xyz_b[0],
+            s[0]*xyz_r[1], s[1]*xyz_g[1], s[2]*xyz_b[1],
+            s[0]*xyz_r[2], s[1]*xyz_g[2], s[2]*xyz_b[2],
+        ])
+    }
+
+}
+
+#[rustfmt::skip]
+impl ColMatrix {
+    fn adj(self) -> RowMatrix {
+        let m = self.0;
+
+        let det = |c1: usize, c2: usize, r1: usize, r2: usize| {
+            m[c1][r1] * m[c2][r2] - m[c2][r1] * m[c1][r2]
+        };
+
+        RowMatrix([
+            det(1, 2, 1, 2), -det(1, 2, 0, 2), det(1, 2, 0, 1),
+            -det(0, 2, 1, 2), det(0, 2, 0, 2), -det(0, 2, 0, 1),
+            det(0, 1, 1, 2), -det(0, 1, 0, 2), det(0, 1, 0, 1),
+        ])
+    }
+
+    fn det(self) -> f32 {
+        let det2 = |ma, mb, na, nb| {
+            ma * nb - na * mb
+        };
+        let [x, y, z] = self.0;
+        x[0] * det2(y[1], y[2], z[1], z[2])
+            - x[1] * det2(y[0], y[2], z[0], z[2])
+            + x[2] * det2(y[0], y[1], z[0], z[1])
+    }
+
+    pub(crate) fn inv(self) -> RowMatrix {
+        let RowMatrix(adj) = self.adj();
+        let det_n = self.det();
+
+        RowMatrix([
+            adj[0] / det_n, adj[1] / det_n, adj[2] / det_n,
+            adj[3] / det_n, adj[4] / det_n, adj[5] / det_n,
+            adj[6] / det_n, adj[7] / det_n, adj[8] / det_n,
+        ])
+    }
+}
+
+#[rustfmt::skip]
+impl RowMatrix {
+    pub(crate) fn new(rows: [f32; 9]) -> RowMatrix {
+        RowMatrix(rows)
+    }
+
+    pub(crate) fn inv(self) -> RowMatrix {
+        ColMatrix::from(self).inv()
+    }
+
+    /// Calculate self · other
+    pub(crate) fn multiply_right(self, ColMatrix([a, b, c]): ColMatrix) -> ColMatrix {
+        let x = &self.0[0..3];
+        let y = &self.0[3..6];
+        let z = &self.0[6..9];
+
+        let dot = |r: &[f32], c: [f32; 3]| {
+            r[0] * c[0] + r[1] * c[1] + r[2] * c[2]
+        };
+
+        ColMatrix([
+            [dot(x, a), dot(y, a), dot(z, a)],
+            [dot(x, b), dot(y, b), dot(z, b)],
+            [dot(x, c), dot(y, c), dot(z, c)],
+        ])
+    }
+
+    pub(crate) fn into_inner(self) -> [f32; 9] {
+        self.0
+    }
+}
+
+#[rustfmt::skip]
+impl From<ColMatrix> for RowMatrix {
+    fn from(ColMatrix(m): ColMatrix) -> RowMatrix {
+        RowMatrix([
+            m[0][0], m[1][0], m[2][0],
+            m[0][1], m[1][1], m[2][1],
+            m[0][2], m[1][2], m[2][2],
+        ])
+    }
+}
+
+#[rustfmt::skip]
+impl From<RowMatrix> for ColMatrix {
+    fn from(RowMatrix(r): RowMatrix) -> ColMatrix {
+        ColMatrix([
+            [r[0], r[3], r[6]],
+            [r[1], r[4], r[7]],
+            [r[2], r[5], r[8]],
+        ])
+    }
+}
+
+impl Whitepoint {
+    pub(crate) fn to_xyz(self) -> [f32; 3] {
+        use Whitepoint::*;
+        match self {
+            A => [1.09850, 1.00000, 0.35585],
+            B => [0.99072, 1.00000, 0.85223],
+            C => [0.98074, 1.00000, 1.18232],
+            D50 => [0.96422, 1.00000, 0.82521],
+            D55 => [0.95682, 1.00000, 0.92149],
+            D65 => [0.95047, 1.00000, 1.08883],
+            D75 => [0.94972, 1.00000, 1.22638],
+            E => [1.00000, 1.00000, 1.00000],
+            F2 => [0.99186, 1.00000, 0.67393],
+            F7 => [0.95041, 1.00000, 1.08747],
+            F11 => [1.00962, 1.00000, 0.64350],
+        }
+    }
 }
 
 impl Block {
