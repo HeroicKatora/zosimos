@@ -1,8 +1,4 @@
-use core::{
-    iter::once,
-    num::NonZeroU32,
-    pin::Pin,
-};
+use core::{iter::once, num::NonZeroU32, pin::Pin};
 
 use crate::buffer::{BufferLayout, Descriptor, Texel};
 use crate::command::{Rectangle, Register};
@@ -62,7 +58,7 @@ pub(crate) struct PaintRectFragment {
     fragment_shader: &'static [u8],
 }
 
-type DynStep = dyn core::future::Future<Output=Result<Cleanup, StepError>>;
+type DynStep = dyn core::future::Future<Output = Result<Cleanup, StepError>>;
 
 struct DevicePolled<'exe> {
     future: Pin<Box<DynStep>>,
@@ -73,7 +69,7 @@ enum Cleanup {
     Buffers {
         buffers: Vec<wgpu::Buffer>,
         image_data: Vec<ImageData>,
-    }
+    },
 }
 
 pub struct SyncPoint<'exe> {
@@ -113,8 +109,7 @@ pub struct BadInstruction {
 }
 
 #[derive(Debug)]
-pub enum RetireError {
-}
+pub enum RetireError {}
 
 impl Execution {
     pub(crate) fn new(init: InitialState) -> Self {
@@ -137,7 +132,12 @@ impl Execution {
 
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
         let instruction_pointer = self.machine.instruction_pointer;
-        eprintln!("{:?}", self.machine.instructions.get(self.machine.instruction_pointer));
+        eprintln!(
+            "{:?}",
+            self.machine
+                .instructions
+                .get(self.machine.instruction_pointer)
+        );
         match self.step_inner() {
             Ok(sync) => Ok(sync),
             Err(mut error) => {
@@ -152,7 +152,9 @@ impl Execution {
         match self.machine.next_instruction()? {
             Low::BindGroupLayout(desc) => {
                 let mut entry_buffer = vec![];
-                let group = self.descriptors.bind_group_layout(desc, &mut entry_buffer)?;
+                let group = self
+                    .descriptors
+                    .bind_group_layout(desc, &mut entry_buffer)?;
                 let group = self.gpu.device.create_bind_group_layout(&group);
                 self.descriptors.bind_group_layouts.push(group);
                 Ok(SyncPoint::NO_SYNC)
@@ -226,7 +228,9 @@ impl Execution {
                 Ok(SyncPoint::NO_SYNC)
             }
             Low::TextureView(desc) => {
-                let texture = self.descriptors.textures
+                let texture = self
+                    .descriptors
+                    .textures
                     .get(desc.texture.0)
                     .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                 let desc = wgpu::TextureViewDescriptor {
@@ -250,7 +254,7 @@ impl Execution {
                     size: wgpu::Extent3d {
                         width: desc.size.0.get(),
                         height: desc.size.1.get(),
-                        depth_or_array_layers: 1
+                        depth_or_array_layers: 1,
                     },
                     mip_level_count: 1,
                     sample_count: 1,
@@ -261,8 +265,8 @@ impl Execution {
                         program::TextureUsage::DataOut => U::COPY_SRC | U::RENDER_ATTACHMENT,
                         program::TextureUsage::Storage => {
                             U::COPY_SRC | U::COPY_DST | U::SAMPLED | U::RENDER_ATTACHMENT
-                        },
-                    }
+                        }
+                    },
                 };
                 let texture = self.gpu.device.create_texture(&desc);
                 self.descriptors.textures.push(texture);
@@ -272,7 +276,9 @@ impl Execution {
                 let mut vertex_buffers = vec![];
                 let mut fragments = vec![];
 
-                let pipeline = self.descriptors.pipeline(desc, &mut vertex_buffers, &mut fragments)?;
+                let pipeline =
+                    self.descriptors
+                        .pipeline(desc, &mut vertex_buffers, &mut fragments)?;
                 let pipeline = self.gpu.device.create_render_pipeline(&pipeline);
                 self.descriptors.render_pipelines.push(pipeline);
                 Ok(SyncPoint::NO_SYNC)
@@ -282,16 +288,16 @@ impl Execution {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let descriptor = wgpu::CommandEncoderDescriptor {
-                    label: None,
-                };
+                let descriptor = wgpu::CommandEncoderDescriptor { label: None };
 
                 self.command_encoder = Some(self.gpu.device.create_command_encoder(&descriptor));
                 Ok(SyncPoint::NO_SYNC)
-            },
+            }
             Low::BeginRenderPass(descriptor) => {
                 let mut attachment_buf = vec![];
-                let descriptor = self.descriptors.render_pass(descriptor, &mut attachment_buf)?;
+                let descriptor = self
+                    .descriptors
+                    .render_pass(descriptor, &mut attachment_buf)?;
                 let encoder = match &mut self.command_encoder {
                     Some(encoder) => encoder,
                     None => return Err(StepError::InvalidInstruction(line!())),
@@ -302,18 +308,18 @@ impl Execution {
                 self.machine.render_pass(&self.descriptors, pass)?;
 
                 Ok(SyncPoint::NO_SYNC)
-            },
-            Low::EndCommands => {
-                match self.command_encoder.take() {
-                    None => Err(StepError::InvalidInstruction(line!())),
-                    Some(encoder) => {
-                        self.descriptors.command_buffers.push(encoder.finish());
-                        Ok(SyncPoint::NO_SYNC)
-                    }
-                }
             }
+            Low::EndCommands => match self.command_encoder.take() {
+                None => Err(StepError::InvalidInstruction(line!())),
+                Some(encoder) => {
+                    self.descriptors.command_buffers.push(encoder.finish());
+                    Ok(SyncPoint::NO_SYNC)
+                }
+            },
             &Low::RunTopCommand => {
-                let command = self.descriptors.command_buffers
+                let command = self
+                    .descriptors
+                    .command_buffers
                     .pop()
                     .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                 self.gpu.queue.submit(once(command));
@@ -337,12 +343,20 @@ impl Execution {
                 self.gpu.queue.submit(commands);
                 Ok(SyncPoint::NO_SYNC)
             }
-            &Low::WriteImageToBuffer { source_image, offset, size, target_buffer, ref target_layout } => {
+            &Low::WriteImageToBuffer {
+                source_image,
+                offset,
+                size,
+                target_buffer,
+                ref target_layout,
+            } => {
                 if offset != (0, 0) {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let source = self.buffers.get(source_image.0)
+                let source = self
+                    .buffers
+                    .get(source_image.0)
                     .ok_or(StepError::InvalidInstruction(line!()))?;
 
                 if source.as_bytes().is_none() {
@@ -389,9 +403,9 @@ impl Execution {
                         let buffer = &buffers[target_buffer.0];
 
                         let slice = buffer.slice(..);
-                        slice.map_async(wgpu::MapMode::Write)
-                            .await
-                            .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
+                        slice.map_async(wgpu::MapMode::Write).await.map_err(
+                            |wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()),
+                        )?;
 
                         let mut data = slice.get_mapped_range_mut();
 
@@ -401,15 +415,16 @@ impl Execution {
 
                         // We've checked that this image can be seen as host bytes.
                         let source: &[u8] = image.as_bytes().unwrap();
-                        let target : &mut [u8] = &mut data[..];
+                        let target: &mut [u8] = &mut data[..];
 
                         for x in 0..height {
                             let source_row = &source[(x as usize * source_pitch)..][..source_pitch];
-                            let target_row = &mut target[(x as usize * target_pitch)..][..target_pitch];
+                            let target_row =
+                                &mut target[(x as usize * target_pitch)..][..target_pitch];
 
-                            target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
+                            target_row[..bytes_to_copy]
+                                .copy_from_slice(&source_row[..bytes_to_copy]);
                         }
-
                     }
 
                     buffers[target_buffer.0].unmap();
@@ -427,9 +442,14 @@ impl Execution {
                     }),
                     marker: core::marker::PhantomData,
                 })
-
             }
-            &Low::CopyBufferToTexture { source_buffer, ref source_layout, offset, size, target_texture } => {
+            &Low::CopyBufferToTexture {
+                source_buffer,
+                ref source_layout,
+                offset,
+                size,
+                target_texture,
+            } => {
                 if offset != (0, 0) {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
@@ -448,15 +468,17 @@ impl Execution {
                     depth_or_array_layers: 1,
                 };
 
-                encoder.copy_buffer_to_texture(
-                    buffer,
-                    texture,
-                    extent,
-                );
+                encoder.copy_buffer_to_texture(buffer, texture, extent);
 
                 Ok(SyncPoint::NO_SYNC)
             }
-            &Low::CopyTextureToBuffer { source_texture, offset, size, target_buffer, ref target_layout } => {
+            &Low::CopyTextureToBuffer {
+                source_texture,
+                offset,
+                size,
+                target_buffer,
+                ref target_layout,
+            } => {
                 if offset != (0, 0) {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
@@ -475,36 +497,42 @@ impl Execution {
                     depth_or_array_layers: 1,
                 };
 
-                encoder.copy_texture_to_buffer(
-                    texture,
-                    buffer,
-                    extent,
-                );
+                encoder.copy_texture_to_buffer(texture, buffer, extent);
 
                 Ok(SyncPoint::NO_SYNC)
             }
-            &Low::CopyBufferToBuffer { source_buffer, size, target_buffer } => {
+            &Low::CopyBufferToBuffer {
+                source_buffer,
+                size,
+                target_buffer,
+            } => {
                 let encoder = match &mut self.command_encoder {
                     Some(encoder) => encoder,
                     None => return Err(StepError::InvalidInstruction(line!())),
                 };
 
-                let source = self.descriptors.buffers
+                let source = self
+                    .descriptors
+                    .buffers
                     .get(source_buffer.0)
                     .ok_or(StepError::InvalidInstruction(line!()))?;
-                let target = self.descriptors.buffers
+                let target = self
+                    .descriptors
+                    .buffers
                     .get(target_buffer.0)
                     .ok_or(StepError::InvalidInstruction(line!()))?;
 
-                encoder.copy_buffer_to_buffer(
-                    source, 0,
-                    target, 0,
-                    size,
-                );
+                encoder.copy_buffer_to_buffer(source, 0, target, 0, size);
 
                 Ok(SyncPoint::NO_SYNC)
             }
-            &Low::ReadBuffer { source_buffer, ref source_layout, offset, size, target_image } => {
+            &Low::ReadBuffer {
+                source_buffer,
+                ref source_layout,
+                offset,
+                size,
+                target_image,
+            } => {
                 let mut buffers = core::mem::take(&mut self.descriptors.buffers);
                 let mut image_data = core::mem::take(&mut self.buffers);
 
@@ -527,9 +555,9 @@ impl Execution {
                         let image = &mut image_data[target_image.0];
 
                         let slice = buffer.slice(..);
-                        slice.map_async(wgpu::MapMode::Read)
-                            .await
-                            .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
+                        slice.map_async(wgpu::MapMode::Read).await.map_err(
+                            |wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()),
+                        )?;
 
                         let data = slice.get_mapped_range();
 
@@ -542,9 +570,11 @@ impl Execution {
 
                         for x in 0..height {
                             let source_row = &source[(x as usize * source_pitch)..][..source_pitch];
-                            let target_row = &mut target[(x as usize * target_pitch)..][..target_pitch];
+                            let target_row =
+                                &mut target[(x as usize * target_pitch)..][..target_pitch];
 
-                            target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
+                            target_row[..bytes_to_copy]
+                                .copy_from_slice(&source_row[..bytes_to_copy]);
                         }
                     }
 
@@ -562,9 +592,11 @@ impl Execution {
                     marker: core::marker::PhantomData,
                 })
             }
-            inner => return Err(StepError::BadInstruction(BadInstruction {
-                inner: format!("{:?}", inner),
-            })),
+            inner => {
+                return Err(StepError::BadInstruction(BadInstruction {
+                    inner: format!("{:?}", inner),
+                }))
+            }
         }
     }
 
@@ -576,7 +608,10 @@ impl Execution {
     /// Stop the execution, depositing all resources into the provided pool.
     #[must_use = "You won't get the ids of outputs."]
     pub fn retire_gracefully<'pool>(self, pool: &'pool mut Pool) -> Retire<'pool> {
-        Retire { execution: self, pool }
+        Retire {
+            execution: self,
+            pool,
+        }
     }
 }
 
@@ -598,20 +633,27 @@ impl Descriptors {
 
         Ok(wgpu::BindGroupDescriptor {
             label: None,
-            layout: self.bind_group_layouts
+            layout: self
+                .bind_group_layouts
                 .get(desc.layout_idx)
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))?,
             entries: buf,
         })
     }
 
-    fn binding_resource(&self, desc: &program::BindingResource)
-        -> Result<wgpu::BindingResource<'_>, StepError>
-    {
+    fn binding_resource(
+        &self,
+        desc: &program::BindingResource,
+    ) -> Result<wgpu::BindingResource<'_>, StepError> {
         use program::BindingResource::{Buffer, Sampler, TextureView};
         match desc {
-            &Buffer { buffer_idx, offset, size } => {
-                let buffer = self.buffers
+            &Buffer {
+                buffer_idx,
+                offset,
+                size,
+            } => {
+                let buffer = self
+                    .buffers
                     .get(buffer_idx)
                     .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                 Ok(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -620,18 +662,16 @@ impl Descriptors {
                     size,
                 }))
             }
-            &Sampler(idx) => {
-                self.sampler
-                    .get(idx)
-                    .ok_or_else(|| StepError::InvalidInstruction(line!()))
-                    .map(wgpu::BindingResource::Sampler)
-            }
-            &TextureView(idx) => {
-                self.texture_views
-                    .get(idx)
-                    .ok_or_else(|| StepError::InvalidInstruction(line!()))
-                    .map(wgpu::BindingResource::TextureView)
-            }
+            &Sampler(idx) => self
+                .sampler
+                .get(idx)
+                .ok_or_else(|| StepError::InvalidInstruction(line!()))
+                .map(wgpu::BindingResource::Sampler),
+            &TextureView(idx) => self
+                .texture_views
+                .get(idx)
+                .ok_or_else(|| StepError::InvalidInstruction(line!()))
+                .map(wgpu::BindingResource::TextureView),
         }
     }
 
@@ -666,11 +706,13 @@ impl Descriptors {
         })
     }
 
-    fn color_attachment(&self, desc: &program::ColorAttachmentDescriptor)
-        -> Result<wgpu::RenderPassColorAttachment<'_>, StepError>
-    {
-        Ok(wgpu::RenderPassColorAttachment{
-            view: self.texture_views
+    fn color_attachment(
+        &self,
+        desc: &program::ColorAttachmentDescriptor,
+    ) -> Result<wgpu::RenderPassColorAttachment<'_>, StepError> {
+        Ok(wgpu::RenderPassColorAttachment {
+            view: self
+                .texture_views
                 .get(desc.texture_view)
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))?,
             resolve_target: None,
@@ -686,8 +728,7 @@ impl Descriptors {
     ) -> Result<wgpu::RenderPipelineDescriptor<'set>, StepError> {
         Ok(wgpu::RenderPipelineDescriptor {
             label: None,
-            layout: self.pipeline_layouts
-                .get(desc.layout),
+            layout: self.pipeline_layouts.get(desc.layout),
             vertex: self.vertex_state(&desc.vertex, vertex_buffers)?,
             primitive: match desc.primitive {
                 program::PrimitiveState::TriangleStrip => wgpu::PrimitiveState {
@@ -698,7 +739,7 @@ impl Descriptors {
                     clamp_depth: false,
                     polygon_mode: wgpu::PolygonMode::Fill,
                     conservative: false,
-                }
+                },
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState {
@@ -718,7 +759,8 @@ impl Descriptors {
         buf.clear();
 
         for &layout in &desc.bind_group_layouts {
-            let group = self.bind_group_layouts
+            let group = self
+                .bind_group_layouts
                 .get(layout)
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
             buf.push(group);
@@ -740,16 +782,15 @@ impl Descriptors {
         buf.push(wgpu::VertexBufferLayout {
             array_stride: 8,
             step_mode: wgpu::InputStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x2,
-                    offset: 0,
-                    shader_location: 0,
-                }
-            ],
+            attributes: &[wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 0,
+                shader_location: 0,
+            }],
         });
         Ok(wgpu::VertexState {
-            module: self.shaders
+            module: self
+                .shaders
                 .get(desc.vertex_module)
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))?,
             entry_point: desc.entry_point,
@@ -765,7 +806,8 @@ impl Descriptors {
         buf.clear();
         buf.extend_from_slice(&desc.targets);
         Ok(wgpu::FragmentState {
-            module: self.shaders
+            module: self
+                .shaders
                 .get(desc.fragment_module)
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))?,
             entry_point: desc.entry_point,
@@ -773,11 +815,16 @@ impl Descriptors {
         })
     }
 
-    fn buffer(&self, buffer: DeviceBuffer, layout: &BufferLayout)
-        -> Result<wgpu::ImageCopyBuffer<'_>, StepError>
-    {
+    fn buffer(
+        &self,
+        buffer: DeviceBuffer,
+        layout: &BufferLayout,
+    ) -> Result<wgpu::ImageCopyBuffer<'_>, StepError> {
         Ok(wgpu::ImageCopyBufferBase {
-            buffer: self.buffers.get(buffer.0).ok_or(StepError::InvalidInstruction(line!()))?,
+            buffer: self
+                .buffers
+                .get(buffer.0)
+                .ok_or(StepError::InvalidInstruction(line!()))?,
             layout: wgpu::ImageDataLayout {
                 bytes_per_row: NonZeroU32::new(layout.bytes_per_row),
                 offset: 0,
@@ -786,11 +833,12 @@ impl Descriptors {
         })
     }
 
-    fn texture(&self, texture: DeviceTexture)
-        -> Result<wgpu::ImageCopyTexture<'_>, StepError>
-    {
+    fn texture(&self, texture: DeviceTexture) -> Result<wgpu::ImageCopyTexture<'_>, StepError> {
         Ok(wgpu::ImageCopyTextureBase {
-            texture: self.textures.get(texture.0).ok_or(StepError::InvalidInstruction(line!()))?,
+            texture: self
+                .textures
+                .get(texture.0)
+                .ok_or(StepError::InvalidInstruction(line!()))?,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
         })
@@ -806,7 +854,8 @@ impl Machine {
     }
 
     fn next_instruction(&mut self) -> Result<&Low, StepError> {
-        let instruction = self.instructions
+        let instruction = self
+            .instructions
             .get(self.instruction_pointer)
             .ok_or(StepError::ProgramEnd)?;
         self.instruction_pointer += 1;
@@ -821,19 +870,26 @@ impl Machine {
         loop {
             match self.next_instruction()? {
                 &Low::SetPipeline(idx) => {
-                    let pipeline = descriptors.render_pipelines
+                    let pipeline = descriptors
+                        .render_pipelines
                         .get(idx)
                         .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                     pass.set_pipeline(pipeline);
                 }
-                &Low::SetBindGroup{ group, index, ref offsets } => {
-                    let group = descriptors.bind_groups
+                &Low::SetBindGroup {
+                    group,
+                    index,
+                    ref offsets,
+                } => {
+                    let group = descriptors
+                        .bind_groups
                         .get(group)
                         .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                     pass.set_bind_group(index, group, offsets);
                 }
                 &Low::SetVertexBuffer { slot, buffer } => {
-                    let buffer = descriptors.buffers
+                    let buffer = descriptors
+                        .buffers
                         .get(buffer)
                         .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                     pass.set_vertex_buffer(slot, buffer.slice(..));
@@ -844,13 +900,19 @@ impl Machine {
                 &Low::DrawIndexedZero { vertices } => {
                     pass.draw_indexed(0..vertices, 0, 0..1);
                 }
-                &Low::SetPushConstants { stages, offset, ref data } => {
+                &Low::SetPushConstants {
+                    stages,
+                    offset,
+                    ref data,
+                } => {
                     pass.set_push_constants(stages, offset, data);
                 }
                 Low::EndRenderPass => return Ok(()),
-                inner => return Err(StepError::BadInstruction(BadInstruction {
-                    inner: format!("Unexpectedly within render pass: {:?}", inner),
-                })),
+                inner => {
+                    return Err(StepError::BadInstruction(BadInstruction {
+                        inner: format!("Unexpectedly within render pass: {:?}", inner),
+                    }))
+                }
             }
         }
     }
@@ -860,25 +922,25 @@ impl StepError {
     fn InvalidInstruction(line: u32) -> Self {
         StepError {
             inner: StepErrorKind::InvalidInstruction(line),
-            .. Self::DEFAULT
+            ..Self::DEFAULT
         }
     }
 
     fn BadInstruction(bad: BadInstruction) -> Self {
         StepError {
             inner: StepErrorKind::BadInstruction(bad),
-            .. Self::DEFAULT
+            ..Self::DEFAULT
         }
     }
 
     pub(crate) const ProgramEnd: Self = StepError {
         inner: StepErrorKind::ProgramEnd,
-        .. Self::DEFAULT
+        ..Self::DEFAULT
     };
 
     pub(crate) const RenderPassDidNotEnd: Self = StepError {
         inner: StepErrorKind::RenderPassDidNotEnd,
-        .. Self::DEFAULT
+        ..Self::DEFAULT
     };
 
     pub(crate) const DEFAULT: Self = StepError {
@@ -918,13 +980,16 @@ impl SyncPoint<'_> {
             Some(polled) => {
                 let execution = polled.execution;
                 match block_on(polled.future, Some(&execution.gpu.device))? {
-                    Cleanup::Buffers { buffers, image_data } => {
+                    Cleanup::Buffers {
+                        buffers,
+                        image_data,
+                    } => {
                         execution.descriptors.buffers = buffers;
                         execution.buffers = image_data;
                         Ok(())
                     }
                 }
-            },
+            }
         }
     }
 

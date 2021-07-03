@@ -109,12 +109,16 @@ impl Pool {
 
     /// Iterate over all entries in the pool.
     pub fn iter(&self) -> Iter<'_> {
-        Iter { inner: self.items.iter() }
+        Iter {
+            inner: self.items.iter(),
+        }
     }
 
     /// Iterate over all entries in the pool.
     pub fn iter_mut(&mut self) -> IterMut<'_> {
-        IterMut { inner: self.items.iter_mut() }
+        IterMut {
+            inner: self.items.iter_mut(),
+        }
     }
 
     fn new_with_data(&mut self, data: ImageData, texel: Texel) -> PoolImageMut<'_> {
@@ -169,10 +173,10 @@ impl PoolImage<'_> {
     ///
     /// This is only available if a valid `Texel` descriptor has been configured.
     pub fn descriptor(&self) -> Descriptor {
-       Descriptor {
-           layout: self.layout().clone(),
-           texel: self.image.texel.clone(),
-       }
+        Descriptor {
+            layout: self.layout().clone(),
+            texel: self.image.texel.clone(),
+        }
     }
 
     /// View the buffer as bytes.
@@ -200,10 +204,10 @@ impl PoolImageMut<'_> {
     ///
     /// This is only available if a valid `Texel` descriptor has been configured.
     pub fn descriptor(&self) -> Descriptor {
-       Descriptor {
-           layout: self.layout().clone(),
-           texel: self.image.texel.clone(),
-       }
+        Descriptor {
+            layout: self.layout().clone(),
+            texel: self.image.texel.clone(),
+        }
     }
 
     /// Replace the data with a host allocated buffer of the correct layout.
@@ -244,10 +248,7 @@ impl<'pool> Iterator for Iter<'pool> {
     type Item = PoolImage<'pool>;
     fn next(&mut self) -> Option<Self::Item> {
         let (key, image) = self.inner.next()?;
-        Some(PoolImage {
-            key,
-            image,
-        })
+        Some(PoolImage { key, image })
     }
 }
 
@@ -255,10 +256,7 @@ impl<'pool> Iterator for IterMut<'pool> {
     type Item = PoolImageMut<'pool>;
     fn next(&mut self) -> Option<Self::Item> {
         let (key, image) = self.inner.next()?;
-        Some(PoolImageMut {
-            key,
-            image,
-        })
+        Some(PoolImageMut { key, image })
     }
 }
 

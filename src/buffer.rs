@@ -1,5 +1,5 @@
 //! Defines layout and buffer of our images.
-use canvas::{Canvas, layout::Layout};
+use canvas::{layout::Layout, Canvas};
 
 /// The byte layout of a buffer.
 ///
@@ -365,8 +365,8 @@ impl Texel {
     /// Returns None if the channel is not contained, or if it can not be extracted on its own.
     pub fn channel_texel(&self, channel: ColorChannel) -> Option<Texel> {
         use Block::*;
-        use SampleParts::*;
         use SampleBits::*;
+        use SampleParts::*;
         let parts = match self.samples.parts {
             Rgb | Rgbx | Rgba | Bgrx | Bgra | Abgr | Argb | Xrgb | Xbgr => match channel {
                 ColorChannel::R => R,
@@ -385,18 +385,14 @@ impl Texel {
             _ => return None,
         };
         Some(Texel {
-            samples: Samples {
-                bits,
-                parts
-            },
+            samples: Samples { bits, parts },
             block,
             color: self.color.clone(),
         })
     }
 }
 
-impl Samples {
-}
+impl Samples {}
 
 impl SampleBits {
     /// Determine the number of bytes for texels containing these samples.
@@ -423,6 +419,7 @@ impl Color {
     };
 }
 
+#[rustfmt::skip]
 impl Primaries {
     pub(crate) fn to_xyz(&self, white: Whitepoint) -> RowMatrix {
         use Primaries::*;
@@ -478,6 +475,7 @@ impl Primaries {
 
 }
 
+#[rustfmt::skip]
 impl ColMatrix {
     fn adj(self) -> RowMatrix {
         let m = self.0;
@@ -515,6 +513,7 @@ impl ColMatrix {
     }
 }
 
+#[rustfmt::skip]
 impl RowMatrix {
     pub(crate) fn new(rows: [f32; 9]) -> RowMatrix {
         RowMatrix(rows)
@@ -546,6 +545,7 @@ impl RowMatrix {
     }
 }
 
+#[rustfmt::skip]
 impl From<ColMatrix> for RowMatrix {
     fn from(ColMatrix(m): ColMatrix) -> RowMatrix {
         RowMatrix([
@@ -556,6 +556,7 @@ impl From<ColMatrix> for RowMatrix {
     }
 }
 
+#[rustfmt::skip]
 impl From<RowMatrix> for ColMatrix {
     fn from(RowMatrix(r): RowMatrix) -> ColMatrix {
         ColMatrix([
@@ -571,16 +572,16 @@ impl Whitepoint {
         use Whitepoint::*;
         match self {
             A => [1.09850, 1.00000, 0.35585],
-            B => [0.99072 , 1.00000 , 0.85223],
-            C => [0.98074 , 1.00000 , 1.18232],
-            D50 => [0.96422 , 1.00000 , 0.82521],
-            D55 => [0.95682 , 1.00000 , 0.92149],
-            D65 => [0.95047 , 1.00000 , 1.08883],
-            D75 => [0.94972 , 1.00000 , 1.22638],
-            E => [1.00000 , 1.00000 , 1.00000],
-            F2 => [0.99186 , 1.00000 , 0.67393],
-            F7 => [0.95041 , 1.00000 , 1.08747],
-            F11 => [1.00962 , 1.00000 , 0.64350],
+            B => [0.99072, 1.00000, 0.85223],
+            C => [0.98074, 1.00000, 1.18232],
+            D50 => [0.96422, 1.00000, 0.82521],
+            D55 => [0.95682, 1.00000, 0.92149],
+            D65 => [0.95047, 1.00000, 1.08883],
+            D75 => [0.94972, 1.00000, 1.22638],
+            E => [1.00000, 1.00000, 1.00000],
+            F2 => [0.99186, 1.00000, 0.67393],
+            F7 => [0.95041, 1.00000, 1.08747],
+            F11 => [1.00962, 1.00000, 0.64350],
         }
     }
 }
