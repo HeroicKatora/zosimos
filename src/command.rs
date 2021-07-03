@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, Texel, Whitepoint};
+use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint};
 use crate::program::{
     CompileError, Function, ImageBufferPlan, ImageBufferAssignment, PaintOnTopKind, Program,
     Texture,
@@ -190,10 +190,14 @@ pub struct Affine {
 /// ```
 #[derive(Clone, Debug)]
 pub(crate) struct ChromaticAdaptation {
+    /// The matrix converting source to XYZ.
+    to_xyz_matrix: RowMatrix,
     /// The target whitepoint of the adaptation.
     source: Whitepoint,
     /// The method to use.
     method: ChromaticAdaptationMethod,
+    /// The matrix converting from XYZ to target.
+    from_xyz_matrix: RowMatrix,
     /// The target whitepoint of the adaptation.
     target: Whitepoint,
 }
@@ -345,6 +349,7 @@ impl CommandBuffer {
         let desc_src = self.describe_reg(src)?;
         let texel_color;
         let source_wp;
+        let (to_xyz_matrix, from_xyz_matrix);
 
         match desc_src.texel.color {
             Color::Xyz { whitepoint, primary, transfer, luminance } => {
@@ -355,6 +360,8 @@ impl CommandBuffer {
                     luminance,
                 };
 
+                to_xyz_matrix = primary.to_xyz(whitepoint);
+                from_xyz_matrix = primary.to_xyz(target).inv();
                 source_wp = whitepoint;
             },
             _ => return Err(CommandError {
@@ -371,8 +378,10 @@ impl CommandBuffer {
         let op = Op::Unary {
             src,
             op: UnaryOp::ChromaticAdaptation(ChromaticAdaptation {
+                to_xyz_matrix,
                 source: source_wp,
                 target,
+                from_xyz_matrix,
                 method,
             }),
             desc: Descriptor {
@@ -597,13 +606,21 @@ impl CommandBuffer {
                         },
                         UnaryOp::ChromaticAdaptation(adaptation) => {
                             // Determine matrix for converting to xyz, then adapt, then back.
-                            let matrix = adaptation.into_matrix()?;
+                            let adapt = RowMatrix::new(adaptation.into_matrix()?);
+                            let output = adapt.multiply_right(adaptation.to_xyz_matrix.into());
+                            let matrix = adaptation.from_xyz_matrix.multiply_right(output);
+
+                            // If you want to debug this (for comparison to reference):
+                            // eprintln!("{:?}", adaptation.to_xyz_matrix);
+                            // eprintln!("{:?}", adaptation.from_xyz_matrix);
+                            // eprintln!("{:?}", adapt);
+                            // eprintln!("{:?}", matrix);
 
                             high_ops.push(High::Paint {
                                 texture: reg_to_texture[src],
                                 dst: Target::Discard(texture),
                                 fn_: Function::Transform {
-                                    matrix,
+                                    matrix: matrix.into(),
                                 },
                             });
                         },

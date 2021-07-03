@@ -9,6 +9,7 @@ use crate::buffer::{
     BufferLayout,
     Color,
     Descriptor,
+    RowMatrix,
     Samples,
     SampleBits,
     SampleParts,
@@ -81,7 +82,7 @@ pub(crate) enum Function {
     ///   bind(2,0): transform matrix
     ///   out: vec4 (color)
     Transform {
-        matrix: [f32; 9],
+        matrix: RowMatrix,
     },
 }
 
@@ -1788,6 +1789,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let fragment = self.fragment_shader(
                     Some(FragmentShader::LinearColorMatrix),
                     shader_include_to_spirv(shaders::FRAG_LINEAR))?;
+
+                let matrix = matrix.into_inner();
 
                 // std140, always pad to 16 bytes.
                 // matrix is an array of its columns.
