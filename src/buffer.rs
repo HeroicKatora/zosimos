@@ -415,6 +415,92 @@ impl Color {
     };
 }
 
+impl Primaries {
+    pub(crate) fn to_xyz(&self, white: Whitepoint) -> [f32; 9] {
+        use Primaries::*;
+
+        // http://www.brucelindbloom.com/index.html
+        let w = white.to_xyz();
+
+        // Rec.BT.601
+        // https://en.wikipedia.org/wiki/Color_spaces_with_RGB_primaries#Specifications_with_RGB_primaries
+        let xy: [[f32; 2]; 3] = match *self {
+            Bt601_525 | Smpte240 => [[0.63, 0.34], [0.31, 0.595], [0.155, 0.07]],
+            Bt601_625 => [[0.64, 0.33], [0.29, 0.6], [0.15, 0.06]],
+            Bt709 => [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06]],
+            Bt2020 | Bt2100 => [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]],
+        };
+
+        let xyz = |[x, y]: [f32; 2]| {
+            return [x / y, 1.0, (1.0 - x - y)/y];
+        };
+
+        let xyz_r = xyz(xy[0]);
+        let xyz_g = xyz(xy[1]);
+        let xyz_b = xyz(xy[2]);
+
+        // N = [xyz_r, xyz_g, xyz_b]^T
+        // xyz_white = N · S
+        // => S := N^-1 xyz_white
+        //
+        // M = N · diag(S)
+        let det = |ma, mb, na, nb| {
+            ma * nb - na * mb
+        };
+
+        // m: column major matrix
+        // returns: row major adjugate matrix
+        let adj = (|m: [[f32; 3]; 3]| {
+            return [
+                det(m[1][1], m[1][2], m[2][1], m[2][2]), -det(m[0][1], m[0][2], m[2][1], m[2][2]), det(m[0][1], m[0][2], m[1][1], m[1][2]),
+                -det(m[1][0], m[1][2], m[2][0], m[2][2]), det(m[0][0], m[0][2], m[2][0], m[2][2]), -det(m[0][0], m[0][2], m[1][0], m[1][2]),
+                det(m[1][0], m[1][1], m[2][0], m[2][1]), -det(m[0][0], m[0][1], m[2][0], m[2][1]), det(m[0][0], m[0][1], m[1][0], m[1][1]),
+            ];
+        })([xyz_r, xyz_g, xyz_b]);
+
+        let det_n = xyz_r[0] * det(xyz_g[1], xyz_g[2], xyz_g[1], xyz_g[2])
+            - xyz_r[1] * det(xyz_g[0], xyz_g[2], xyz_g[0], xyz_g[2])
+            + xyz_r[2] * det(xyz_g[0], xyz_g[1], xyz_g[0], xyz_g[1]);
+
+        let n1 = [
+            adj[0] / det_n, adj[1] / det_n, adj[2] / det_n,
+            adj[3] / det_n, adj[4] / det_n, adj[5] / det_n,
+            adj[6] / det_n, adj[7] / det_n, adj[8] / det_n,
+        ];
+
+        let s = [
+            (w[0]*n1[0] + w[1]*n1[1] + w[2]*n1[2]) / det_n,
+            (w[0]*n1[3] + w[1]*n1[4] + w[2]*n1[5]) / det_n,
+            (w[0]*n1[6] + w[1]*n1[7] + w[2]*n1[8]) / det_n,
+        ];
+
+        [
+            s[0]*xyz_r[0], s[1]*xyz_g[0], s[2]*xyz_b[0],
+            s[0]*xyz_r[1], s[1]*xyz_g[1], s[2]*xyz_b[1],
+            s[0]*xyz_r[2], s[1]*xyz_g[2], s[2]*xyz_b[2],
+        ]
+    }
+}
+
+impl Whitepoint {
+    pub(crate) fn to_xyz(self) -> [f32; 3] {
+        use Whitepoint::*;
+        match self {
+            A => [1.09850, 1.00000, 0.35585],
+            B => [0.99072 , 1.00000 , 0.85223],
+            C => [0.98074 , 1.00000 , 1.18232],
+            D50 => [0.96422 , 1.00000 , 0.82521],
+            D55 => [0.95682 , 1.00000 , 0.92149],
+            D65 => [0.95047 , 1.00000 , 1.08883],
+            D75 => [0.94972 , 1.00000 , 1.22638],
+            E => [1.00000 , 1.00000 , 1.00000],
+            F2 => [0.99186 , 1.00000 , 0.67393],
+            F7 => [0.95041 , 1.00000 , 1.08747],
+            F11 => [1.00962 , 1.00000 , 0.64350],
+        }
+    }
+}
+
 impl Block {
     pub fn width(&self) -> u32 {
         use Block::*;

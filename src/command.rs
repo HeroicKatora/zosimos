@@ -596,6 +596,7 @@ impl CommandBuffer {
                             });
                         },
                         UnaryOp::ChromaticAdaptation(adaptation) => {
+                            // Determine matrix for converting to xyz, then adapt, then back.
                             let matrix = adaptation.into_matrix()?;
 
                             high_ops.push(High::Paint {
@@ -709,7 +710,6 @@ impl ChromaticAdaptation {
             };
         }
 
-        dbg!(self.source, self.target);
         // FIXME: when you adjust the value-to-type translation, also adjust it within
         // `translate_matrix!`
         let method = (|| {
