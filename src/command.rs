@@ -2,7 +2,7 @@ use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, Te
 use crate::pool::PoolImage;
 use crate::program::{
     CompileError, Function, ImageBufferAssignment, ImageBufferPlan, PaintOnTopKind, Program,
-    Texture,
+    QuadTarget, Texture,
 };
 use std::collections::HashMap;
 
@@ -111,8 +111,6 @@ pub(crate) enum Target {
 #[derive(Clone)]
 pub(crate) enum UnaryOp {
     /// Op = id
-    Affine(Affine),
-    /// Op = id
     Crop(Rectangle),
     /// Op(color)[T] = T[.color=color]
     /// And color needs to be 'color compatible' with the prior T (see module).
@@ -127,6 +125,8 @@ pub(crate) enum UnaryOp {
 
 #[derive(Clone)]
 pub(crate) enum BinaryOp {
+    /// Op = id
+    Affine(Affine),
     /// Op[T, U] = T
     /// where T = U
     Inscribe { placement: Rectangle },
@@ -154,9 +154,37 @@ pub enum Blend {
     Alpha,
 }
 
+/// Describes an affine transformation of an image.
+///
+/// Affine transformations are a combination of scaling, translation, rotation. They describe a
+/// transformation of the 2D space of the original image.
 #[derive(Clone, Copy)]
 pub struct Affine {
-    transformation: [f32; 9],
+    /// The affine transformation, as a row-major homogeneous matrix.
+    ///
+    /// Note that the top-left pixel starts at (0, 0), the bottom right pixel ends at (1, 1).
+    pub transformation: [f32; 9],
+    /// How pixels are resolved from the underlying texture.
+    pub sampling: AffineSample,
+}
+
+/// The way to perform sampling of an texture that was transformed with an affine transformation.
+///
+/// You have to be careful that there is NO built-in functionality to avoid attacks that downscale
+/// an image so far that a very particular subset of pixels (or linear interpolation) is shown that
+/// results in an image visually very different from the original. Such an attack works because
+/// scaling down leads to many pixels being ignored.
+#[derive(Clone, Copy)]
+pub enum AffineSample {
+    /// Choose the nearest pixel.
+    ///
+    /// This method works with all color models.
+    Nearest,
+    /// Interpolate bi-linearly between nearest pixels.
+    ///
+    /// We rely on the executing GPU sampler2D for determining the color, in particular it will happen
+    /// in _linear_ RGB and this method can only be used on RGB-ish images.
+    BiLinear,
 }
 
 /// Reference of matrices and more: http://brucelindbloom.com/index.html?Eqn_ChromAdapt.html
@@ -503,14 +531,32 @@ impl CommandBuffer {
         }))
     }
 
-    /// An affine transformation of the image.
-    pub fn affine(&mut self, src: Register, affine: Affine) -> Result<Register, CommandError> {
+    /// Overlay an affine transformation of the image.
+    pub fn affine(&mut self, below: Register, affine: Affine, above: Register) -> Result<Register, CommandError> {
         // TODO: should we check affine here?
-        let desc = self.describe_reg(src)?.clone();
-        Ok(self.push(Op::Unary {
-            src,
-            op: UnaryOp::Affine(affine),
-            desc,
+        let lhs = self.describe_reg(below)?.clone();
+        let rhs = self.describe_reg(above)?.clone();
+
+        if lhs.texel != rhs.texel {
+            return Err(CommandError::TYPE_ERR);
+        }
+
+        if !(RowMatrix::new(affine.transformation).det().abs() >= f32::EPSILON) {
+            return Err(CommandError::OTHER);
+        }
+
+        match affine.sampling {
+            AffineSample::Nearest => (),
+            AffineSample::BiLinear => {
+                todo!("Check for a color which we can sample bi-linearly")
+            }
+        }
+
+        Ok(self.push(Op::Binary {
+            lhs: below,
+            rhs: above,
+            op: BinaryOp::Affine(affine),
+            desc: lhs,
         }))
     }
 
@@ -604,7 +650,7 @@ impl CommandBuffer {
                                 dst: Target::Discard(texture),
                                 fn_: Function::PaintOnTop {
                                     selection: region,
-                                    target,
+                                    target: target.into(),
                                     viewport: target,
                                     paint_on_top: PaintOnTopKind::Copy,
                                 },
@@ -645,13 +691,27 @@ impl CommandBuffer {
                     let upper_region = Rectangle::from(self.describe_reg(*rhs).unwrap());
 
                     match op {
+                        BinaryOp::Affine(affine) => {
+                            let affine_matrix = RowMatrix::new(affine.transformation);
+                            high_ops.push(High::Paint {
+                                texture: reg_to_texture[rhs],
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintOnTop {
+                                    selection: upper_region,
+                                    target: QuadTarget::from(upper_region)
+                                        .affine(&affine_matrix),
+                                    viewport: lower_region,
+                                    paint_on_top: affine.sampling.as_paint_on_top(),
+                                },
+                            })
+                        }
                         BinaryOp::Inscribe { placement } => {
                             high_ops.push(High::Paint {
                                 dst: Target::Discard(texture),
                                 texture: reg_to_texture[lhs],
                                 fn_: Function::PaintOnTop {
                                     selection: lower_region,
-                                    target: lower_region,
+                                    target: lower_region.into(),
                                     viewport: lower_region,
                                     paint_on_top: PaintOnTopKind::Copy,
                                 },
@@ -662,7 +722,7 @@ impl CommandBuffer {
                                 texture: reg_to_texture[rhs],
                                 fn_: Function::PaintOnTop {
                                     selection: upper_region,
-                                    target: *placement,
+                                    target: (*placement).into(),
                                     viewport: lower_region,
                                     paint_on_top: PaintOnTopKind::Copy,
                                 },
@@ -758,6 +818,12 @@ impl ChromaticAdaptation {
         });
 
         Ok(matrices)
+    }
+}
+
+impl AffineSample {
+    fn as_paint_on_top(self) -> PaintOnTopKind {
+        todo!()
     }
 }
 

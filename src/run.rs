@@ -41,23 +41,6 @@ pub(crate) struct Gpu {
     pub(crate) queue: Queue,
 }
 
-/// One fragment shader execution with pipeline:
-/// FS:
-///   in: vec2 uv
-///   region: vec4 (parameter)
-///   bind: sampler2D
-///   out: vec4 (color)
-pub(crate) struct PaintRectFragment {
-    /// The 'selected' region relative to which uv is to be interpreted.
-    region: Rectangle,
-    /// The index of the sampler which we should bind to `bind`.
-    region_sampler_id: usize,
-    /// The target region we want to paint.
-    target: Rectangle,
-    /// The shader to compile for this.
-    fragment_shader: &'static [u8],
-}
-
 type DynStep = dyn core::future::Future<Output = Result<Cleanup, StepError>>;
 
 struct DevicePolled<'exe> {
@@ -132,12 +115,16 @@ impl Execution {
 
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
         let instruction_pointer = self.machine.instruction_pointer;
+
+        /*
         eprintln!(
             "{:?}",
             self.machine
                 .instructions
                 .get(self.machine.instruction_pointer)
         );
+        */
+
         match self.step_inner() {
             Ok(sync) => Ok(sync),
             Err(mut error) => {

@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::buffer::{
-    Block, BufferLayout, Color, Descriptor, RowMatrix, SampleBits, SampleParts, Samples, Texel,
+    Block, BufferLayout, ColMatrix, Color, Descriptor, RowMatrix, SampleBits, SampleParts, Samples, Texel,
     Transfer,
 };
 use crate::command::{High, Rectangle, Register, Target};
@@ -60,9 +60,10 @@ pub(crate) enum Function {
         /// Source selection (relative to texture coordinates).
         selection: Rectangle,
         /// Target location in target texture.
-        target: Rectangle,
+        target: QuadTarget,
         /// Rectangle that the draw call targets in the target texture.
-        /// This gives the coordinate basis.
+        /// The target coordinates are relative to this and the fragment shader given by
+        /// paint_on_top is only executed within that rectangle.
         viewport: Rectangle,
         paint_on_top: PaintOnTopKind,
     },
@@ -78,6 +79,13 @@ pub(crate) enum Function {
     ///   bind(2,0): transform matrix
     ///   out: vec4 (color)
     Transform { matrix: RowMatrix },
+}
+
+/// Describes a method of calculating the screen space coordinates of the painted quad.
+#[derive(Clone, Debug, PartialEq)]
+pub enum QuadTarget {
+    Rect(Rectangle),
+    Absolute([[f32; 2]; 4]),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -126,7 +134,6 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     bind_group_layouts: usize,
     buffers: usize,
     command_buffers: usize,
-    modules: usize,
     pipeline_layouts: usize,
     render_pipelines: usize,
     sampler: usize,
@@ -137,7 +144,6 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     // Additional validation properties.
     is_in_command_encoder: bool,
     is_in_render_pass: bool,
-    commands: usize,
 
     // Additional fields to map our runtime state.
     /// How we map registers to device buffers.
@@ -148,7 +154,7 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     quad_group_layout: Option<usize>,
     fragment_data_group_layout: Option<usize>,
     paint_pipeline_layout: Option<usize>,
-    default_sampler: Option<usize>,
+    known_samplers: HashMap<SamplerDescriptor, usize>,
     fragment_shaders: HashMap<FragmentShader, usize>,
     vertex_shaders: HashMap<VertexShader, usize>,
     simple_quad_buffer: Option<DeviceBuffer>,
@@ -518,7 +524,7 @@ pub(crate) struct TextureViewDescriptor {
 
 /// For constructing a texture samples.
 /// Ignores lod attributes
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub(crate) struct SamplerDescriptor {
     /// In all directions.
     pub address_mode: wgpu::AddressMode,
@@ -952,7 +958,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 }
 
                 self.is_in_command_encoder = false;
-                self.commands += 1;
+                self.command_buffers += 1;
             }
             Low::EndRenderPass => {
                 if !self.is_in_render_pass {
@@ -975,18 +981,18 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             // TODO: could validate indices.
             Low::DrawOnce { .. } | Low::DrawIndexedZero { .. } | Low::SetPushConstants { .. } => {}
             Low::RunTopCommand => {
-                if self.commands == 0 {
+                if self.command_buffers == 0 {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
 
-                self.commands -= 1;
+                self.command_buffers -= 1;
             }
             Low::RunBotToTop(num) | Low::RunTopToBot(num) => {
-                if num >= self.commands {
+                if num >= self.command_buffers {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
 
-                self.commands -= num;
+                self.command_buffers -= num;
             }
             // TODO: could validate indices.
             Low::WriteImageToTexture { .. }
@@ -1564,13 +1570,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(pipeline)
     }
 
-    fn make_bind_group_sampled_texture(&mut self, texture: Texture) -> Result<usize, LaunchError> {
-        let view = self.texture_view(texture)?;
-
-        let sampler = {
-            let instructions = &mut self.instructions;
-            let sampler = &mut self.sampler;
-            *self.default_sampler.get_or_insert_with(|| {
+    fn make_sampler(&mut self, descriptor: SamplerDescriptor) -> usize {
+        let instructions = &mut self.instructions;
+        let sampler = &mut self.sampler;
+        *self.known_samplers
+            .entry(descriptor)
+            .or_insert_with_key(|desc| {
                 let sampler_id = *sampler;
                 instructions.extend_one(Low::Sampler(SamplerDescriptor {
                     address_mode: wgpu::AddressMode::default(),
@@ -1580,7 +1585,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 *sampler += 1;
                 sampler_id
             })
-        };
+    }
+
+    fn make_bind_group_sampled_texture(&mut self, texture: Texture) -> Result<usize, LaunchError> {
+        let view = self.texture_view(texture)?;
+
+        let sampler = self.make_sampler(SamplerDescriptor {
+            address_mode: wgpu::AddressMode::default(),
+            border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+            resize_filter: wgpu::FilterMode::Nearest,
+        });
 
         let group = self.bind_groups;
         let descriptor = BindGroupDescriptor {
@@ -1747,11 +1761,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let min_v = (selection.y as f32) / (tex_height.get() as f32);
                 let max_v = (selection.max_y as f32) / (tex_height.get() as f32);
 
-                let target = viewport.meet_in_local_coordinates(*target);
-                let min_a = (target.x as f32) / (viewport.width() as f32);
-                let max_a = (target.max_x as f32) / (viewport.width() as f32);
-                let min_b = (target.y as f32) / (viewport.height() as f32);
-                let max_b = (target.max_y as f32) / (viewport.height() as f32);
+                let coords = target.to_screenspace_coords(viewport);
 
                 // std140, always pad to 16 bytes.
                 let buffer: [[f32; 2]; 16] = [
@@ -1760,10 +1770,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     [max_u, max_v], [0.0, 0.0],
                     [min_u, max_v], [0.0, 0.0],
 
-                    [min_a, min_b], [0.0, 0.0],
-                    [max_a, min_b], [0.0, 0.0],
-                    [max_a, max_b], [0.0, 0.0],
-                    [min_a, max_b], [0.0, 0.0],
+                    coords[0], [0.0, 0.0],
+                    coords[1], [0.0, 0.0],
+                    coords[2], [0.0, 0.0],
+                    coords[3], [0.0, 0.0],
                 ];
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
@@ -1808,6 +1818,56 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 })
             },
         }
+    }
+}
+
+impl QuadTarget {
+    pub(crate) fn affine(&self, transform: &RowMatrix) -> Self {
+        let [a, b, c, d] = self.to_screenspace_coords(&Rectangle::with_width_height(1, 1));
+        QuadTarget::Absolute([
+             transform.multiply_point(a),
+             transform.multiply_point(b),
+             transform.multiply_point(c),
+             transform.multiply_point(d),
+        ])
+    }
+
+    pub(crate) fn to_screenspace_coords(&self, viewport: &Rectangle) -> [[f32; 2]; 4] {
+        match self {
+            QuadTarget::Rect(target) => {
+                let target = viewport.meet_in_local_coordinates(*target);
+                let min_a = (target.x as f32) / (viewport.width() as f32);
+                let max_a = (target.max_x as f32) / (viewport.width() as f32);
+                let min_b = (target.y as f32) / (viewport.height() as f32);
+                let max_b = (target.max_y as f32) / (viewport.height() as f32);
+
+                [
+                    [min_a, min_b],
+                    [max_a, min_b],
+                    [max_a, max_b],
+                    [min_a, max_b],
+                ]
+            }
+            QuadTarget::Absolute(coord) => {
+                let xy = |[cx, cy]: [f32; 2]| [
+                    (cx- viewport.x as f32) / viewport.width() as f32,
+                    (cy- viewport.y as f32) / viewport.height() as f32,
+                ];
+
+                [
+                    xy(coord[0]),
+                    xy(coord[1]),
+                    xy(coord[2]),
+                    xy(coord[3]),
+                ]
+            }
+        }
+    }
+}
+
+impl From<Rectangle> for QuadTarget {
+    fn from(target: Rectangle) -> Self {
+        QuadTarget::Rect(target)
     }
 }
 

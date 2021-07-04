@@ -523,8 +523,20 @@ impl RowMatrix {
         ColMatrix::from(self).inv()
     }
 
+    pub(crate) fn det(self) -> f32 {
+        ColMatrix::from(self).det()
+    }
+
+    /// Multiply with a homogeneous point.
+    /// Note: might produce NaN if the matrix isn't a valid transform and may produce infinite
+    /// points.
+    pub(crate) fn multiply_point(self, point: [f32; 2]) -> [f32; 2] {
+        let [x, y, z] = self.multiply_column([point[0], point[1], 1.0]);
+        [x / z, y / z]
+    }
+
     /// Calculate self · other
-    pub(crate) fn multiply_right(self, ColMatrix([a, b, c]): ColMatrix) -> ColMatrix {
+    pub(crate) fn multiply_column(self, col: [f32; 3]) -> [f32; 3] {
         let x = &self.0[0..3];
         let y = &self.0[3..6];
         let z = &self.0[6..9];
@@ -533,10 +545,15 @@ impl RowMatrix {
             r[0] * c[0] + r[1] * c[1] + r[2] * c[2]
         };
 
+        [dot(x, col), dot(y, col), dot(z, col)]
+    }
+
+    /// Calculate self · other
+    pub(crate) fn multiply_right(self, ColMatrix([a, b, c]): ColMatrix) -> ColMatrix {
         ColMatrix([
-            [dot(x, a), dot(y, a), dot(z, a)],
-            [dot(x, b), dot(y, b), dot(z, b)],
-            [dot(x, c), dot(y, c), dot(z, c)],
+            self.multiply_column(a),
+            self.multiply_column(b),
+            self.multiply_column(c),
         ])
     }
 
