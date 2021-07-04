@@ -1,4 +1,4 @@
-use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint};
+use crate::buffer::{BufferLayout, ColMatrix, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint};
 use crate::pool::PoolImage;
 use crate::program::{
     CompileError, Function, ImageBufferAssignment, ImageBufferPlan, PaintOnTopKind, Program,
@@ -693,15 +693,27 @@ impl CommandBuffer {
                     match op {
                         BinaryOp::Affine(affine) => {
                             let affine_matrix = RowMatrix::new(affine.transformation);
+
+                            high_ops.push(High::Paint {
+                                dst: Target::Discard(texture),
+                                texture: reg_to_texture[lhs],
+                                fn_: Function::PaintOnTop {
+                                    selection: lower_region,
+                                    target: lower_region.into(),
+                                    viewport: lower_region,
+                                    paint_on_top: PaintOnTopKind::Copy,
+                                },
+                            });
+
                             high_ops.push(High::Paint {
                                 texture: reg_to_texture[rhs],
-                                dst: Target::Discard(texture),
+                                dst: Target::Load(texture),
                                 fn_: Function::PaintOnTop {
                                     selection: upper_region,
                                     target: QuadTarget::from(upper_region)
                                         .affine(&affine_matrix),
                                     viewport: lower_region,
-                                    paint_on_top: affine.sampling.as_paint_on_top(),
+                                    paint_on_top: affine.sampling.as_paint_on_top()?,
                                 },
                             })
                         }
@@ -821,9 +833,79 @@ impl ChromaticAdaptation {
     }
 }
 
+#[rustfmt::skip]
+impl Affine {
+    /// Create affine parameters with identity transformation.
+    pub fn new(sampling: AffineSample) -> Self {
+        Affine {
+            transformation: [
+                1.0, 0., 0.,
+                0., 1.0, 0.,
+                0., 0., 1.0,
+            ],
+            sampling,
+        }
+    }
+
+    /// After the transformation, also scale everything.
+    ///
+    /// This corresponds to a left-side multiplication of the transformation matrix.
+    pub fn scale(self, x: f32, y: f32) -> Self {
+        let post = RowMatrix::diag(x, y, 1.0)
+            .multiply_right(RowMatrix::new(self.transformation).into());
+        let transformation = RowMatrix::from(post).into_inner();
+
+        Affine {
+            transformation,
+            ..self
+        }
+    }
+
+    /// After the transformation, rotate everything clockwise.
+    ///
+    /// This corresponds to a left-side multiplication of the transformation matrix.
+    pub fn rotate(self, rad: f32) -> Self {
+        let post = RowMatrix::new([
+            rad.cos(), rad.sin(), 0.,
+            -rad.sin(), rad.cos(), 0.,
+            0., 0., 1.,
+        ]);
+
+        let post = post.multiply_right(RowMatrix::new(self.transformation).into());
+        let transformation = RowMatrix::from(post).into_inner();
+
+        Affine {
+            transformation,
+            ..self
+        }
+    }
+
+    /// After the transformation, shift by an x and y offset.
+    ///
+    /// This corresponds to a left-side multiplication of the transformation matrix.
+    pub fn shift(self, x: f32, y: f32) -> Self {
+        let post = RowMatrix::new([
+            1., 0., x,
+            0., 1., y,
+            0., 0., 1.,
+        ]);
+
+        let post = post.multiply_right(RowMatrix::new(self.transformation).into());
+        let transformation = RowMatrix::from(post).into_inner();
+
+        Affine {
+            transformation,
+            ..self
+        }
+    }
+}
+
 impl AffineSample {
-    fn as_paint_on_top(self) -> PaintOnTopKind {
-        todo!()
+    fn as_paint_on_top(self) -> Result<PaintOnTopKind, CompileError> {
+        match self {
+            AffineSample::Nearest => Ok(PaintOnTopKind::Copy),
+            _ => Err(CompileError::NotYetImplemented),
+        }
     }
 }
 

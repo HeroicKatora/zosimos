@@ -519,6 +519,14 @@ impl RowMatrix {
         RowMatrix(rows)
     }
 
+    pub(crate) fn diag(x: f32, y: f32, z: f32) -> Self {
+        RowMatrix([
+            x, 0., 0.,
+            0., y, 0.,
+            0., 0., z,
+        ])
+    }
+
     pub(crate) fn inv(self) -> RowMatrix {
         ColMatrix::from(self).inv()
     }

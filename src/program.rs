@@ -1835,7 +1835,6 @@ impl QuadTarget {
     pub(crate) fn to_screenspace_coords(&self, viewport: &Rectangle) -> [[f32; 2]; 4] {
         match self {
             QuadTarget::Rect(target) => {
-                let target = viewport.meet_in_local_coordinates(*target);
                 let min_a = (target.x as f32) / (viewport.width() as f32);
                 let max_a = (target.max_x as f32) / (viewport.width() as f32);
                 let min_b = (target.y as f32) / (viewport.height() as f32);
@@ -1850,8 +1849,8 @@ impl QuadTarget {
             }
             QuadTarget::Absolute(coord) => {
                 let xy = |[cx, cy]: [f32; 2]| [
-                    (cx- viewport.x as f32) / viewport.width() as f32,
-                    (cy- viewport.y as f32) / viewport.height() as f32,
+                    (cx - viewport.x as f32) / viewport.width() as f32,
+                    (cy - viewport.y as f32) / viewport.height() as f32,
                 ];
 
                 [

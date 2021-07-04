@@ -5,6 +5,7 @@ use stealth_paint::pool::Pool;
 const BACKGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/background.png");
 const FOREGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/foreground.png");
 const OUTPUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/reference/composed.png");
+const OUTPUT_AFFINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/reference/affine.png");
 
 #[test]
 fn run_blending() {
@@ -38,6 +39,11 @@ fn run_blending() {
         max_y: foreground.layout.height(),
     };
 
+    let affine = command::Affine::new(command::AffineSample::Nearest)
+        .shift(-((placement.max_x / 2) as f32), -((placement.max_y / 2) as f32))
+        .rotate(3.145159265 / 4.)
+        .shift((background.layout.width() / 2) as f32, (background.layout.height() / 2) as f32);
+
     // Describe the pipeline:
     // 0: in (background)
     // 1: in (foreground)
@@ -50,6 +56,10 @@ fn run_blending() {
         .inscribe(background, placement, foreground)
         .expect("Valid to inscribe");
 
+    let result_affine = commands
+        .affine(background, affine, foreground)
+        .expect("Valid to paint with affine transformation");
+
     let adapted = commands
         .chromatic_adaptation(
             result,
@@ -59,6 +69,7 @@ fn run_blending() {
         )
         .unwrap();
 
+    let (output_affine, _outformat) = commands.output(result_affine).expect("Valid for output");
     let (output, _outformat) = commands.output(adapted).expect("Valid for output");
 
     let plan = commands.compile().expect("Could build command buffer");
@@ -85,9 +96,15 @@ fn run_blending() {
         .expect("A valid image output")
         .to_image()
         .expect("An `image` image");
+    let image_affine = retire
+        .output(output_affine)
+        .expect("A valid image output")
+        .to_image()
+        .expect("An `image` image");
 
     if std::env::var_os("STEALTH_PAINT_BLESS").is_some() {
         image.save(OUTPUT).expect("Successfully saved");
+        image_affine.save(OUTPUT_AFFINE).expect("Successfully saved");
         return;
     }
 
