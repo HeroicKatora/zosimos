@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use stealth_paint::pool::PoolImage;
 use image::GenericImageView;
 
@@ -15,7 +15,7 @@ pub fn assert_reference(image: PoolImage, key: &str) {
     let (width, height) = image.dimensions();
     crc.write_u32(width);
     crc.write_u32(height);
-    core::mem::discriminant(&image).hash(&mut crc);
+
     crc.write(image.as_bytes());
     let crc = crc.finish();
 
