@@ -42,6 +42,12 @@ fn integration() {
         pool_foreground.clone(),
         pool_background.clone(),
     );
+
+    run_adaptation(
+        &mut pool,
+        instance.enumerate_adapters(ANY),
+        pool_background.clone(),
+    );
 }
 
 fn run_blending(
@@ -71,16 +77,7 @@ fn run_blending(
         .inscribe(background, placement, foreground)
         .expect("Valid to inscribe");
 
-    let adapted = commands
-        .chromatic_adaptation(
-            result,
-            command::ChromaticAdaptationMethod::VonKries,
-            // to itself..
-            Whitepoint::D65,
-        )
-        .unwrap();
-
-    let (output, _outformat) = commands.output(adapted).expect("Valid for output");
+    let (output, _outformat) = commands.output(result).expect("Valid for output");
 
     let plan = commands.compile().expect("Could build command buffer");
     let adapter = plan
@@ -168,4 +165,51 @@ fn run_affine(
         .output(output_affine)
         .expect("A valid image output");
     util::assert_reference(image_affine, "affine.png.crc");
+}
+
+fn run_adaptation(
+    pool: &mut Pool,
+    adapters: impl Iterator<Item=wgpu::Adapter>,
+    (bg_key, background): (PoolKey, Descriptor),
+) {
+    let mut commands = CommandBuffer::default();
+
+    // Describe the pipeline:
+    // 0: in (background)
+    // 1: chromatic_adaptation(0, adapt)
+    // 2: out(2)
+    let background = commands.input(background).unwrap();
+
+    let adapted = commands
+        .chromatic_adaptation(
+            background,
+            command::ChromaticAdaptationMethod::VonKries,
+            Whitepoint::D50,
+        )
+        .unwrap();
+
+    let (output_affine, _outformat) = commands.output(adapted).expect("Valid for output");
+
+    let plan = commands.compile().expect("Could build command buffer");
+    let adapter = plan
+        .choose_adapter(adapters)
+        .expect("Did not find any adapter for executing the blend operation");
+
+    let mut execution = plan
+        .launch(pool)
+        .bind(background, bg_key)
+        .unwrap()
+        .launch(&adapter)
+        .expect("Launching failed");
+
+    while execution.is_running() {
+        let _wait_point = execution.step().expect("Shouldn't fail but");
+    }
+
+    let mut retire = execution.retire_gracefully(pool);
+
+    let image_adapted = retire
+        .output(output_affine)
+        .expect("A valid image output");
+    util::assert_reference(image_adapted, "adapted.png.crc");
 }
