@@ -40,9 +40,15 @@ fn run_blending() {
     };
 
     let affine = command::Affine::new(command::AffineSample::Nearest)
-        .shift(-((placement.max_x / 2) as f32), -((placement.max_y / 2) as f32))
+        .shift(
+            -((placement.max_x / 2) as f32),
+            -((placement.max_y / 2) as f32),
+        )
         .rotate(3.145159265 / 4.)
-        .shift((background.layout.width() / 2) as f32, (background.layout.height() / 2) as f32);
+        .shift(
+            (background.layout.width() / 2) as f32,
+            (background.layout.height() / 2) as f32,
+        );
 
     // Describe the pipeline:
     // 0: in (background)
@@ -104,7 +110,9 @@ fn run_blending() {
 
     if std::env::var_os("STEALTH_PAINT_BLESS").is_some() {
         image.save(OUTPUT).expect("Successfully saved");
-        image_affine.save(OUTPUT_AFFINE).expect("Successfully saved");
+        image_affine
+            .save(OUTPUT_AFFINE)
+            .expect("Successfully saved");
         return;
     }
 

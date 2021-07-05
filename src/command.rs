@@ -1,4 +1,6 @@
-use crate::buffer::{BufferLayout, ColMatrix, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint};
+use crate::buffer::{
+    BufferLayout, ColMatrix, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint,
+};
 use crate::pool::PoolImage;
 use crate::program::{
     CompileError, Function, ImageBufferAssignment, ImageBufferPlan, PaintOnTopKind, Program,
@@ -532,7 +534,12 @@ impl CommandBuffer {
     }
 
     /// Overlay an affine transformation of the image.
-    pub fn affine(&mut self, below: Register, affine: Affine, above: Register) -> Result<Register, CommandError> {
+    pub fn affine(
+        &mut self,
+        below: Register,
+        affine: Affine,
+        above: Register,
+    ) -> Result<Register, CommandError> {
         // TODO: should we check affine here?
         let lhs = self.describe_reg(below)?.clone();
         let rhs = self.describe_reg(above)?.clone();
@@ -710,8 +717,7 @@ impl CommandBuffer {
                                 dst: Target::Load(texture),
                                 fn_: Function::PaintOnTop {
                                     selection: upper_region,
-                                    target: QuadTarget::from(upper_region)
-                                        .affine(&affine_matrix),
+                                    target: QuadTarget::from(upper_region).affine(&affine_matrix),
                                     viewport: lower_region,
                                     paint_on_top: affine.sampling.as_paint_on_top()?,
                                 },

@@ -8,8 +8,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::buffer::{
-    Block, BufferLayout, ColMatrix, Color, Descriptor, RowMatrix, SampleBits, SampleParts, Samples, Texel,
-    Transfer,
+    Block, BufferLayout, ColMatrix, Color, Descriptor, RowMatrix, SampleBits, SampleParts, Samples,
+    Texel, Transfer,
 };
 use crate::command::{High, Rectangle, Register, Target};
 use crate::pool::{ImageData, Pool, PoolKey};
@@ -1573,7 +1573,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn make_sampler(&mut self, descriptor: SamplerDescriptor) -> usize {
         let instructions = &mut self.instructions;
         let sampler = &mut self.sampler;
-        *self.known_samplers
+        *self
+            .known_samplers
             .entry(descriptor)
             .or_insert_with_key(|desc| {
                 let sampler_id = *sampler;
@@ -1825,10 +1826,10 @@ impl QuadTarget {
     pub(crate) fn affine(&self, transform: &RowMatrix) -> Self {
         let [a, b, c, d] = self.to_screenspace_coords(&Rectangle::with_width_height(1, 1));
         QuadTarget::Absolute([
-             transform.multiply_point(a),
-             transform.multiply_point(b),
-             transform.multiply_point(c),
-             transform.multiply_point(d),
+            transform.multiply_point(a),
+            transform.multiply_point(b),
+            transform.multiply_point(c),
+            transform.multiply_point(d),
         ])
     }
 
@@ -1848,17 +1849,14 @@ impl QuadTarget {
                 ]
             }
             QuadTarget::Absolute(coord) => {
-                let xy = |[cx, cy]: [f32; 2]| [
-                    (cx - viewport.x as f32) / viewport.width() as f32,
-                    (cy - viewport.y as f32) / viewport.height() as f32,
-                ];
+                let xy = |[cx, cy]: [f32; 2]| {
+                    [
+                        (cx - viewport.x as f32) / viewport.width() as f32,
+                        (cy - viewport.y as f32) / viewport.height() as f32,
+                    ]
+                };
 
-                [
-                    xy(coord[0]),
-                    xy(coord[1]),
-                    xy(coord[2]),
-                    xy(coord[3]),
-                ]
+                [xy(coord[0]), xy(coord[1]), xy(coord[2]), xy(coord[3])]
             }
         }
     }
