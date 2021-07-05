@@ -48,10 +48,10 @@ pub(crate) struct ImageMeta {
     /// Do we guarantee consistent content to read?
     /// Images with this set to `false` may be arbitrarily used as a temporary buffer for other
     /// operations, overwriting the contents at will.
-    no_read: bool,
+    pub(crate) no_read: bool,
     /// Should we permit writing to this image?
     /// If not then the device can allocate/cache it differently.
-    no_write: bool,
+    pub(crate) no_write: bool,
 }
 
 /// TODO: figure out if we should expose this or a privacy wrapper.
@@ -210,6 +210,25 @@ impl PoolImageMut<'_> {
         }
     }
 
+    /// View the buffer as bytes.
+    ///
+    /// This return `Some` if the image is a host allocated buffer and `None` otherwise.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        self.image.data.as_bytes()
+    }
+
+    /// View the buffer as bytes.
+    ///
+    /// This return `Some` if the image is a host allocated buffer and `None` otherwise.
+    pub fn as_bytes_mut(&mut self) -> Option<&mut [u8]> {
+        self.image.data.as_bytes_mut()
+    }
+
+    /// Get the metadata associated with the entry.
+    pub(crate) fn meta(&self) -> &ImageMeta {
+        &self.image.meta
+    }
+
     /// Replace the data with a host allocated buffer of the correct layout.
     /// TODO: figure out if we should expose this..
     pub(crate) fn host_allocate(&mut self) -> ImageData {
@@ -217,6 +236,15 @@ impl PoolImageMut<'_> {
         self.replace(ImageData::Host(buffer))
     }
 
+    /// Make a copy of this host accessible image as a host allocated image.
+    pub(crate) fn host_copy(&self) -> Option<ImageBuffer> {
+        let data = self.as_bytes()?;
+        let mut buffer = ImageBuffer::with_layout(self.layout());
+        buffer.as_bytes_mut().copy_from_slice(data);
+        Some(buffer)
+    }
+
+    /// Replace the image with equivalent late-bound data.
     pub(crate) fn take(&mut self) -> ImageData {
         let late_bound = ImageData::LateBound(self.layout().clone());
         self.replace(late_bound)

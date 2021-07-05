@@ -8,8 +8,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::buffer::{
-    Block, BufferLayout, ColMatrix, Color, Descriptor, RowMatrix, SampleBits, SampleParts, Samples,
-    Texel, Transfer,
+    Block, BufferLayout, ColMatrix, Color, Descriptor, ImageBuffer, RowMatrix, SampleBits,
+    SampleParts, Samples, Texel, Transfer,
 };
 use crate::command::{High, Rectangle, Register, Target};
 use crate::pool::{ImageData, Pool, PoolKey};
@@ -727,10 +727,9 @@ impl Launcher<'_> {
     /// Returns an error if the register does not specify an input, or when there is no image under
     /// the key in the pool, or when the image in the pool does not match the declared format.
     pub fn bind(mut self, Register(reg): Register, img: PoolKey) -> Result<Self, LaunchError> {
-        let mut entry = match self.pool.entry(img) {
-            Some(entry) => entry,
-            None => return Err(LaunchError::InternalCommandError(line!())),
-        };
+        if self.pool.entry(img).is_none() {
+            return Err(LaunchError::InternalCommandError(line!()));
+        }
 
         let Texture(texture) = match self.program.textures.by_register.get(reg) {
             Some(assigned) => assigned.texture,
@@ -906,8 +905,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
             let buffer = &mut buffers[texture.0];
 
+            // Decide how to retrieve this image from the pool.
             if buffer.as_bytes().is_none() {
-                entry.swap(buffer);
+                // Just take the buffer if we are allowed to...
+                if entry.meta().no_read {
+                    entry.swap(buffer);
+                } else if let Some(copy) = entry.host_copy() {
+                    *buffer = ImageData::Host(copy);
+                } else {
+                    // Would need to copy from the GPU.
+                    return Err(LaunchError::UNIMPLEMENTED_CHECK);
+                }
 
                 if buffer.as_bytes().is_none() {
                     return Err(LaunchError::InternalCommandError(line!()));

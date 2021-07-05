@@ -1,5 +1,5 @@
 use crate::buffer::{
-    BufferLayout, ColMatrix, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint,
+    BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint,
 };
 use crate::pool::PoolImage;
 use crate::program::{
