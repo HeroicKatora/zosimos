@@ -2,10 +2,11 @@ use stealth_paint::buffer::Whitepoint;
 use stealth_paint::command::{self, CommandBuffer, Rectangle};
 use stealth_paint::pool::Pool;
 
+#[path = "util.rs"]
+mod util;
+
 const BACKGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/background.png");
 const FOREGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/foreground.png");
-const OUTPUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/reference/composed.png");
-const OUTPUT_AFFINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/reference/affine.png");
 
 #[test]
 fn run_blending() {
@@ -97,28 +98,18 @@ fn run_blending() {
     }
 
     let mut retire = execution.retire_gracefully(&mut pool);
-    let image = retire
-        .output(output)
-        .expect("A valid image output")
-        .to_image()
-        .expect("An `image` image");
-    let image_affine = retire
-        .output(output_affine)
-        .expect("A valid image output")
-        .to_image()
-        .expect("An `image` image");
 
-    if std::env::var_os("STEALTH_PAINT_BLESS").is_some() {
-        image.save(OUTPUT).expect("Successfully saved");
-        image_affine
-            .save(OUTPUT_AFFINE)
-            .expect("Successfully saved");
-        return;
+    {
+        let image = retire
+            .output(output)
+            .expect("A valid image output");
+        util::assert_reference(image, "composed.png.crc");
     }
 
-    let reference = image::io::Reader::open(OUTPUT)
-        .expect("Found file")
-        .decode()
-        .expect("Successfully opened reference");
-    assert_eq!(reference, image);
+    {
+        let image_affine = retire
+            .output(output_affine)
+            .expect("A valid image output");
+        util::assert_reference(image_affine, "affine.png.crc");
+    }
 }
