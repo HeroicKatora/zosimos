@@ -8,8 +8,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::buffer::{
-    Block, BufferLayout, ColMatrix, Color, Descriptor, ImageBuffer, RowMatrix, SampleBits,
-    SampleParts, Samples, Texel, Transfer,
+    Block, BufferLayout, Color, Descriptor, RowMatrix, SampleBits, SampleParts, Samples, Texel,
+    Transfer,
 };
 use crate::command::{High, Rectangle, Register, Target};
 use crate::pool::{ImageData, Pool, PoolKey};
@@ -79,6 +79,28 @@ pub(crate) enum Function {
     ///   bind(2,0): transform matrix
     ///   out: vec4 (color)
     Transform { matrix: RowMatrix },
+    /// VS: id
+    /// FS:
+    ///   bind(1, …) readonly inputs uimage2D
+    ///   bind(3, 0) struct {
+    ///     vec4: transfer, sample parts, sample bits
+    ///   }
+    ToLinearOpto {
+        bits: SampleBits,
+        parts: SampleParts,
+        transfer: Transfer,
+    },
+    /// VS: id
+    /// FS:
+    ///   bind(2, …) writeonly inputs uimage2D
+    ///   bind(3, 0) struct {
+    ///     vec4: transfer, sample parts, sample bits
+    ///   }
+    FromLinearOpto {
+        bits: SampleBits,
+        parts: SampleParts,
+        transfer: Transfer,
+    },
 }
 
 /// Describes a method of calculating the screen space coordinates of the painted quad.
@@ -245,6 +267,8 @@ enum FragmentShader {
     PaintOnTop(PaintOnTopKind),
     /// Linear color transformation.
     LinearColorMatrix,
+    /// The conversion of texel format.
+    Convert,
 }
 
 #[derive(Debug)]
@@ -1826,6 +1850,28 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
             },
+            Function::ToLinearOpto { transfer, bits, parts } => {
+                let vertex = self.vertex_shader(
+                    Some(VertexShader::Noop),
+                    shader_include_to_spirv(shaders::VERT_NOOP))?;
+
+                let fragment = self.fragment_shader(
+                    Some(FragmentShader::Convert),
+                    shader_include_to_spirv(shaders::FRAG_CONVERT))?;
+
+                self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
+                    vertex_bind_data: BufferBind::Set {
+                        data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
+                    },
+                    fragment_texture: texture,
+                    fragment_bind_data: BufferBind::Set {
+                        data: todo!(),
+                    },
+                    vertex: ShaderBind::ShaderMain(vertex),
+                    fragment: ShaderBind::ShaderMain(fragment),
+                })
+            }
+            _ => todo!(),
         }
     }
 }

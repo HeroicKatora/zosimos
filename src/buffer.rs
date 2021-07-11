@@ -49,19 +49,20 @@ pub struct Texel {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[repr(u8)]
 pub enum Block {
     /// Each texel is a single pixel.
-    Pixel,
+    Pixel = 0,
     /// Each texel refers to two pixels across width.
-    Sub1x2,
+    Sub1x2 = 1,
     /// Each texel refers to four pixels across width.
-    Sub1x4,
+    Sub1x4 = 2,
     /// Each texel refers to a two-by-two block.
-    Sub2x2,
+    Sub2x2 = 3,
     /// Each texel refers to a two-by-four block.
-    Sub2x4,
+    Sub2x4 = 4,
     /// Each texel refers to a four-by-four block.
-    Sub4x4,
+    Sub4x4 = 5,
 }
 
 /// The bit encoding of values within the texel bytes.
@@ -76,8 +77,9 @@ pub struct Samples {
 /// Describes which values are present in a texel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[repr(u16)]
 pub enum SampleParts {
-    A,
+    A = 0,
     R,
     G,
     B,
@@ -98,6 +100,7 @@ pub enum SampleParts {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[repr(u8)]
 pub enum SampleBits {
     /// A single 8-bit integer.
     Int8,
@@ -169,6 +172,7 @@ pub enum Color {
 /// describes how scene lighting is encoded as an electric signal. These are applied to each
 /// stimulus value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 #[non_exhaustive]
 pub enum Transfer {
     /// Non-linear electrical data of Bt.709
