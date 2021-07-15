@@ -783,7 +783,7 @@ impl CommandBuffer {
 impl ChromaticAdaptation {
     pub(crate) fn into_matrix(&self) -> Result<[f32; 9], CompileError> {
         use palette::{
-            chromatic_adaptation::{ConeResponseMatrices, Method, TransformMatrix},
+            chromatic_adaptation::{Method, TransformMatrix},
             white_point as wp,
         };
 

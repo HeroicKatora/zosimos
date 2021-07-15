@@ -37,13 +37,13 @@ layout (set = 1, binding = 4, rgba32ui) uniform restrict readonly uimage2D image
 
 /* Output images. Same as input but writeonly instead.
  */
-layout (set = 2, binding = 0, r8ui) uniform restrict writeonly uimage2D oimage_r8ui;
-layout (set = 2, binding = 1, r16ui) uniform restrict writeonly uimage2D oimage_r16ui;
-layout (set = 2, binding = 2, r32ui) uniform restrict writeonly uimage2D oimage_r32ui;
-layout (set = 2, binding = 3, rgba16ui) uniform restrict writeonly uimage2D oimage_rgba16ui;
-layout (set = 2, binding = 4, rgba32ui) uniform restrict writeonly uimage2D oimage_rgba32ui;
+layout (set = 1, binding = 16, r8ui) uniform restrict writeonly uimage2D oimage_r8ui;
+layout (set = 1, binding = 17, r16ui) uniform restrict writeonly uimage2D oimage_r16ui;
+layout (set = 1, binding = 18, r32ui) uniform restrict writeonly uimage2D oimage_r32ui;
+layout (set = 1, binding = 19, rgba16ui) uniform restrict writeonly uimage2D oimage_rgba16ui;
+layout (set = 1, binding = 20, rgba32ui) uniform restrict writeonly uimage2D oimage_rgba32ui;
 
-layout (set = 3, binding = 0, std140) uniform Parameter {
+layout (set = 2, binding = 0, std140) uniform Parameter {
   uvec4 space;
 } parameter;
 

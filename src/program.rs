@@ -86,9 +86,8 @@ pub(crate) enum Function {
     ///     vec4: transfer, sample parts, sample bits
     ///   }
     ToLinearOpto {
-        bits: SampleBits,
-        parts: SampleParts,
-        transfer: Transfer,
+        parameter: shaders::stage::XyzParameter,
+        stage_kind: shaders::stage::StageKind,
     },
     /// VS: id
     /// FS:
@@ -97,9 +96,8 @@ pub(crate) enum Function {
     ///     vec4: transfer, sample parts, sample bits
     ///   }
     FromLinearOpto {
-        bits: SampleBits,
-        parts: SampleParts,
-        transfer: Transfer,
+        parameter: shaders::stage::XyzParameter,
+        stage_kind: shaders::stage::StageKind,
     },
 }
 
@@ -248,6 +246,9 @@ struct TextureMap {
 struct StagingTexture {
     device: DeviceTexture,
     format: TextureDescriptor,
+    stage_kind: shaders::stage::StageKind,
+    parameter: shaders::stage::XyzParameter,
+
 }
 
 /// The gpu buffer associated with an image buffer.
@@ -523,6 +524,38 @@ pub(crate) struct TextureDescriptor {
     pub size: (NonZeroU32, NonZeroU32),
     pub format: wgpu::TextureFormat,
     pub usage: TextureUsage,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ImageDescriptor {
+    pub size: (NonZeroU32, NonZeroU32),
+    pub format: wgpu::TextureFormat,
+    pub usage: TextureUsage,
+    pub staging: Option<StagingDescriptor>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StagingDescriptor {
+    pub(crate) parameter: shaders::stage::XyzParameter,
+    pub(crate) stage_kind: shaders::stage::StageKind,
+}
+
+impl ImageDescriptor {
+    fn to_texture(&self) -> TextureDescriptor {
+        TextureDescriptor {
+            size: self.size,
+            format: self.format,
+            usage: self.usage,
+        }
+    }
+
+    fn to_staging_texture(&self) -> Option<TextureDescriptor> {
+        let texture = self.to_texture();
+        self.staging.map(|staging| TextureDescriptor {
+            format: staging.stage_kind.texture_format(),
+            ..texture
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1045,7 +1078,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn make_texture_descriptor(
         &mut self,
         texture: Texture,
-    ) -> Result<TextureDescriptor, LaunchError> {
+    ) -> Result<ImageDescriptor, LaunchError> {
         let descriptor = &self.buffer_plan.texture[texture.0];
 
         fn validate_size(layout: &BufferLayout) -> Option<(NonZeroU32, NonZeroU32)> {
@@ -1057,6 +1090,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let size = validate_size(&descriptor.layout)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+        let mut staging = None;
 
         let format = match descriptor.texel {
             Texel {
@@ -1073,14 +1107,52 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                         ..
                     },
             } => wgpu::TextureFormat::Rgba8UnormSrgb,
+            Texel {
+                block: Block::Pixel,
+                samples:
+                    Samples {
+                        bits: SampleBits::Int8x4,
+                        parts: SampleParts::Rgba,
+                    },
+                color:
+                    Color::Xyz {
+                        // Match only that which is necessary to get the right numbers in the shader.
+                        transfer: Transfer::Linear | Transfer::Bt2100Scene,
+                        ..
+                    },
+            } => wgpu::TextureFormat::Rgba8Unorm,
+            Texel {
+                block: Block::Pixel,
+                samples,
+                color: Color::Xyz { transfer, ..  },
+            } => {
+                let parameter = shaders::stage::XyzParameter {
+                    transfer,
+                    parts: samples.parts,
+                    bits: samples.bits,
+                };
+
+                let result = parameter.linear_format();
+                let stage_kind = parameter.stage_kind()
+                    // Unsupported format.
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                staging = Some(StagingDescriptor {
+                    stage_kind,
+                    parameter,
+                });
+
+                result
+            },
             _ => return Err(LaunchError::InternalCommandError(line!())),
         };
 
         // TODO: be more precise?
         let usage = TextureUsage::Storage;
 
-        Ok(TextureDescriptor {
+        Ok(ImageDescriptor {
             format,
+            staging,
             size,
             usage,
         })
@@ -1103,7 +1175,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             return Ok(());
         }
 
-        let texture_format = self.make_texture_descriptor(reg_texture)?;
+        let staged = self.make_texture_descriptor(reg_texture)?;
+        let texture_format = staged.to_texture();
+        let staging_format = staged.to_staging_texture();
         let descriptor = &self.buffer_plan.texture[reg_texture.0];
 
         let bytes_per_row = (descriptor.layout.bytes_per_texel as u32)
@@ -1143,16 +1217,21 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         };
 
         let texture = self.ensure_allocate_texture(reg_texture)?;
+        let staging = if let Some(staging) = self.staging_map.get(&reg_texture) {
+            Some(staging.device)
+        } else {
+            None
+        };
 
         let map_entry = RegisterMap {
             buffer,
             texture,
             map_read: Some(map_read),
             map_write: Some(map_write),
-            staging: None,
+            staging,
             buffer_layout,
             texture_format,
-            staging_format: None,
+            staging_format,
         };
 
         // TODO do a match instead?
@@ -1168,14 +1247,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         );
 
         if let Some(staging) = in_map.staging {
+            let st_parameter = staged.staging
+                .as_ref()
+                .expect("Have a format for staging texture when we have staging texture");
+
             self.staging_map.insert(
                 reg_texture,
                 StagingTexture {
                     device: staging,
-                    format: in_map
-                        .staging_format
-                        .clone()
-                        .expect("Have a format for staging texture when we have staging texture"),
+                    format: staged.to_staging_texture().unwrap(),
+                    stage_kind: st_parameter.stage_kind,
+                    parameter: st_parameter.parameter.clone(),
                 },
             );
         }
@@ -1187,7 +1269,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         &mut self,
         reg_texture: Texture,
     ) -> Result<DeviceTexture, LaunchError> {
-        let texture_format = self.make_texture_descriptor(reg_texture)?;
+        let staged = self.make_texture_descriptor(reg_texture)?;
+        let texture_format = staged.to_texture();
+        let staging_format = staged.to_staging_texture();
 
         if let Some(texture_map) = self.texture_map.get(&reg_texture) {
             return Ok(texture_map.device);
@@ -1206,6 +1290,28 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 format: texture_format.clone(),
             },
         );
+
+        if let Some(staging) = staging_format {
+            let st_parameter = staged.staging
+                .as_ref()
+                .expect("Have a format for staging texture when we have staging texture");
+
+            let device = {
+                let texture = self.textures;
+                self.push(Low::Texture(staging.clone()))?;
+                DeviceTexture(texture)
+            };
+
+            self.staging_map.insert(
+                reg_texture,
+                StagingTexture {
+                    device,
+                    format: staging.clone(),
+                    stage_kind: st_parameter.stage_kind,
+                    parameter: st_parameter.parameter.clone(),
+                },
+            );
+        }
 
         Ok(texture)
     }
@@ -1850,7 +1956,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
             },
-            Function::ToLinearOpto { transfer, bits, parts } => {
+            Function::ToLinearOpto { parameter, stage_kind } => {
                 let vertex = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
@@ -1859,16 +1965,22 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     Some(FragmentShader::Convert),
                     shader_include_to_spirv(shaders::FRAG_CONVERT))?;
 
+                let buffer = parameter.encode();
+                let entry_point = stage_kind.encode_entry_point();
+
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
                     fragment_texture: texture,
                     fragment_bind_data: BufferBind::Set {
-                        data: todo!(),
+                        data: bytemuck::cast_slice(&buffer[..]),
                     },
                     vertex: ShaderBind::ShaderMain(vertex),
-                    fragment: ShaderBind::ShaderMain(fragment),
+                    fragment: ShaderBind::Shader {
+                        entry_point,
+                        id: fragment,
+                    },
                 })
             }
             _ => todo!(),

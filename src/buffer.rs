@@ -196,9 +196,11 @@ pub enum Transfer {
     Bt2100Pq,
     /// Non-linear electrical data of Bt2100 Hybrid-Log-Gamma.
     Bt2100Hlg,
-    /// Linear color in scene luminance.
-    /// This is perfect for an artistic composition pipeline.
-    LinearScene,
+    /// Linear color in scene luminance of Bt2100.
+    /// This is perfect for an artistic composition pipeline. The rest of the type system will
+    /// ensure this is not accidentally and unwittingly mixed with `Linear` but otherwise this is
+    /// treated as `Linear`. You might always transmute.
+    Bt2100Scene,
 }
 
 /// The reference brightness of the color specification.
