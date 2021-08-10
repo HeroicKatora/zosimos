@@ -21,7 +21,7 @@ pub(crate) enum StageKind {
 }
 
 impl XyzParameter {
-    pub(crate) fn encode(&self) -> [u32; 4] {
+    pub(crate) fn serialize_std140(&self) -> [u32; 4] {
         [
             self.transfer as u32,
             self.parts as u32,
@@ -54,6 +54,16 @@ impl StageKind {
             Self::R32ui => "encode_r32ui",
             Self::Rgba16ui => "encode_rgba16ui",
             Self::Rgba32ui => "encode_rgba32ui",
+        }
+    }
+
+    pub(crate) fn decode_entry_point(self) -> &'static str {
+        match self {
+            Self::R8ui => "decode_r8ui",
+            Self::R16ui => "decode_r16ui",
+            Self::R32ui => "decode_r32ui",
+            Self::Rgba16ui => "decode_rgba16ui",
+            Self::Rgba32ui => "decode_rgba32ui",
         }
     }
 

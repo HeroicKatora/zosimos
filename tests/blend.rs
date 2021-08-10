@@ -1,6 +1,7 @@
-use stealth_paint::buffer::{Descriptor, Whitepoint};
-use stealth_paint::command::{self, CommandBuffer, Rectangle};
+use stealth_paint::buffer::{self, Descriptor, Whitepoint};
+use stealth_paint::command::{self, CommandBuffer, Rectangle, Register};
 use stealth_paint::pool::{Pool, PoolKey};
+use stealth_paint::run::Retire;
 
 #[path = "util.rs"]
 mod util;
@@ -44,6 +45,12 @@ fn integration() {
     );
 
     run_adaptation(
+        &mut pool,
+        instance.enumerate_adapters(ANY),
+        pool_background.clone(),
+    );
+
+    run_conversion(
         &mut pool,
         instance.enumerate_adapters(ANY),
         pool_background.clone(),
@@ -212,4 +219,77 @@ fn run_adaptation(
         .output(output_affine)
         .expect("A valid image output");
     util::assert_reference(image_adapted, "adapted.png.crc");
+}
+
+fn run_conversion(
+    pool: &mut Pool,
+    adapters: impl Iterator<Item=wgpu::Adapter>,
+    (orig_key, orig_descriptor): (PoolKey, Descriptor),
+) {
+    // Pretend the input is BT709 instead of SRGB.
+    let (bt_key, bt_descriptor) = {
+        let mut bt = pool.allocate_like(orig_key);
+        bt.set_color(buffer::Color::BT709);
+        (bt.key(), bt.descriptor())
+    };
+
+    let mut commands = CommandBuffer::default();
+    let input = commands.input(bt_descriptor).unwrap();
+
+    let converted = commands
+        .color_convert(input, orig_descriptor.texel)
+        .unwrap();
+
+    let (output, _outformat) = commands.output(converted).expect("Valid for output");
+
+    let result = run_once_with_output(
+        commands,
+        pool,
+        adapters,
+        vec![(input, bt_key)],
+        retire_with_one_image(output),
+    );
+
+    let image_converted = pool.entry(result).unwrap();
+    util::assert_reference(image_converted.into(), "convert_bt709.png.crc");
+}
+
+/* Utility methods  */
+fn run_once_with_output<T>(
+    commands: CommandBuffer,
+    pool: &mut Pool,
+    adapters: impl Iterator<Item=wgpu::Adapter>,
+    binds: impl IntoIterator<Item=(Register, PoolKey)>,
+    output: impl FnOnce(Retire) -> T,
+) -> T {
+    let plan = commands
+        .compile()
+        .expect("Could build command buffer");
+    let adapter = plan
+        .choose_adapter(adapters)
+        .expect("Did not find any adapter for executing the blend operation");
+
+    let mut launcher = plan.launch(pool);
+
+    for (target, key) in binds {
+        launcher = launcher.bind(target, key).unwrap();
+    }
+
+    let mut execution = launcher
+        .launch(&adapter)
+        .expect("Launching failed");
+
+    while execution.is_running() {
+        let _wait_point = execution.step().expect("Shouldn't fail but");
+    }
+
+    output(execution.retire_gracefully(pool))
+}
+
+fn retire_with_one_image(reg: Register)
+    -> impl FnOnce(Retire) -> PoolKey
+{
+    move |mut retire: Retire| {
+        retire.output(reg).expect("Valid for output").key()
+    }
 }

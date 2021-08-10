@@ -24,6 +24,7 @@ pub struct RowLayoutDescription {
     pub stride: u64,
 }
 
+#[derive(Clone)]
 pub struct ImageBuffer {
     inner: Canvas<BufferLayout>,
 }
@@ -423,6 +424,31 @@ impl Color {
         transfer: Transfer::Srgb,
         whitepoint: Whitepoint::D65,
     };
+
+    pub const BT709: Color = Color::Xyz {
+        luminance: Luminance::Sdr,
+        primary: Primaries::Bt709,
+        transfer: Transfer::Bt709,
+        whitepoint: Whitepoint::D65,
+    };
+
+    /// Check if this color space contains the sample parts.
+    ///
+    /// For example, an Xyz color is expressed in terms of a subset of Rgb while HSV color spaces
+    /// contains the Hsv parts (duh!) and CIECAM and similar spaces have a polar representation of
+    /// hue etc.
+    ///
+    /// Note that one can always combine a color space with an alpha component.
+    pub fn is_consistent(&self, parts: SampleParts) -> bool {
+        use SampleParts::*;
+        match (self, parts) {
+            (
+                Color::Xyz { .. }, 
+                R | G | B | Rgb | Rgba | Rgbx
+            ) => true,
+            _ => false,
+        }
+    }
 }
 
 #[rustfmt::skip]

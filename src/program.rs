@@ -178,6 +178,10 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     fragment_shaders: HashMap<FragmentShader, usize>,
     vertex_shaders: HashMap<VertexShader, usize>,
     simple_quad_buffer: Option<DeviceBuffer>,
+    /// The render pipeline state for staging a texture.
+    staged_to_pipelines: HashMap<Texture, SimpleRenderPipeline>,
+    /// The render pipeline state for undoing staging a texture.
+    staged_from_pipelines: HashMap<Texture, SimpleRenderPipeline>,
 
     // Fields regarding the status of registers.
     /// Describes how registers where mapped to buffers.
@@ -640,11 +644,22 @@ struct SimpleRenderPipelineDescriptor<'data> {
     // Bind data for (set 0, binding 0).
     vertex_bind_data: BufferBind<'data>,
     // Texture for (set 1, binding 0)
-    fragment_texture: Texture,
+    fragment_texture: TextureBind,
     // Texture for (set 2, binding 0)
     fragment_bind_data: BufferBind<'data>,
     vertex: ShaderBind,
     fragment: ShaderBind,
+}
+
+enum TextureBind {
+    Texture(Texture),
+    PreComputedGroup {
+        /// The index of the bind group we're binding to set `1`, the fragment set.
+        group: usize,
+        /// The format of the render pipeline attachment.
+        /// FIXME: do we really want to couple this?
+        target_format: wgpu::TextureFormat,
+    },
 }
 
 enum BufferBind<'data> {
@@ -665,6 +680,7 @@ enum ShaderBind {
     },
 }
 
+#[derive(Clone, Copy)]
 struct SimpleRenderPipeline {
     pipeline: usize,
     buffer: DeviceBuffer,
@@ -1390,8 +1406,20 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// Note that this may be a no-op for buffers that need no staging buffer, i.e. where
     /// quantization happens as part of the pipeline.
     fn copy_staging_to_texture(&mut self, idx: Texture) -> Result<(), LaunchError> {
-        if let Some(_) = self.staging_map.get(&idx) {
-            todo!()
+        if let Some(staging) = self.staging_map.get(&idx) {
+            // Try to use the cached version of this pipeline.
+            let pipeline = if let Some(pipeline) = self.staged_to_pipelines.get(&idx) {
+                pipeline.clone()
+            } else {
+                let fn_ = Function::ToLinearOpto {
+                    parameter: staging.parameter,
+                    stage_kind: staging.stage_kind,
+                };
+
+                self.prepare_render(idx, &fn_)?
+            };
+
+            self.render(pipeline)
         } else {
             Ok(())
         }
@@ -1400,8 +1428,20 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// Quantize the texture to the staging buffer.
     /// May be a no-op, see reverse operation.
     fn copy_texture_to_staging(&mut self, idx: Texture) -> Result<(), LaunchError> {
-        if let Some(_) = self.staging_map.get(&idx) {
-            todo!()
+        if let Some(staging) = self.staging_map.get(&idx) {
+            // Try to use the cached version of this pipeline.
+            let pipeline = if let Some(pipeline) = self.staged_from_pipelines.get(&idx) {
+                pipeline.clone()
+            } else {
+                let fn_ = Function::FromLinearOpto {
+                    parameter: staging.parameter,
+                    stage_kind: staging.stage_kind,
+                };
+
+                self.prepare_render(idx, &fn_)?
+            };
+
+            self.render(pipeline)
         } else {
             Ok(())
         }
@@ -1793,12 +1833,20 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             fragment: _,
         } = &descriptor;
 
-        let format = self.texture_map[&texture].format.format;
+        let (format, group) = match texture {
+            TextureBind::Texture(texture) => {
+                let format = self.texture_map[&texture].format.format;
+                let group = self.make_bind_group_sampled_texture(*texture)?;
+                (format, group)
+            }
+            &TextureBind::PreComputedGroup { group, target_format } => {
+                (target_format, group)
+            }
+        };
 
         let buffer = self.simple_quad_buffer();
         let pipeline = self.simple_render_pipeline(&descriptor, format)?;
 
-        let group = self.make_bind_group_sampled_texture(*texture)?;
         let vertex_layout = self.make_quad_bind_group();
         let vertex_bind = self.make_bound_buffer(vertex_bind_data, vertex_layout)?;
 
@@ -1919,7 +1967,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
                     },
-                    fragment_texture: texture,
+                    fragment_texture: TextureBind::Texture(texture),
                     fragment_bind_data: BufferBind::None,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
@@ -1948,7 +1996,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
-                    fragment_texture: texture,
+                    fragment_texture: TextureBind::Texture(texture),
                     fragment_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&rgb_matrix[..]),
                     },
@@ -1965,14 +2013,41 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     Some(FragmentShader::Convert),
                     shader_include_to_spirv(shaders::FRAG_CONVERT))?;
 
-                let buffer = parameter.encode();
+                let buffer = parameter.serialize_std140();
                 let entry_point = stage_kind.encode_entry_point();
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
-                    fragment_texture: texture,
+                    fragment_texture: todo!(),
+                    fragment_bind_data: BufferBind::Set {
+                        data: bytemuck::cast_slice(&buffer[..]),
+                    },
+                    vertex: ShaderBind::ShaderMain(vertex),
+                    fragment: ShaderBind::Shader {
+                        entry_point,
+                        id: fragment,
+                    },
+                })
+            }
+            Function::FromLinearOpto { parameter, stage_kind } => {
+                let vertex = self.vertex_shader(
+                    Some(VertexShader::Noop),
+                    shader_include_to_spirv(shaders::VERT_NOOP))?;
+
+                let fragment = self.fragment_shader(
+                    Some(FragmentShader::Convert),
+                    shader_include_to_spirv(shaders::FRAG_CONVERT))?;
+
+                let buffer = parameter.serialize_std140();
+                let entry_point = stage_kind.decode_entry_point();
+
+                self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
+                    vertex_bind_data: BufferBind::Set {
+                        data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
+                    },
+                    fragment_texture: todo!(),
                     fragment_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
                     },

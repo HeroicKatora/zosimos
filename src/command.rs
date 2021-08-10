@@ -262,6 +262,17 @@ pub enum ChromaticAdaptationMethod {
     BradfordNonLinear,
 }
 
+/// A palette lookup operation.
+///
+/// FIXME description and implementation
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    /// Which color channel will provide the texture coordinate along width axis.
+    pub width: ColorChannel,
+    /// Which color channel will provide the texture coordinate along height axis.
+    pub height: ColorChannel,
+}
+
 #[derive(Debug)]
 pub struct CommandError {
     inner: CommandErrorKind,
@@ -472,6 +483,19 @@ impl CommandBuffer {
         Ok(self.push(op))
     }
 
+    /// Reinterpret the bytes of an image as another type.
+    ///
+    /// This command requires that the texel type of the register and the descriptor have the same
+    /// size. It will return an error if this is not the case. Additionally, the provided texel
+    /// must be internally consistent.
+    ///
+    /// One important use of this method is to add or removed the color interpretation of an image.
+    /// This can be necessary when it has been algorithmically created or when one wants to
+    /// intentionally ignore such meaning.
+    pub fn transmute(&mut self, from: Register, texel: Texel) -> Result<Register, CommandError> {
+        todo!()
+    }
+
     /// Overwrite some channels with overlaid data.
     pub fn inject(
         &mut self,
@@ -499,6 +523,16 @@ impl CommandBuffer {
         };
 
         Ok(self.push(op))
+    }
+
+    /// Grab colors from a palette based on an underlying image of indices.
+    pub fn palette(
+        &mut self,
+        below: Register,
+        channel: Palette,
+        above: Register,
+    ) -> Result<Register, CommandError> {
+        todo!()
     }
 
     /// Overlay this image as part of a larger one, performing blending.
@@ -683,6 +717,31 @@ impl CommandBuffer {
                                 },
                             });
                         }
+                        UnaryOp::ColorConvert(color) => {
+                            let lower = self.describe_reg(*src).unwrap();
+                            let target = Rectangle::from(lower);
+
+                            // The inherent OptoToLinear transformation gets us to a linear light
+                            // representation. We want to convert this into a compatible (that is,
+                            // using the same observer definition) other linear light
+                            // representation that we then transfer back to an electrical form.
+                            todo!()
+
+                            // FIXME: using a copy here but this means we do this in unnecessarily
+                            // many steps. We first decode to linear color, then draw, then code
+                            // back to the non-linear electrical space.
+
+                            high_ops.push(High::Paint {
+                                texture: reg_to_texture[src],
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintOnTop {
+                                    selection: target,
+                                    target: target.into(),
+                                    viewport: target,
+                                    paint_on_top: PaintOnTopKind::Copy,
+                                }
+                            });
+                        },
                         _ => return Err(CompileError::NotYetImplemented),
                     }
 

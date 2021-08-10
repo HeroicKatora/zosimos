@@ -2,7 +2,7 @@ use core::fmt;
 use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
-use crate::buffer::{BufferLayout, Descriptor, ImageBuffer, Texel};
+use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer, Texel};
 
 /// Holds a number of image buffers, their descriptors and meta data.
 ///
@@ -96,6 +96,24 @@ impl Pool {
         let buffer = ImageBuffer::from(image);
         let texel = Texel::with_srgb_image(image);
         self.insert(buffer, texel)
+    }
+
+    /// Create the image based on an entry.
+    ///
+    /// This allocates a host-accessible buffer with the same layout and metadata as the image. If
+    /// possible it will also copy the data from the source entry.  It is always possible to clone
+    /// images that have host-allocated data.
+    ///
+    /// # Panics
+    /// This method panics when the key is not valid for the pool.
+    pub fn allocate_like(&mut self, key: PoolKey) -> PoolImageMut<'_> {
+        let entry = self.entry(key).expect("Not a valid pool key");
+        let mut buffer = ImageBuffer::with_layout(entry.layout());
+        if let Some(data) = entry.as_bytes() {
+            buffer.as_bytes_mut().copy_from_slice(data);
+        }
+        let texel = entry.image.texel.clone();
+        self.new_with_data(ImageData::Host(buffer), texel)
     }
 
     /// Create the descriptor for an image buffer that is provided by the caller.
@@ -224,12 +242,18 @@ impl PoolImageMut<'_> {
         self.image.data.as_bytes_mut()
     }
 
+    /// Configure the color of this image, not changing any data.
+    pub fn set_color(&mut self, color: Color) {
+        assert!(color.is_consistent(self.image.texel.samples.parts));
+    }
+
     /// Get the metadata associated with the entry.
     pub(crate) fn meta(&self) -> &ImageMeta {
         &self.image.meta
     }
 
     /// Replace the data with a host allocated buffer of the correct layout.
+    /// Returns the previous image data.
     /// TODO: figure out if we should expose this..
     pub(crate) fn host_allocate(&mut self) -> ImageData {
         let buffer = ImageBuffer::with_layout(self.layout());
