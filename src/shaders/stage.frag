@@ -318,14 +318,59 @@ void decode_r8ui() {
 void encode_r8ui() {
 }
 
+void decode_r32ui() {
+  uint num = imageLoad(image_r32ui, ivec2(gl_FragCoord)).x;
+  vec4 components = demux_uint(num, get_sample_bits());
+
+  // FIXME: YUV transform and accurate YUV transform.
+  vec4 electrical = parts_normalize(components, get_sample_parts());
+  vec4 primaries = parts_untransfer(electrical, get_transfer());
+
+  f_color = primaries;
+}
+
+void encode_r32ui() {
+  vec4 primaries = vec4(0.0, 1.0, 0.0, 1.0);
+
+  vec4 electrical = parts_transfer(primaries, get_transfer());
+  // FIXME: YUV transform and accurate YUV transform.
+  vec4 components = parts_denormalize(electrical, get_sample_parts());
+
+  uint num = mux_uint(components, get_sample_bits());
+  imageStore(oimage_r32ui, ivec2(gl_FragCoord), uvec4(num));
+}
+
 vec4 demux_uint(uint num, uint kind) {
   switch (kind) {
   case SAMPLE_BITS_Int8:
-    return vec4(num);
+    return vec4(num) / 255.;
+  // FIXME: rescale.
   case SAMPLE_BITS_Int332:
     return vec4(num & 0x3, (num >> 2) & 0xf, num >> 5, 0.0);
   case SAMPLE_BITS_Int233:
     return vec4(num & 0xf, (num >> 3) & 0xf, num >> 6, 0.0);
+  case SAMPLE_BITS_Int8x3:
+    return vec4(num & 0xf, (num >> 8) & 0xf, num >> 16, 0.0) / 255.;
+  case SAMPLE_BITS_Int8x4:
+    return vec4(num & 0xf, (num >> 8) & 0xf, (num >> 16) & 0xf, num >> 24) / 255.;
+  // FIXME: other bits.
+  }
+}
+
+uint mux_uint(vec4 c, uint kind) {
+  switch (kind) {
+  case SAMPLE_BITS_Int8:
+    return uint(c.x * 255.);
+  case SAMPLE_BITS_Int8x3:
+    return uint(c.x * 255.)
+      + (uint(c.y * 255.) << 8)
+      + (uint(c.z * 255.) << 16);
+  case SAMPLE_BITS_Int8x4:
+    return uint(c.x * 255.)
+      + (uint(c.y * 255.) << 8)
+      + (uint(c.z * 255.) << 16)
+      + (uint(c.w * 255.) << 24);
+  // FIXME: other bits.
   }
 }
 
@@ -364,9 +409,73 @@ vec4 parts_normalize(vec4 components, uint parts) {
   }
 }
 
-vec4 parts_transfer(vec4 electrical, uint function) {
+vec4 parts_denormalize(vec4 components, uint parts) {
+  switch (parts) {
+  case SAMPLE_PARTS_Rgba:
+    return components.xyzw;
+  /*
+  case SAMPLE_PARTS_A:
+    return vec4(0.0, 0.0, 0.0, components.x);
+  case SAMPLE_PARTS_R:
+    return vec4(components.x, 0.0, 0.0, 1.0);
+  case SAMPLE_PARTS_G:
+    return vec4(0.0, components.x, 0.0, 1.0);
+  case SAMPLE_PARTS_B:
+    return vec4(0.0, 0.0, components.x, 1.0);
+  case SAMPLE_PARTS_Luma:
+    return vec4(vec3(components.x), 1.0);
+  case SAMPLE_PARTS_LumaA:
+    return vec4(vec3(components.x), 1.0);
+  case SAMPLE_PARTS_Rgb:
+  case SAMPLE_PARTS_Rgbx:
+    return vec4(components.xyz, 1.0);
+  case SAMPLE_PARTS_Bgr:
+  case SAMPLE_PARTS_Bgrx:
+    return vec4(components.zyx, 1.0);
+  case SAMPLE_PARTS_Bgra:
+    return components.xyzw;
+  case SAMPLE_PARTS_Argb:
+    return components.yzwx;
+  case SAMPLE_PARTS_Abgr:
+    return components.wzyx;
+  case SAMPLE_PARTS_Xrgb:
+    return vec4(components.yzw, 1.0);
+  case SAMPLE_PARTS_Xbgr:
+    return vec4(components.wzy, 1.0);
+  */
+  }
+}
+
+vec4 parts_transfer(vec4 optical, uint fnk) {
 #define TRANSFER_WITH_XYZ(E, FN) vec4(FN(E.x), FN(E.y), FN(E.z), E.a)
-  switch (function) {
+  switch (fnk) {
+  case TRANSFER_Bt709:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt709);
+  case TRANSFER_Bt470M:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt470m);
+  case TRANSFER_Bt601:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt601);
+  case TRANSFER_Smpte240:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_smpte240);
+  case TRANSFER_Linear:
+  return optical;
+  case TRANSFER_Srgb:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_srgb);
+  case TRANSFER_Bt2020_10bit:
+  case TRANSFER_Bt2020_12bit:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt2020_10b);
+  case TRANSFER_Smpte2084:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_smpte2084);
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_smpte2084);
+  case TRANSFER_Bt2100Hlg:
+  // FIXME: unimplemented.
+  return optical;
+  }
+}
+
+vec4 parts_untransfer(vec4 electrical, uint fnk) {
+#define TRANSFER_WITH_XYZ(E, FN) vec4(FN(E.x), FN(E.y), FN(E.z), E.a)
+  switch (fnk) {
   case TRANSFER_Bt709:
   return TRANSFER_WITH_XYZ(electrical, transfer_eo_bt709);
   case TRANSFER_Bt470M:

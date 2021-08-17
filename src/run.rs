@@ -142,6 +142,7 @@ impl Execution {
                 let group = self
                     .descriptors
                     .bind_group_layout(desc, &mut entry_buffer)?;
+                eprintln!("{:?}", group);
                 let group = self.gpu.device.create_bind_group_layout(&group);
                 self.descriptors.bind_group_layouts.push(group);
                 Ok(SyncPoint::NO_SYNC)
@@ -250,8 +251,11 @@ impl Execution {
                     usage: match desc.usage {
                         program::TextureUsage::DataIn => U::COPY_DST | U::SAMPLED,
                         program::TextureUsage::DataOut => U::COPY_SRC | U::RENDER_ATTACHMENT,
-                        program::TextureUsage::Storage => {
+                        program::TextureUsage::Attachment => {
                             U::COPY_SRC | U::COPY_DST | U::SAMPLED | U::RENDER_ATTACHMENT
+                        }
+                        program::TextureUsage::Staging => {
+                            U::COPY_SRC | U::COPY_DST | U::STORAGE
                         }
                     },
                 };
@@ -455,6 +459,13 @@ impl Execution {
                     depth_or_array_layers: 1,
                 };
 
+                eprintln!("Source: {:?}", source_buffer);
+                eprintln!("Target: {:?}", target_texture);
+
+                eprintln!("{:?}", buffer);
+                eprintln!("{:?}", texture);
+                eprintln!("{:?}", extent);
+
                 encoder.copy_buffer_to_texture(buffer, texture, extent);
 
                 Ok(SyncPoint::NO_SYNC)
@@ -611,6 +622,14 @@ impl Descriptors {
         buf.clear();
 
         for (idx, entry) in desc.entries.iter().enumerate() {
+            let resource = self.binding_resource(entry)?;
+            buf.push(wgpu::BindGroupEntry {
+                binding: idx as u32,
+                resource,
+            });
+        }
+
+        for &(idx, ref entry) in desc.sparse.iter() {
             let resource = self.binding_resource(entry)?;
             buf.push(wgpu::BindGroupEntry {
                 binding: idx as u32,

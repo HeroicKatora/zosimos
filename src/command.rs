@@ -116,7 +116,7 @@ pub(crate) enum UnaryOp {
     Crop(Rectangle),
     /// Op(color)[T] = T[.color=color]
     /// And color needs to be 'color compatible' with the prior T (see module).
-    ColorConvert(Color),
+    ColorConvert(ColorConversion),
     /// Op(T) = T[.color=select(channel, color)]
     Extract { channel: ColorChannel },
     /// Op(T) = T[.whitepoint=target]
@@ -187,6 +187,15 @@ pub enum AffineSample {
     /// We rely on the executing GPU sampler2D for determining the color, in particular it will happen
     /// in _linear_ RGB and this method can only be used on RGB-ish images.
     BiLinear,
+}
+
+/// The parameters of color conversion which we will use in the draw call.
+#[derive(Clone, Debug)]
+pub(crate) struct ColorConversion {
+    /// The matrix converting source to XYZ.
+    to_xyz_matrix: RowMatrix,
+    /// The matrix converting from XYZ to target.
+    from_xyz_matrix: RowMatrix,
 }
 
 /// Reference of matrices and more: http://brucelindbloom.com/index.html?Eqn_ChromAdapt.html
@@ -324,6 +333,7 @@ impl CommandBuffer {
     /// This goes through linear RGB, not ICC, and requires the two models to have same whitepoint.
     pub fn color_convert(&mut self, src: Register, texel: Texel) -> Result<Register, CommandError> {
         let desc_src = self.describe_reg(src)?;
+        let conversion;
 
         // Pretend that all colors with the same whitepoint will be mapped from encoded to
         // linear RGB when loading, and re-encoded in target format when storing them. This is
@@ -333,12 +343,19 @@ impl CommandBuffer {
         match (&desc_src.texel.color, &texel.color) {
             (
                 Color::Xyz {
+                    primary: primary_src,
                     whitepoint: wp_src, ..
                 },
                 Color::Xyz {
+                    primary: primary_dst,
                     whitepoint: wp_dst, ..
                 },
-            ) if wp_src == wp_dst => {}
+            ) if wp_src == wp_dst => {
+                conversion = ColorConversion {
+                    from_xyz_matrix: primary_src.to_xyz(*wp_src),
+                    to_xyz_matrix: primary_dst.to_xyz(*wp_dst),
+                };
+            }
             _ => {
                 return Err(CommandError {
                     inner: CommandErrorKind::BadDescriptor(desc_src.clone()),
@@ -358,7 +375,7 @@ impl CommandBuffer {
 
         let op = Op::Unary {
             src,
-            op: UnaryOp::ColorConvert(texel.color.clone()),
+            op: UnaryOp::ColorConvert(conversion),
             desc: Descriptor { layout, texel },
         };
 
@@ -725,21 +742,23 @@ impl CommandBuffer {
                             // representation. We want to convert this into a compatible (that is,
                             // using the same observer definition) other linear light
                             // representation that we then transfer back to an electrical form.
-                            todo!()
+                            // Note that these two steps happen, conveniently, automatically.
+                            // Usually it is ensured that only two images with the same linear
+                            // light representation are used in a single paint call but this
+                            // violates it on purpose.
+
 
                             // FIXME: using a copy here but this means we do this in unnecessarily
                             // many steps. We first decode to linear color, then draw, then code
                             // back to the non-linear electrical space.
-
+                            // We could do this directly from one matrix to another or try using an
+                            // ephemeral intermediate attachment?
                             high_ops.push(High::Paint {
                                 texture: reg_to_texture[src],
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintOnTop {
-                                    selection: target,
-                                    target: target.into(),
-                                    viewport: target,
-                                    paint_on_top: PaintOnTopKind::Copy,
-                                }
+                                fn_: Function::Transform {
+                                    matrix: color.into_matrix(),
+                                },
                             });
                         },
                         _ => return Err(CompileError::NotYetImplemented),
@@ -836,6 +855,13 @@ impl CommandBuffer {
         let reg = Register(self.ops.len());
         self.ops.push(op);
         reg
+    }
+}
+
+impl ColorConversion {
+    pub(crate) fn into_matrix(&self) -> RowMatrix {
+        let from = self.from_xyz_matrix.inv().into();
+        self.to_xyz_matrix.multiply_right(from).into()
     }
 }
 

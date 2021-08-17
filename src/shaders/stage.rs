@@ -42,11 +42,19 @@ impl XyzParameter {
     }
 
     pub(crate) fn linear_format(&self) -> TextureFormat {
-        TextureFormat::Rgba32Float
+        TextureFormat::Rgba16Float
     }
 }
 
 impl StageKind {
+    pub const ALL: [Self; 5] = [
+        Self::R8ui,
+        Self::R16ui,
+        Self::R32ui,
+        Self::Rgba16ui,
+        Self::Rgba32ui,
+    ];
+
     pub(crate) fn encode_entry_point(self) -> &'static str {
         match self {
             Self::R8ui => "encode_r8ui",

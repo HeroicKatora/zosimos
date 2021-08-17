@@ -245,6 +245,7 @@ impl PoolImageMut<'_> {
     /// Configure the color of this image, not changing any data.
     pub fn set_color(&mut self, color: Color) {
         assert!(color.is_consistent(self.image.texel.samples.parts));
+        self.image.texel.color = color;
     }
 
     /// Get the metadata associated with the entry.

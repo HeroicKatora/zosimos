@@ -235,14 +235,20 @@ fn run_conversion(
         (bt.key(), bt.descriptor())
     };
 
+    eprintln!("{:?}", bt_descriptor);
+
     let mut commands = CommandBuffer::default();
-    let input = commands.input(bt_descriptor).unwrap();
+    let input = commands
+        .input(bt_descriptor)
+        .unwrap();
 
     let converted = commands
         .color_convert(input, orig_descriptor.texel)
         .unwrap();
 
-    let (output, _outformat) = commands.output(converted).expect("Valid for output");
+    let (output, _outformat) = commands
+        .output(converted)
+        .expect("Valid for output");
 
     let result = run_once_with_output(
         commands,
