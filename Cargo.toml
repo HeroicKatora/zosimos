@@ -35,6 +35,7 @@ shaderc = "0.7"
 [dev-dependencies]
 image = "0.23.13"
 crc32fast = "1.2"
+env_logger = "0.9"
 
 [[test]]
 name = "blend"
