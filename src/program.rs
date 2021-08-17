@@ -670,6 +670,8 @@ enum TextureBind {
     PreComputedGroup {
         /// The index of the bind group we're binding to set `1`, the fragment set.
         group: usize,
+        /// The layout corresponding to the bind group.
+        layout: usize,
         /// The format of the render pipeline attachment.
         /// FIXME: do we really want to couple this?
         target_format: wgpu::TextureFormat,
@@ -1636,7 +1638,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
-    fn make_paint_group(&mut self) -> usize {
+    fn make_paint_group_layout(&mut self) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
         *self.paint_group_layout.get_or_insert_with(|| {
@@ -1725,7 +1727,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     fn make_paint_layout(&mut self, desc: &SimpleRenderPipelineDescriptor) -> usize {
         let quad_bind_group = self.make_quad_bind_group();
-        let paint_bind_group = self.make_paint_group();
+        let paint_bind_group = match desc.fragment_texture {
+            TextureBind::Texture(_) => self.make_paint_group_layout(),
+            TextureBind::PreComputedGroup { layout, .. } => layout,
+        };
 
         let mut bind_group_layouts = vec![quad_bind_group, paint_bind_group];
 
@@ -1896,7 +1901,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let group = self.bind_groups;
         let descriptor = BindGroupDescriptor {
-            layout_idx: self.make_paint_group(),
+            layout_idx: self.make_paint_group_layout(),
             entries: vec![
                 BindingResource::TextureView(view),
                 BindingResource::Sampler(sampler),
@@ -1987,7 +1992,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let group = self.make_bind_group_sampled_texture(*texture)?;
                 (format, group)
             }
-            &TextureBind::PreComputedGroup { group, target_format } => {
+            &TextureBind::PreComputedGroup { group, target_format, .. } => {
                 (target_format, group)
             }
         };
@@ -2159,10 +2164,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 let fragment = self.fragment_shader(
                     Some(FragmentShader::Convert),
-                    shader_include_to_spirv(shaders::FRAG_CONVERT))?;
+                    shader_include_to_spirv(stage_kind.decode_src()))?;
 
                 let buffer = parameter.serialize_std140();
                 let entry_point = stage_kind.encode_entry_point();
+
+                let layout = self.make_stage_group(stage_kind.decode_binding());
 
                 let group = self.make_opto_fragment_group(
                     stage_kind.decode_binding(),
@@ -2175,6 +2182,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     },
                     fragment_texture: TextureBind::PreComputedGroup {
                         group,
+                        layout,
                         target_format: parameter.linear_format(),
                     },
                     fragment_bind_data: BufferBind::Set {
@@ -2182,7 +2190,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     },
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::Shader {
-                        entry_point,
+                        // FIXME: for some weird reason this MUST be `main` instead of the true
+                        // entry point. This is probably a 'bug' in the pass through `shaderc` in
+                        // preprocessing.
+                        entry_point: "main",
                         id: fragment,
                     },
                 })
@@ -2194,10 +2205,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 let fragment = self.fragment_shader(
                     Some(FragmentShader::Convert),
-                    shader_include_to_spirv(shaders::FRAG_CONVERT))?;
+                    shader_include_to_spirv(stage_kind.encode_src()))?;
 
                 let buffer = parameter.serialize_std140();
                 let entry_point = stage_kind.decode_entry_point();
+
+                let layout = self.make_stage_group(stage_kind.encode_binding());
 
                 let group = self.make_opto_fragment_group(
                     stage_kind.encode_binding(),
@@ -2210,6 +2223,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     },
                     fragment_texture: TextureBind::PreComputedGroup {
                         group,
+                        layout,
                         target_format: parameter.linear_format(),
                     },
                     fragment_bind_data: BufferBind::Set {
@@ -2217,7 +2231,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     },
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::Shader {
-                        entry_point,
+                        // FIXME: for some weird reason this MUST be `main` instead of the true
+                        // entry point. This is probably a 'bug' in the pass through `shaderc` in
+                        // preprocessing.
+                        entry_point: "main",
                         id: fragment,
                     },
                 })
