@@ -716,6 +716,7 @@ impl Descriptors {
         &self,
         desc: &program::ColorAttachmentDescriptor,
     ) -> Result<wgpu::RenderPassColorAttachment<'_>, StepError> {
+        eprintln!("Attaching {:?}", desc);
         Ok(wgpu::RenderPassColorAttachment {
             view: self
                 .texture_views

@@ -655,14 +655,24 @@ pub struct Launcher<'program> {
 }
 
 struct SimpleRenderPipelineDescriptor<'data> {
-    // Bind data for (set 0, binding 0).
+    pipeline_target: PipelineTarget,
+    /// Bind data for (set 0, binding 0).
     vertex_bind_data: BufferBind<'data>,
-    // Texture for (set 1, binding 0)
+    /// Texture for (set 1, binding 0)
     fragment_texture: TextureBind,
-    // Texture for (set 2, binding 0)
+    /// Texture for (set 2, binding 0)
     fragment_bind_data: BufferBind<'data>,
+    /// The vertex shader to use.
     vertex: ShaderBind,
+    /// The fragment shader to use.
     fragment: ShaderBind,
+}
+
+enum PipelineTarget {
+    Texture(Texture),
+    PreComputedGroup {
+        target_format: wgpu::TextureFormat,
+    }
 }
 
 enum TextureBind {
@@ -672,9 +682,6 @@ enum TextureBind {
         group: usize,
         /// The layout corresponding to the bind group.
         layout: usize,
-        /// The format of the render pipeline attachment.
-        /// FIXME: do we really want to couple this?
-        target_format: wgpu::TextureFormat,
     },
 }
 
@@ -928,7 +935,7 @@ impl Launcher<'_> {
                         ops,
                     };
 
-                    let render = encoder.prepare_render(*texture, fn_)?;
+                    let render = encoder.prepare_render(*texture, fn_, dst_texture)?;
 
                     // TODO: we need to remember the attachment format here.
                     // This is need to to automatically construct the shader pipeline.
@@ -1444,7 +1451,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     stage_kind: staging.stage_kind,
                 };
 
-                self.prepare_render(idx, &fn_)?
+                self.prepare_render(idx, &fn_, idx)?
             };
 
             let dst_view = self.texture_view(idx)?;
@@ -1484,7 +1491,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     stage_kind: staging.stage_kind,
                 };
 
-                self.prepare_render(idx, &fn_)?
+                self.prepare_render(idx, &fn_, idx)?
             };
 
             let dst_view = self.texture_view(idx)?;
@@ -1586,6 +1593,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.instructions.extend_one(Low::TextureView(descriptor));
         let id = self.texture_views;
         self.texture_views += 1;
+
+        eprintln!("Texture {:?} (Device {:?}) in View {:?}", dst, texture, id);
 
         Ok(id)
     }
@@ -1835,9 +1844,19 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn simple_render_pipeline(
         &mut self,
         desc: &SimpleRenderPipelineDescriptor,
-        format: wgpu::TextureFormat,
     ) -> Result<usize, LaunchError> {
         let layout = self.make_paint_layout(desc);
+        let format = match desc.pipeline_target {
+            PipelineTarget::Texture(texture) => {
+                let format = self.texture_map[&texture].format.format;
+                eprintln!("Target texture {:?} with format {:?}", texture, format);
+                format
+            },
+            PipelineTarget::PreComputedGroup { target_format } => {
+                eprintln!("Target attachment with format {:?}", target_format);
+                target_format
+            }
+        };
 
         let (vertex, vertex_entry_point) = match desc.vertex {
             ShaderBind::ShaderMain(shader) => (shader, "main"),
@@ -1979,6 +1998,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         descriptor: SimpleRenderPipelineDescriptor,
     ) -> Result<SimpleRenderPipeline, LaunchError> {
         let SimpleRenderPipelineDescriptor {
+            pipeline_target: _,
             vertex_bind_data,
             fragment_texture: texture,
             fragment_bind_data,
@@ -1986,19 +2006,20 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             fragment: _,
         } = &descriptor;
 
-        let (format, group) = match texture {
+        let pipeline = self.simple_render_pipeline(&descriptor)?;
+        let buffer = self.simple_quad_buffer();
+
+        let group = match texture {
             TextureBind::Texture(texture) => {
-                let format = self.texture_map[&texture].format.format;
                 let group = self.make_bind_group_sampled_texture(*texture)?;
-                (format, group)
+                eprintln!("Using Texture {:?} as group {:?}", texture, group);
+                group
             }
-            &TextureBind::PreComputedGroup { group, target_format, .. } => {
-                (target_format, group)
+            &TextureBind::PreComputedGroup { group, .. } => {
+                eprintln!("Using Target Group {:?}", group);
+                group
             }
         };
-
-        let buffer = self.simple_quad_buffer();
-        let pipeline = self.simple_render_pipeline(&descriptor, format)?;
 
         let vertex_layout = self.make_quad_bind_group();
         let vertex_bind = self.make_bound_buffer(vertex_bind_data, vertex_layout)?;
@@ -2079,11 +2100,19 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     #[rustfmt::skip]
-    fn prepare_render(&mut self, texture: Texture, function: &Function)
+    fn prepare_render(
+        &mut self,
+        // The texture which we are using as the fragment source.
+        texture: Texture,
+        // The function we are using.
+        function: &Function,
+        // The texture we are rendering to.
+        target: Texture,
+    )
         -> Result<SimpleRenderPipeline, LaunchError>
     {
         match function {
-            Function::PaintOnTop { selection, target, viewport, paint_on_top } => {
+            Function::PaintOnTop { selection, target: target_coords, viewport, paint_on_top } => {
                 let (tex_width, tex_height) = self.texture_map[&texture].format.size;
 
                 let vertex = self.vertex_shader(
@@ -2101,7 +2130,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let min_v = (selection.y as f32) / (tex_height.get() as f32);
                 let max_v = (selection.max_y as f32) / (tex_height.get() as f32);
 
-                let coords = target.to_screenspace_coords(viewport);
+                let coords = target_coords.to_screenspace_coords(viewport);
 
                 // std140, always pad to 16 bytes.
                 let buffer: [[f32; 2]; 16] = [
@@ -2117,6 +2146,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 ];
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
+                    pipeline_target: PipelineTarget::Texture(target),
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
                     },
@@ -2146,6 +2176,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 ];
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
+                    pipeline_target: PipelineTarget::Texture(target),
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
@@ -2177,13 +2208,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 )?;
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
+                    pipeline_target: PipelineTarget::PreComputedGroup {
+                        target_format: parameter.linear_format(),
+                    },
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
                     fragment_texture: TextureBind::PreComputedGroup {
                         group,
                         layout,
-                        target_format: parameter.linear_format(),
                     },
                     fragment_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
@@ -2218,13 +2251,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 )?;
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
+                    pipeline_target: PipelineTarget::PreComputedGroup {
+                        target_format: parameter.linear_format(),
+                    },
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
                     fragment_texture: TextureBind::PreComputedGroup {
                         group,
                         layout,
-                        target_format: parameter.linear_format(),
                     },
                     fragment_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
