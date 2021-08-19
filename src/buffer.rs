@@ -379,7 +379,6 @@ impl Texel {
                 ColorChannel::R => R,
                 ColorChannel::G => G,
                 ColorChannel::B => B,
-                _ => return None,
             },
             _ => return None,
         };
@@ -389,7 +388,6 @@ impl Texel {
         };
         let block = match self.block {
             Pixel | Sub1x2 | Sub1x4 | Sub2x2 | Sub2x4 | Sub4x4 => self.block,
-            _ => return None,
         };
         Some(Texel {
             samples: Samples { bits, parts },

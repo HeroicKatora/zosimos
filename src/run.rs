@@ -1,7 +1,7 @@
 use core::{iter::once, num::NonZeroU32, pin::Pin};
 
 use crate::buffer::{BufferLayout, Descriptor, Texel};
-use crate::command::{Rectangle, Register};
+use crate::command::Register;
 use crate::pool::{ImageData, Pool, PoolImage, PoolKey};
 use crate::program::{self, DeviceBuffer, DeviceTexture, Low};
 
@@ -530,7 +530,7 @@ impl Execution {
                 size,
                 target_image,
             } => {
-                let mut buffers = core::mem::take(&mut self.descriptors.buffers);
+                let buffers = core::mem::take(&mut self.descriptors.buffers);
                 let mut image_data = core::mem::take(&mut self.buffers);
 
                 if offset != (0, 0) {
@@ -874,7 +874,15 @@ impl Machine {
         mut pass: wgpu::RenderPass<'pass>,
     ) -> Result<(), StepError> {
         loop {
-            match self.next_instruction()? {
+            let instruction = match self.next_instruction() {
+                Err(StepError {
+                    inner: StepErrorKind::ProgramEnd,
+                    ..
+                }) => return Err(StepError::RenderPassDidNotEnd),
+                other => other?,
+            };
+
+            match instruction {
                 &Low::SetPipeline(idx) => {
                     let pipeline = descriptors
                         .render_pipelines
@@ -924,6 +932,8 @@ impl Machine {
     }
 }
 
+#[allow(non_snake_case)]
+#[allow(non_upper_case_globals)]
 impl StepError {
     fn InvalidInstruction(line: u32) -> Self {
         StepError {

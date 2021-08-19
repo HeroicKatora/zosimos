@@ -385,6 +385,7 @@ impl CommandBuffer {
     /// Perform a whitepoint adaptation.
     ///
     /// The `function` describes the method and target whitepoint of the chromatic adaptation.
+    #[allow(unreachable_patterns)]
     pub fn chromatic_adaptation(
         &mut self,
         src: Register,
@@ -414,6 +415,7 @@ impl CommandBuffer {
                 from_xyz_matrix = primary.to_xyz(target).inv();
                 source_wp = whitepoint;
             }
+            // Forward compatibility.
             _ => {
                 return Err(CommandError {
                     inner: CommandErrorKind::BadDescriptor(desc_src.clone()),
@@ -509,8 +511,8 @@ impl CommandBuffer {
     /// One important use of this method is to add or removed the color interpretation of an image.
     /// This can be necessary when it has been algorithmically created or when one wants to
     /// intentionally ignore such meaning.
-    pub fn transmute(&mut self, from: Register, texel: Texel) -> Result<Register, CommandError> {
-        todo!()
+    pub fn transmute(&mut self, _: Register, _: Texel) -> Result<Register, CommandError> {
+        Err(CommandError::OTHER)
     }
 
     /// Overwrite some channels with overlaid data.
@@ -545,9 +547,9 @@ impl CommandBuffer {
     /// Grab colors from a palette based on an underlying image of indices.
     pub fn palette(
         &mut self,
-        below: Register,
-        channel: Palette,
-        above: Register,
+        _below: Register,
+        _channel: Palette,
+        _above: Register,
     ) -> Result<Register, CommandError> {
         todo!()
     }
@@ -677,7 +679,7 @@ impl CommandBuffer {
                 })
                 .expect("A non-output register");
 
-            let ImageBufferAssignment { buffer, texture } =
+            let ImageBufferAssignment { buffer: _, texture } =
                 textures.allocate_for(descriptor, liveness);
 
             match op {
@@ -735,9 +737,6 @@ impl CommandBuffer {
                             });
                         }
                         UnaryOp::ColorConvert(color) => {
-                            let lower = self.describe_reg(*src).unwrap();
-                            let target = Rectangle::from(lower);
-
                             // The inherent OptoToLinear transformation gets us to a linear light
                             // representation. We want to convert this into a compatible (that is,
                             // using the same observer definition) other linear light

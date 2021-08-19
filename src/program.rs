@@ -315,6 +315,9 @@ pub struct LaunchError {
 /// Currently, resources are never deleted until the end of the program. All commands reference a
 /// particular selected device/queue that is implicit global context.
 #[derive(Debug)]
+// FIXME: ideally we only have instructions we use.
+// And we should use all of these for optimizations.
+#[allow(unused)]
 pub(crate) enum Low {
     // Descriptor modification commands.
     /// Create (and store) a bind group layout.
@@ -647,7 +650,8 @@ pub struct CostModel {
 /// The commands could not be made into a program.
 #[derive(Debug)]
 pub enum CompileError {
-    #[deprecated = "We should strive to remove these"]
+    // FIXME: turn this warning on to find things to implement.
+    // #[deprecated = "We should strive to remove these"]
     NotYetImplemented,
 }
 
@@ -934,7 +938,7 @@ impl Launcher<'_> {
                     encoder.copy_staging_to_buffer(src)?;
                     encoder.copy_buffer_to_output(src, dst)?;
                 }
-                High::Construct { dst, op } => {
+                High::Construct { .. } => {
                     todo!()
                 }
                 High::Paint { texture, dst, fn_ } => {
@@ -1042,7 +1046,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     *buffer = ImageData::Host(copy);
                 } else {
                     // Would need to copy from the GPU.
-                    return Err(LaunchError::UNIMPLEMENTED_CHECK);
+                    return Err(LaunchError::InternalCommandError(line!()));
                 }
 
                 if buffer.as_bytes().is_none() {
@@ -1968,9 +1972,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             .or_insert_with_key(|desc| {
                 let sampler_id = *sampler;
                 instructions.extend_one(Low::Sampler(SamplerDescriptor {
-                    address_mode: wgpu::AddressMode::default(),
-                    border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
-                    resize_filter: wgpu::FilterMode::Nearest,
+                    address_mode: desc.address_mode,
+                    border_color: desc.border_color,
+                    resize_filter: desc.resize_filter,
                 }));
                 *sampler += 1;
                 sampler_id
@@ -2293,7 +2297,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     shader_include_to_spirv(stage_kind.decode_src()))?;
 
                 let buffer = parameter.serialize_std140();
-                let entry_point = stage_kind.encode_entry_point();
+                // FIXME: see below, shaderc requires renamed entry points to "main".
+                let _entry_point = stage_kind.encode_entry_point();
 
                 let layout = self.make_stage_group(stage_kind.decode_binding());
 
@@ -2337,7 +2342,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     shader_include_to_spirv(stage_kind.encode_src()))?;
 
                 let buffer = parameter.serialize_std140();
-                let entry_point = stage_kind.decode_entry_point();
+                // FIXME: see below, shaderc requires renamed entry points to "main".
+                let _entry_point = stage_kind.decode_entry_point();
 
                 let layout = self.make_stage_group(stage_kind.encode_binding());
 
@@ -2373,7 +2379,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     },
                 })
             }
-            _ => todo!(),
         }
     }
 }
@@ -2453,10 +2458,9 @@ impl BufferUsage {
 }
 
 impl LaunchError {
-    #[deprecated = "Should be removed and implemented"]
-    pub(crate) const UNIMPLEMENTED_CHECK: Self = LaunchError { line: 0 };
     #[allow(non_snake_case)]
-    #[deprecated = "This should be cleaned up"]
+    // FIXME: find a better error representation but it's okay for now.
+    // #[deprecated = "This should be cleaned up"]
     pub(crate) fn InternalCommandError(line: u32) -> Self {
         LaunchError { line }
     }
