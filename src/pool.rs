@@ -2,7 +2,7 @@ use core::fmt;
 use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
-use crate::buffer::{BufferLayout, Descriptor, ImageBuffer, Texel};
+use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer, Texel};
 
 /// Holds a number of image buffers, their descriptors and meta data.
 ///
@@ -48,10 +48,10 @@ pub(crate) struct ImageMeta {
     /// Do we guarantee consistent content to read?
     /// Images with this set to `false` may be arbitrarily used as a temporary buffer for other
     /// operations, overwriting the contents at will.
-    no_read: bool,
+    pub(crate) no_read: bool,
     /// Should we permit writing to this image?
     /// If not then the device can allocate/cache it differently.
-    no_write: bool,
+    pub(crate) no_write: bool,
 }
 
 /// TODO: figure out if we should expose this or a privacy wrapper.
@@ -96,6 +96,24 @@ impl Pool {
         let buffer = ImageBuffer::from(image);
         let texel = Texel::with_srgb_image(image);
         self.insert(buffer, texel)
+    }
+
+    /// Create the image based on an entry.
+    ///
+    /// This allocates a host-accessible buffer with the same layout and metadata as the image. If
+    /// possible it will also copy the data from the source entry.  It is always possible to clone
+    /// images that have host-allocated data.
+    ///
+    /// # Panics
+    /// This method panics when the key is not valid for the pool.
+    pub fn allocate_like(&mut self, key: PoolKey) -> PoolImageMut<'_> {
+        let entry = self.entry(key).expect("Not a valid pool key");
+        let mut buffer = ImageBuffer::with_layout(entry.layout());
+        if let Some(data) = entry.as_bytes() {
+            buffer.as_bytes_mut().copy_from_slice(data);
+        }
+        let texel = entry.image.texel.clone();
+        self.new_with_data(ImageData::Host(buffer), texel)
     }
 
     /// Create the descriptor for an image buffer that is provided by the caller.
@@ -210,13 +228,48 @@ impl PoolImageMut<'_> {
         }
     }
 
+    /// View the buffer as bytes.
+    ///
+    /// This return `Some` if the image is a host allocated buffer and `None` otherwise.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        self.image.data.as_bytes()
+    }
+
+    /// View the buffer as bytes.
+    ///
+    /// This return `Some` if the image is a host allocated buffer and `None` otherwise.
+    pub fn as_bytes_mut(&mut self) -> Option<&mut [u8]> {
+        self.image.data.as_bytes_mut()
+    }
+
+    /// Configure the color of this image, not changing any data.
+    pub fn set_color(&mut self, color: Color) {
+        assert!(color.is_consistent(self.image.texel.samples.parts));
+        self.image.texel.color = color;
+    }
+
+    /// Get the metadata associated with the entry.
+    pub(crate) fn meta(&self) -> &ImageMeta {
+        &self.image.meta
+    }
+
     /// Replace the data with a host allocated buffer of the correct layout.
+    /// Returns the previous image data.
     /// TODO: figure out if we should expose this..
     pub(crate) fn host_allocate(&mut self) -> ImageData {
         let buffer = ImageBuffer::with_layout(self.layout());
         self.replace(ImageData::Host(buffer))
     }
 
+    /// Make a copy of this host accessible image as a host allocated image.
+    pub(crate) fn host_copy(&self) -> Option<ImageBuffer> {
+        let data = self.as_bytes()?;
+        let mut buffer = ImageBuffer::with_layout(self.layout());
+        buffer.as_bytes_mut().copy_from_slice(data);
+        Some(buffer)
+    }
+
+    /// Replace the image with equivalent late-bound data.
     pub(crate) fn take(&mut self) -> ImageData {
         let late_bound = ImageData::LateBound(self.layout().clone());
         self.replace(late_bound)

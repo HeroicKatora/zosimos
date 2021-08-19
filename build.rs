@@ -11,28 +11,52 @@ fn main() -> Result<(), BuildError> {
     struct SimpleSource {
         path: &'static str,
         kind: ShaderKind,
+        entry: &'static str,
+        name_overwrite: Option<&'static str>,
     }
 
     const SHADERS: &[SimpleSource] = &[
         SimpleSource {
             path: "src/shaders/box.vert",
             kind: ShaderKind::Vertex,
+            entry: "main",
+            name_overwrite: None,
         },
         SimpleSource {
             path: "src/shaders/copy.frag",
             kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
         },
         SimpleSource {
             path: "src/shaders/inject.frag",
             kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
         },
         SimpleSource {
             path: "src/shaders/linear.frag",
             kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
         },
         SimpleSource {
             path: "src/shaders/stage.frag",
             kind: ShaderKind::Fragment,
+            entry: "decode_r8ui",
+            name_overwrite: Some("stage_d8ui"),
+        },
+        SimpleSource {
+            path: "src/shaders/stage.frag",
+            kind: ShaderKind::Fragment,
+            entry: "decode_r32ui",
+            name_overwrite: Some("stage_d32ui"),
+        },
+        SimpleSource {
+            path: "src/shaders/stage.frag",
+            kind: ShaderKind::Fragment,
+            entry: "encode_r32ui",
+            name_overwrite: Some("stage_e32ui"),
         },
     ];
 
@@ -50,8 +74,20 @@ fn main() -> Result<(), BuildError> {
         str_source.clear();
         file.read_to_string(&mut str_source)?;
 
-        let binary =
-            compiler.compile_into_spirv(&str_source, shader.kind, shader.path, "main", None)?;
+        let mut options = shaderc::CompileOptions::new().expect("Could initialize compile options");
+        if shader.entry != "main" {
+            let macro_name = shader.entry.to_uppercase() + "_AS_MAIN";
+            options.add_macro_definition(&macro_name, Some("main"));
+        }
+
+        let binary = compiler.compile_into_spirv(
+            &str_source,
+            shader.kind,
+            shader.path,
+            shader.entry,
+            // Needed, but empty. Without this the `shader.entry` parameter is ignored!
+            Some(&options),
+        )?;
 
         let spirv = binary.as_binary_u8();
 
@@ -60,6 +96,9 @@ fn main() -> Result<(), BuildError> {
         assert!(filepath.is_relative());
 
         path.push(filepath.file_name().unwrap());
+        if let Some(name) = shader.name_overwrite {
+            path.set_file_name(name);
+        }
         path.set_extension(match shader.kind {
             ShaderKind::Vertex => "vert.v",
             ShaderKind::Fragment => "frag.v",

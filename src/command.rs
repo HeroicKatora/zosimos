@@ -2,7 +2,7 @@ use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, Te
 use crate::pool::PoolImage;
 use crate::program::{
     CompileError, Function, ImageBufferAssignment, ImageBufferPlan, PaintOnTopKind, Program,
-    Texture,
+    QuadTarget, Texture,
 };
 use std::collections::HashMap;
 
@@ -111,12 +111,10 @@ pub(crate) enum Target {
 #[derive(Clone)]
 pub(crate) enum UnaryOp {
     /// Op = id
-    Affine(Affine),
-    /// Op = id
     Crop(Rectangle),
     /// Op(color)[T] = T[.color=color]
     /// And color needs to be 'color compatible' with the prior T (see module).
-    ColorConvert(Color),
+    ColorConvert(ColorConversion),
     /// Op(T) = T[.color=select(channel, color)]
     Extract { channel: ColorChannel },
     /// Op(T) = T[.whitepoint=target]
@@ -127,6 +125,8 @@ pub(crate) enum UnaryOp {
 
 #[derive(Clone)]
 pub(crate) enum BinaryOp {
+    /// Op = id
+    Affine(Affine),
     /// Op[T, U] = T
     /// where T = U
     Inscribe { placement: Rectangle },
@@ -154,9 +154,46 @@ pub enum Blend {
     Alpha,
 }
 
+/// Describes an affine transformation of an image.
+///
+/// Affine transformations are a combination of scaling, translation, rotation. They describe a
+/// transformation of the 2D space of the original image.
 #[derive(Clone, Copy)]
 pub struct Affine {
-    transformation: [f32; 9],
+    /// The affine transformation, as a row-major homogeneous matrix.
+    ///
+    /// Note that the top-left pixel starts at (0, 0), the bottom right pixel ends at (1, 1).
+    pub transformation: [f32; 9],
+    /// How pixels are resolved from the underlying texture.
+    pub sampling: AffineSample,
+}
+
+/// The way to perform sampling of an texture that was transformed with an affine transformation.
+///
+/// You have to be careful that there is NO built-in functionality to avoid attacks that downscale
+/// an image so far that a very particular subset of pixels (or linear interpolation) is shown that
+/// results in an image visually very different from the original. Such an attack works because
+/// scaling down leads to many pixels being ignored.
+#[derive(Clone, Copy)]
+pub enum AffineSample {
+    /// Choose the nearest pixel.
+    ///
+    /// This method works with all color models.
+    Nearest,
+    /// Interpolate bi-linearly between nearest pixels.
+    ///
+    /// We rely on the executing GPU sampler2D for determining the color, in particular it will happen
+    /// in _linear_ RGB and this method can only be used on RGB-ish images.
+    BiLinear,
+}
+
+/// The parameters of color conversion which we will use in the draw call.
+#[derive(Clone, Debug)]
+pub(crate) struct ColorConversion {
+    /// The matrix converting source to XYZ.
+    to_xyz_matrix: RowMatrix,
+    /// The matrix converting from XYZ to target.
+    from_xyz_matrix: RowMatrix,
 }
 
 /// Reference of matrices and more: http://brucelindbloom.com/index.html?Eqn_ChromAdapt.html
@@ -232,6 +269,17 @@ pub enum ChromaticAdaptationMethod {
     BradfordNonLinear,
 }
 
+/// A palette lookup operation.
+///
+/// FIXME description and implementation
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    /// Which color channel will provide the texture coordinate along width axis.
+    pub width: ColorChannel,
+    /// Which color channel will provide the texture coordinate along height axis.
+    pub height: ColorChannel,
+}
+
 #[derive(Debug)]
 pub struct CommandError {
     inner: CommandErrorKind,
@@ -283,6 +331,7 @@ impl CommandBuffer {
     /// This goes through linear RGB, not ICC, and requires the two models to have same whitepoint.
     pub fn color_convert(&mut self, src: Register, texel: Texel) -> Result<Register, CommandError> {
         let desc_src = self.describe_reg(src)?;
+        let conversion;
 
         // Pretend that all colors with the same whitepoint will be mapped from encoded to
         // linear RGB when loading, and re-encoded in target format when storing them. This is
@@ -292,12 +341,21 @@ impl CommandBuffer {
         match (&desc_src.texel.color, &texel.color) {
             (
                 Color::Xyz {
-                    whitepoint: wp_src, ..
+                    primary: primary_src,
+                    whitepoint: wp_src,
+                    ..
                 },
                 Color::Xyz {
-                    whitepoint: wp_dst, ..
+                    primary: primary_dst,
+                    whitepoint: wp_dst,
+                    ..
                 },
-            ) if wp_src == wp_dst => {}
+            ) if wp_src == wp_dst => {
+                conversion = ColorConversion {
+                    from_xyz_matrix: primary_src.to_xyz(*wp_src),
+                    to_xyz_matrix: primary_dst.to_xyz(*wp_dst),
+                };
+            }
             _ => {
                 return Err(CommandError {
                     inner: CommandErrorKind::BadDescriptor(desc_src.clone()),
@@ -317,7 +375,7 @@ impl CommandBuffer {
 
         let op = Op::Unary {
             src,
-            op: UnaryOp::ColorConvert(texel.color.clone()),
+            op: UnaryOp::ColorConvert(conversion),
             desc: Descriptor { layout, texel },
         };
 
@@ -442,6 +500,19 @@ impl CommandBuffer {
         Ok(self.push(op))
     }
 
+    /// Reinterpret the bytes of an image as another type.
+    ///
+    /// This command requires that the texel type of the register and the descriptor have the same
+    /// size. It will return an error if this is not the case. Additionally, the provided texel
+    /// must be internally consistent.
+    ///
+    /// One important use of this method is to add or removed the color interpretation of an image.
+    /// This can be necessary when it has been algorithmically created or when one wants to
+    /// intentionally ignore such meaning.
+    pub fn transmute(&mut self, from: Register, texel: Texel) -> Result<Register, CommandError> {
+        todo!()
+    }
+
     /// Overwrite some channels with overlaid data.
     pub fn inject(
         &mut self,
@@ -469,6 +540,16 @@ impl CommandBuffer {
         };
 
         Ok(self.push(op))
+    }
+
+    /// Grab colors from a palette based on an underlying image of indices.
+    pub fn palette(
+        &mut self,
+        below: Register,
+        channel: Palette,
+        above: Register,
+    ) -> Result<Register, CommandError> {
+        todo!()
     }
 
     /// Overlay this image as part of a larger one, performing blending.
@@ -503,14 +584,37 @@ impl CommandBuffer {
         }))
     }
 
-    /// An affine transformation of the image.
-    pub fn affine(&mut self, src: Register, affine: Affine) -> Result<Register, CommandError> {
+    /// Overlay an affine transformation of the image.
+    pub fn affine(
+        &mut self,
+        below: Register,
+        affine: Affine,
+        above: Register,
+    ) -> Result<Register, CommandError> {
         // TODO: should we check affine here?
-        let desc = self.describe_reg(src)?.clone();
-        Ok(self.push(Op::Unary {
-            src,
-            op: UnaryOp::Affine(affine),
-            desc,
+        let lhs = self.describe_reg(below)?.clone();
+        let rhs = self.describe_reg(above)?.clone();
+
+        if lhs.texel != rhs.texel {
+            return Err(CommandError::TYPE_ERR);
+        }
+
+        if !(RowMatrix::new(affine.transformation).det().abs() >= f32::EPSILON) {
+            return Err(CommandError::OTHER);
+        }
+
+        match affine.sampling {
+            AffineSample::Nearest => (),
+            AffineSample::BiLinear => {
+                todo!("Check for a color which we can sample bi-linearly")
+            }
+        }
+
+        Ok(self.push(Op::Binary {
+            lhs: below,
+            rhs: above,
+            op: BinaryOp::Affine(affine),
+            desc: lhs,
         }))
     }
 
@@ -604,7 +708,7 @@ impl CommandBuffer {
                                 dst: Target::Discard(texture),
                                 fn_: Function::PaintOnTop {
                                     selection: region,
-                                    target,
+                                    target: target.into(),
                                     viewport: target,
                                     paint_on_top: PaintOnTopKind::Copy,
                                 },
@@ -630,6 +734,32 @@ impl CommandBuffer {
                                 },
                             });
                         }
+                        UnaryOp::ColorConvert(color) => {
+                            let lower = self.describe_reg(*src).unwrap();
+                            let target = Rectangle::from(lower);
+
+                            // The inherent OptoToLinear transformation gets us to a linear light
+                            // representation. We want to convert this into a compatible (that is,
+                            // using the same observer definition) other linear light
+                            // representation that we then transfer back to an electrical form.
+                            // Note that these two steps happen, conveniently, automatically.
+                            // Usually it is ensured that only two images with the same linear
+                            // light representation are used in a single paint call but this
+                            // violates it on purpose.
+
+                            // FIXME: using a copy here but this means we do this in unnecessarily
+                            // many steps. We first decode to linear color, then draw, then code
+                            // back to the non-linear electrical space.
+                            // We could do this directly from one matrix to another or try using an
+                            // ephemeral intermediate attachment?
+                            high_ops.push(High::Paint {
+                                texture: reg_to_texture[src],
+                                dst: Target::Discard(texture),
+                                fn_: Function::Transform {
+                                    matrix: color.into_matrix(),
+                                },
+                            });
+                        }
                         _ => return Err(CompileError::NotYetImplemented),
                     }
 
@@ -645,13 +775,38 @@ impl CommandBuffer {
                     let upper_region = Rectangle::from(self.describe_reg(*rhs).unwrap());
 
                     match op {
+                        BinaryOp::Affine(affine) => {
+                            let affine_matrix = RowMatrix::new(affine.transformation);
+
+                            high_ops.push(High::Paint {
+                                dst: Target::Discard(texture),
+                                texture: reg_to_texture[lhs],
+                                fn_: Function::PaintOnTop {
+                                    selection: lower_region,
+                                    target: lower_region.into(),
+                                    viewport: lower_region,
+                                    paint_on_top: PaintOnTopKind::Copy,
+                                },
+                            });
+
+                            high_ops.push(High::Paint {
+                                texture: reg_to_texture[rhs],
+                                dst: Target::Load(texture),
+                                fn_: Function::PaintOnTop {
+                                    selection: upper_region,
+                                    target: QuadTarget::from(upper_region).affine(&affine_matrix),
+                                    viewport: lower_region,
+                                    paint_on_top: affine.sampling.as_paint_on_top()?,
+                                },
+                            })
+                        }
                         BinaryOp::Inscribe { placement } => {
                             high_ops.push(High::Paint {
                                 dst: Target::Discard(texture),
                                 texture: reg_to_texture[lhs],
                                 fn_: Function::PaintOnTop {
                                     selection: lower_region,
-                                    target: lower_region,
+                                    target: lower_region.into(),
                                     viewport: lower_region,
                                     paint_on_top: PaintOnTopKind::Copy,
                                 },
@@ -662,7 +817,7 @@ impl CommandBuffer {
                                 texture: reg_to_texture[rhs],
                                 fn_: Function::PaintOnTop {
                                     selection: upper_region,
-                                    target: *placement,
+                                    target: (*placement).into(),
                                     viewport: lower_region,
                                     paint_on_top: PaintOnTopKind::Copy,
                                 },
@@ -702,10 +857,17 @@ impl CommandBuffer {
     }
 }
 
+impl ColorConversion {
+    pub(crate) fn into_matrix(&self) -> RowMatrix {
+        let from = self.from_xyz_matrix.inv().into();
+        self.to_xyz_matrix.multiply_right(from).into()
+    }
+}
+
 impl ChromaticAdaptation {
     pub(crate) fn into_matrix(&self) -> Result<[f32; 9], CompileError> {
         use palette::{
-            chromatic_adaptation::{ConeResponseMatrices, Method, TransformMatrix},
+            chromatic_adaptation::{Method, TransformMatrix},
             white_point as wp,
         };
 
@@ -758,6 +920,82 @@ impl ChromaticAdaptation {
         });
 
         Ok(matrices)
+    }
+}
+
+#[rustfmt::skip]
+impl Affine {
+    /// Create affine parameters with identity transformation.
+    pub fn new(sampling: AffineSample) -> Self {
+        Affine {
+            transformation: [
+                1.0, 0., 0.,
+                0., 1.0, 0.,
+                0., 0., 1.0,
+            ],
+            sampling,
+        }
+    }
+
+    /// After the transformation, also scale everything.
+    ///
+    /// This corresponds to a left-side multiplication of the transformation matrix.
+    pub fn scale(self, x: f32, y: f32) -> Self {
+        let post = RowMatrix::diag(x, y, 1.0)
+            .multiply_right(RowMatrix::new(self.transformation).into());
+        let transformation = RowMatrix::from(post).into_inner();
+
+        Affine {
+            transformation,
+            ..self
+        }
+    }
+
+    /// After the transformation, rotate everything clockwise.
+    ///
+    /// This corresponds to a left-side multiplication of the transformation matrix.
+    pub fn rotate(self, rad: f32) -> Self {
+        let post = RowMatrix::new([
+            rad.cos(), rad.sin(), 0.,
+            -rad.sin(), rad.cos(), 0.,
+            0., 0., 1.,
+        ]);
+
+        let post = post.multiply_right(RowMatrix::new(self.transformation).into());
+        let transformation = RowMatrix::from(post).into_inner();
+
+        Affine {
+            transformation,
+            ..self
+        }
+    }
+
+    /// After the transformation, shift by an x and y offset.
+    ///
+    /// This corresponds to a left-side multiplication of the transformation matrix.
+    pub fn shift(self, x: f32, y: f32) -> Self {
+        let post = RowMatrix::new([
+            1., 0., x,
+            0., 1., y,
+            0., 0., 1.,
+        ]);
+
+        let post = post.multiply_right(RowMatrix::new(self.transformation).into());
+        let transformation = RowMatrix::from(post).into_inner();
+
+        Affine {
+            transformation,
+            ..self
+        }
+    }
+}
+
+impl AffineSample {
+    fn as_paint_on_top(self) -> Result<PaintOnTopKind, CompileError> {
+        match self {
+            AffineSample::Nearest => Ok(PaintOnTopKind::Copy),
+            _ => Err(CompileError::NotYetImplemented),
+        }
     }
 }
 

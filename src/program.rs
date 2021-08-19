@@ -60,9 +60,10 @@ pub(crate) enum Function {
         /// Source selection (relative to texture coordinates).
         selection: Rectangle,
         /// Target location in target texture.
-        target: Rectangle,
+        target: QuadTarget,
         /// Rectangle that the draw call targets in the target texture.
-        /// This gives the coordinate basis.
+        /// The target coordinates are relative to this and the fragment shader given by
+        /// paint_on_top is only executed within that rectangle.
         viewport: Rectangle,
         paint_on_top: PaintOnTopKind,
     },
@@ -78,6 +79,33 @@ pub(crate) enum Function {
     ///   bind(2,0): transform matrix
     ///   out: vec4 (color)
     Transform { matrix: RowMatrix },
+    /// VS: id
+    /// FS:
+    ///   bind(1, …) readonly inputs uimage2D
+    ///   bind(3, 0) struct {
+    ///     vec4: transfer, sample parts, sample bits
+    ///   }
+    ToLinearOpto {
+        parameter: shaders::stage::XyzParameter,
+        stage_kind: shaders::stage::StageKind,
+    },
+    /// VS: id
+    /// FS:
+    ///   bind(2, …) writeonly inputs uimage2D
+    ///   bind(3, 0) struct {
+    ///     vec4: transfer, sample parts, sample bits
+    ///   }
+    FromLinearOpto {
+        parameter: shaders::stage::XyzParameter,
+        stage_kind: shaders::stage::StageKind,
+    },
+}
+
+/// Describes a method of calculating the screen space coordinates of the painted quad.
+#[derive(Clone, Debug, PartialEq)]
+pub enum QuadTarget {
+    Rect(Rectangle),
+    Absolute([[f32; 2]; 4]),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -108,6 +136,13 @@ pub struct ImageBufferAssignment {
     pub(crate) buffer: Buffer,
 }
 
+/// Get the descriptors of a particular buffer plan.
+#[derive(Clone, Copy, Debug)]
+pub struct ImageBufferDescriptors<'a> {
+    descriptor: &'a Descriptor,
+    layout: &'a BufferLayout,
+}
+
 /// Identifies one layout based buffer in the render pipeline, by an index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Buffer(pub(crate) usize);
@@ -126,7 +161,6 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     bind_group_layouts: usize,
     buffers: usize,
     command_buffers: usize,
-    modules: usize,
     pipeline_layouts: usize,
     render_pipelines: usize,
     sampler: usize,
@@ -137,21 +171,34 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     // Additional validation properties.
     is_in_command_encoder: bool,
     is_in_render_pass: bool,
-    commands: usize,
 
     // Additional fields to map our runtime state.
     /// How we map registers to device buffers.
     buffer_plan: ImageBufferPlan,
     /// Howe we mapped registers to images in the pool.
     pool_plan: ImagePoolPlan,
+    /// The Bind Group layer Descriptor used in fragment shader, set=1.
     paint_group_layout: Option<usize>,
+    /// The Bind Group Descriptor used in vertex buffer, set=0.
     quad_group_layout: Option<usize>,
+    /// The Bind Group Descriptor for set=2, used for parameters of fragment shader.
     fragment_data_group_layout: Option<usize>,
+    /// The Pipeline Descriptor used in generic paint shaders.
+    /// Will use the quad group and fragment data group layouts.
     paint_pipeline_layout: Option<usize>,
-    default_sampler: Option<usize>,
+    /// The Bind Group Descriptor layout for the staging fragment shader.
+    /// Alternative for the fragment data group.
+    /// Since there is a limit on the number of active storage textures, we have one layout for
+    /// each potential usage.
+    stage_group_layout: HashMap<u32, usize>,
+    known_samplers: HashMap<SamplerDescriptor, usize>,
     fragment_shaders: HashMap<FragmentShader, usize>,
     vertex_shaders: HashMap<VertexShader, usize>,
     simple_quad_buffer: Option<DeviceBuffer>,
+    /// The render pipeline state for staging a texture.
+    staged_to_pipelines: HashMap<Texture, SimpleRenderPipeline>,
+    /// The render pipeline state for undoing staging a texture.
+    staged_from_pipelines: HashMap<Texture, SimpleRenderPipeline>,
 
     // Fields regarding the status of registers.
     /// Describes how registers where mapped to buffers.
@@ -220,6 +267,17 @@ struct TextureMap {
 struct StagingTexture {
     device: DeviceTexture,
     format: TextureDescriptor,
+    stage_kind: shaders::stage::StageKind,
+    parameter: shaders::stage::XyzParameter,
+    /// A texture which we use as an attachment for encoding.
+    ///
+    /// The current implementation for encoding attaches the staging buffer as a storage image and
+    /// the texture as a sampled source texture. However, this means we can not use either of them
+    /// as the target attachment. So we have this additional texture that has the right size and
+    /// format to be used as a target attachment for encoding while we _never_ actually write to it
+    /// (op:write is disabled for that draw call).
+    /// FIXME: find a way to avoid this texture allocation.
+    temporary_attachment_buffer_for_encoding_remove_if_possible: DeviceTexture,
 }
 
 /// The gpu buffer associated with an image buffer.
@@ -239,6 +297,8 @@ enum FragmentShader {
     PaintOnTop(PaintOnTopKind),
     /// Linear color transformation.
     LinearColorMatrix,
+    /// The conversion of texel format.
+    Convert,
 }
 
 #[derive(Debug)]
@@ -377,6 +437,8 @@ pub(crate) struct BindGroupDescriptor {
     pub layout_idx: usize,
     /// All entries at their natural position.
     pub entries: Vec<BindingResource>,
+    /// Sparse entries that are not at their natural position.
+    pub sparse: Vec<(u32, BindingResource)>,
 }
 
 #[derive(Debug)]
@@ -495,6 +557,37 @@ pub(crate) struct TextureDescriptor {
     pub usage: TextureUsage,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ImageDescriptor {
+    pub size: (NonZeroU32, NonZeroU32),
+    pub format: wgpu::TextureFormat,
+    pub staging: Option<StagingDescriptor>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StagingDescriptor {
+    pub(crate) parameter: shaders::stage::XyzParameter,
+    pub(crate) stage_kind: shaders::stage::StageKind,
+}
+
+impl ImageDescriptor {
+    fn to_texture(&self) -> TextureDescriptor {
+        TextureDescriptor {
+            size: self.size,
+            format: self.format,
+            usage: TextureUsage::Attachment,
+        }
+    }
+
+    fn to_staging_texture(&self) -> Option<TextureDescriptor> {
+        self.staging.map(|staging| TextureDescriptor {
+            size: self.size,
+            format: staging.stage_kind.texture_format(),
+            usage: TextureUsage::Staging,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum TextureUsage {
     /// Copy Dst + Sampled
@@ -503,7 +596,13 @@ pub(crate) enum TextureUsage {
     DataOut,
     /// A storage texture
     /// Copy Src/Dst + Sampled + Render Attachment
-    Storage,
+    Attachment,
+    /// A staging texture
+    /// Copy Src/Dst + Storage.
+    Staging,
+    /// A texture which we never reach from.
+    /// Sampled + Render Attachment
+    Transient,
 }
 
 #[derive(Debug)]
@@ -518,7 +617,7 @@ pub(crate) struct TextureViewDescriptor {
 
 /// For constructing a texture samples.
 /// Ignores lod attributes
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub(crate) struct SamplerDescriptor {
     /// In all directions.
     pub address_mode: wgpu::AddressMode,
@@ -574,14 +673,32 @@ pub struct Launcher<'program> {
 }
 
 struct SimpleRenderPipelineDescriptor<'data> {
-    // Bind data for (set 0, binding 0).
+    pipeline_target: PipelineTarget,
+    /// Bind data for (set 0, binding 0).
     vertex_bind_data: BufferBind<'data>,
-    // Texture for (set 1, binding 0)
-    fragment_texture: Texture,
-    // Texture for (set 2, binding 0)
+    /// Texture for (set 1, binding 0)
+    fragment_texture: TextureBind,
+    /// Texture for (set 2, binding 0)
     fragment_bind_data: BufferBind<'data>,
+    /// The vertex shader to use.
     vertex: ShaderBind,
+    /// The fragment shader to use.
     fragment: ShaderBind,
+}
+
+enum PipelineTarget {
+    Texture(Texture),
+    PreComputedGroup { target_format: wgpu::TextureFormat },
+}
+
+enum TextureBind {
+    Texture(Texture),
+    PreComputedGroup {
+        /// The index of the bind group we're binding to set `1`, the fragment set.
+        group: usize,
+        /// The layout corresponding to the bind group.
+        layout: usize,
+    },
 }
 
 enum BufferBind<'data> {
@@ -602,6 +719,7 @@ enum ShaderBind {
     },
 }
 
+#[derive(Clone, Copy)]
 struct SimpleRenderPipeline {
     pipeline: usize,
     buffer: DeviceBuffer,
@@ -633,6 +751,21 @@ impl ImageBufferPlan {
             .get(idx.0)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))
             .map(ImageBufferAssignment::clone)
+    }
+
+    pub(crate) fn get_info(
+        &self,
+        idx: Register,
+    ) -> Result<ImageBufferDescriptors<'_>, LaunchError> {
+        let assigned = self.get(idx)?;
+        Ok(self.describe(&assigned))
+    }
+
+    pub(crate) fn describe(&self, assigned: &ImageBufferAssignment) -> ImageBufferDescriptors<'_> {
+        ImageBufferDescriptors {
+            descriptor: &self.texture[assigned.texture.0],
+            layout: &self.buffer[assigned.buffer.0],
+        }
     }
 }
 
@@ -721,10 +854,9 @@ impl Launcher<'_> {
     /// Returns an error if the register does not specify an input, or when there is no image under
     /// the key in the pool, or when the image in the pool does not match the declared format.
     pub fn bind(mut self, Register(reg): Register, img: PoolKey) -> Result<Self, LaunchError> {
-        let mut entry = match self.pool.entry(img) {
-            Some(entry) => entry,
-            None => return Err(LaunchError::InternalCommandError(line!())),
-        };
+        if self.pool.entry(img).is_none() {
+            return Err(LaunchError::InternalCommandError(line!()));
+        }
 
         let Texture(texture) = match self.program.textures.by_register.get(reg) {
             Some(assigned) => assigned.texture,
@@ -796,6 +928,7 @@ impl Launcher<'_> {
                     encoder.copy_buffer_to_staging(dst)?;
                 }
                 &High::Output { src, dst } => {
+                    // eprintln!("Output {:?} to {:?}", src, dst);
                     // Identify if we need to transform the texture from the internal format to the
                     // one actually chosen for this texture.
                     encoder.copy_staging_to_buffer(src)?;
@@ -819,7 +952,7 @@ impl Launcher<'_> {
                         Target::Discard(_) => {
                             wgpu::Operations {
                                 // TODO: we could let choose a replacement color..
-                                load: wgpu::LoadOp::Clear(wgpu::Color::RED),
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
                                 store: true,
                             }
                         }
@@ -834,7 +967,7 @@ impl Launcher<'_> {
                         ops,
                     };
 
-                    let render = encoder.prepare_render(*texture, fn_)?;
+                    let render = encoder.prepare_render(*texture, fn_, dst_texture)?;
 
                     // TODO: we need to remember the attachment format here.
                     // This is need to to automatically construct the shader pipeline.
@@ -900,8 +1033,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
             let buffer = &mut buffers[texture.0];
 
+            // Decide how to retrieve this image from the pool.
             if buffer.as_bytes().is_none() {
-                entry.swap(buffer);
+                // Just take the buffer if we are allowed to...
+                if entry.meta().no_read {
+                    entry.swap(buffer);
+                } else if let Some(copy) = entry.host_copy() {
+                    *buffer = ImageData::Host(copy);
+                } else {
+                    // Would need to copy from the GPU.
+                    return Err(LaunchError::UNIMPLEMENTED_CHECK);
+                }
 
                 if buffer.as_bytes().is_none() {
                     return Err(LaunchError::InternalCommandError(line!()));
@@ -952,7 +1094,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 }
 
                 self.is_in_command_encoder = false;
-                self.commands += 1;
+                self.command_buffers += 1;
             }
             Low::EndRenderPass => {
                 if !self.is_in_render_pass {
@@ -975,18 +1117,18 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             // TODO: could validate indices.
             Low::DrawOnce { .. } | Low::DrawIndexedZero { .. } | Low::SetPushConstants { .. } => {}
             Low::RunTopCommand => {
-                if self.commands == 0 {
+                if self.command_buffers == 0 {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
 
-                self.commands -= 1;
+                self.command_buffers -= 1;
             }
             Low::RunBotToTop(num) | Low::RunTopToBot(num) => {
-                if num >= self.commands {
+                if num >= self.command_buffers {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
 
-                self.commands -= num;
+                self.command_buffers -= num;
             }
             // TODO: could validate indices.
             Low::WriteImageToTexture { .. }
@@ -1007,7 +1149,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn make_texture_descriptor(
         &mut self,
         texture: Texture,
-    ) -> Result<TextureDescriptor, LaunchError> {
+    ) -> Result<ImageDescriptor, LaunchError> {
         let descriptor = &self.buffer_plan.texture[texture.0];
 
         fn validate_size(layout: &BufferLayout) -> Option<(NonZeroU32, NonZeroU32)> {
@@ -1019,6 +1161,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let size = validate_size(&descriptor.layout)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+        let mut staging = None;
 
         let format = match descriptor.texel {
             Texel {
@@ -1035,16 +1178,51 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                         ..
                     },
             } => wgpu::TextureFormat::Rgba8UnormSrgb,
+            Texel {
+                block: Block::Pixel,
+                samples:
+                    Samples {
+                        bits: SampleBits::Int8x4,
+                        parts: SampleParts::Rgba,
+                    },
+                color:
+                    Color::Xyz {
+                        // Match only that which is necessary to get the right numbers in the shader.
+                        transfer: Transfer::Linear,
+                        ..
+                    },
+            } => wgpu::TextureFormat::Rgba8Unorm,
+            Texel {
+                block: Block::Pixel,
+                samples,
+                color: Color::Xyz { transfer, .. },
+            } => {
+                let parameter = shaders::stage::XyzParameter {
+                    transfer,
+                    parts: samples.parts,
+                    bits: samples.bits,
+                };
+
+                let result = parameter.linear_format();
+                let stage_kind = parameter
+                    .stage_kind()
+                    // Unsupported format.
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                staging = Some(StagingDescriptor {
+                    stage_kind,
+                    parameter,
+                });
+
+                result
+            }
             _ => return Err(LaunchError::InternalCommandError(line!())),
         };
 
-        // TODO: be more precise?
-        let usage = TextureUsage::Storage;
-
-        Ok(TextureDescriptor {
+        Ok(ImageDescriptor {
             format,
+            staging,
             size,
-            usage,
         })
     }
 
@@ -1065,7 +1243,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             return Ok(());
         }
 
-        let texture_format = self.make_texture_descriptor(reg_texture)?;
+        let staged = self.make_texture_descriptor(reg_texture)?;
+        let texture_format = staged.to_texture();
+        let staging_format = staged.to_staging_texture();
         let descriptor = &self.buffer_plan.texture[reg_texture.0];
 
         let bytes_per_row = (descriptor.layout.bytes_per_texel as u32)
@@ -1097,6 +1277,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 usage: BufferUsage::DataOut,
             }))?;
 
+            // eprintln!("Buffer {:?} {:?}", buffer, buffer_layout.u64_len());
+            // eprintln!("Buffer {:?} {:?}", buffer + 1, buffer_layout.u64_len());
+            // eprintln!("Buffer {:?} {:?}", buffer + 2, buffer_layout.u64_len());
+
             (
                 DeviceBuffer(buffer),
                 DeviceBuffer(buffer + 1),
@@ -1105,16 +1289,21 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         };
 
         let texture = self.ensure_allocate_texture(reg_texture)?;
+        let staging = if let Some(staging) = self.staging_map.get(&reg_texture) {
+            Some(staging.device)
+        } else {
+            None
+        };
 
         let map_entry = RegisterMap {
             buffer,
             texture,
             map_read: Some(map_read),
             map_write: Some(map_write),
-            staging: None,
+            staging,
             buffer_layout,
             texture_format,
-            staging_format: None,
+            staging_format,
         };
 
         // TODO do a match instead?
@@ -1129,19 +1318,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             },
         );
 
-        if let Some(staging) = in_map.staging {
-            self.staging_map.insert(
-                reg_texture,
-                StagingTexture {
-                    device: staging,
-                    format: in_map
-                        .staging_format
-                        .clone()
-                        .expect("Have a format for staging texture when we have staging texture"),
-                },
-            );
-        }
-
         Ok(())
     }
 
@@ -1149,7 +1325,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         &mut self,
         reg_texture: Texture,
     ) -> Result<DeviceTexture, LaunchError> {
-        let texture_format = self.make_texture_descriptor(reg_texture)?;
+        let staged = self.make_texture_descriptor(reg_texture)?;
+        let texture_format = staged.to_texture();
+        let staging_format = staged.to_staging_texture();
 
         if let Some(texture_map) = self.texture_map.get(&reg_texture) {
             return Ok(texture_map.device);
@@ -1157,6 +1335,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let texture = {
             let texture = self.textures;
+            // eprintln!("Texture {:?} {:?}", texture, &texture_format);
             self.push(Low::Texture(texture_format.clone()))?;
             DeviceTexture(texture)
         };
@@ -1168,6 +1347,43 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 format: texture_format.clone(),
             },
         );
+
+        if let Some(staging) = staging_format {
+            let st_parameter = staged
+                .staging
+                .as_ref()
+                .expect("Have a format for staging texture when we have staging texture");
+
+            let device = {
+                let texture = self.textures;
+                // eprintln!("Storage Texture {:?} {:?}", texture, &staging);
+                self.push(Low::Texture(staging.clone()))?;
+                DeviceTexture(texture)
+            };
+
+            let fallback = {
+                let texture = self.textures;
+                // eprintln!("Fallback Texture {:?} {:?}", texture, &staging);
+                self.push(Low::Texture(TextureDescriptor {
+                    usage: TextureUsage::Transient,
+                    size: staging.size,
+                    ..texture_format
+                }))?;
+                DeviceTexture(texture)
+            };
+
+            // eprintln!("{} {:?}", reg_texture.0, staging);
+            self.staging_map.insert(
+                reg_texture,
+                StagingTexture {
+                    device,
+                    format: staging.clone(),
+                    stage_kind: st_parameter.stage_kind,
+                    parameter: st_parameter.parameter.clone(),
+                    temporary_attachment_buffer_for_encoding_remove_if_possible: fallback,
+                },
+            );
+        }
 
         Ok(texture)
     }
@@ -1225,13 +1441,22 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let regmap = self.allocate_register(idx)?.clone();
         let size = self.buffer_plan.texture[regmap.texture.0].size();
 
+        let target_texture = if let Some(staging) = regmap.staging {
+            staging
+        } else {
+            // .… or directly to the target buffer if we have no staging.
+            regmap.texture
+        };
+
+        // eprintln!("!!! Copying {:?}: to {:?}", idx, target_texture);
+
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyBufferToTexture {
             source_buffer: regmap.buffer,
             source_layout: regmap.buffer_layout,
             offset: (0, 0),
             size,
-            target_texture: regmap.texture,
+            target_texture,
         })?;
         // eprintln!("buf{:?} -> tex{:?} ({:?})", regmap.buffer, regmap.texture, size);
 
@@ -1246,33 +1471,113 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// Note that this may be a no-op for buffers that need no staging buffer, i.e. where
     /// quantization happens as part of the pipeline.
     fn copy_staging_to_texture(&mut self, idx: Texture) -> Result<(), LaunchError> {
-        if let Some(_) = self.staging_map.get(&idx) {
-            todo!()
-        } else {
-            Ok(())
+        if let Some(staging) = self.staging_map.get(&idx) {
+            // eprintln!("{} {:?}", idx.0, staging);
+            // Try to use the cached version of this pipeline.
+            let pipeline = if let Some(pipeline) = self.staged_to_pipelines.get(&idx) {
+                pipeline.clone()
+            } else {
+                let fn_ = Function::ToLinearOpto {
+                    parameter: staging.parameter,
+                    stage_kind: staging.stage_kind,
+                };
+
+                self.prepare_render(idx, &fn_, idx)?
+            };
+
+            let dst_view = self.texture_view(idx)?;
+            let attachment = ColorAttachmentDescriptor {
+                texture_view: dst_view,
+                ops: wgpu::Operations {
+                    // TODO: we could let choose a replacement color..
+                    load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
+                    store: true,
+                },
+            };
+
+            self.push(Low::BeginCommands)?;
+            self.push(Low::BeginRenderPass(RenderPassDescriptor {
+                color_attachments: vec![attachment],
+                depth_stencil: None,
+            }))?;
+            self.render(pipeline)?;
+            self.push(Low::EndRenderPass)?;
+            self.push(Low::EndCommands)?;
+
+            self.push(Low::RunTopCommand)?;
         }
+
+        Ok(())
     }
 
     /// Quantize the texture to the staging buffer.
     /// May be a no-op, see reverse operation.
     fn copy_texture_to_staging(&mut self, idx: Texture) -> Result<(), LaunchError> {
-        if let Some(_) = self.staging_map.get(&idx) {
-            todo!()
-        } else {
-            Ok(())
+        if let Some(staging) = self.staging_map.get(&idx) {
+            let texture = staging.temporary_attachment_buffer_for_encoding_remove_if_possible;
+
+            // eprintln!("{} {:?}", idx.0, staging);
+            // Try to use the cached version of this pipeline.
+            let pipeline = if let Some(pipeline) = self.staged_from_pipelines.get(&idx) {
+                pipeline.clone()
+            } else {
+                let fn_ = Function::FromLinearOpto {
+                    parameter: staging.parameter,
+                    stage_kind: staging.stage_kind,
+                };
+
+                self.prepare_render(idx, &fn_, idx)?
+            };
+
+            let dst_view = {
+                let descriptor = TextureViewDescriptor { texture };
+
+                let id = self.texture_views;
+                self.push(Low::TextureView(descriptor))?;
+                self.texture_views += 1;
+                id
+            };
+
+            let attachment = ColorAttachmentDescriptor {
+                texture_view: dst_view,
+                ops: wgpu::Operations {
+                    // TODO: we could let choose a replacement color..
+                    load: wgpu::LoadOp::Clear(wgpu::Color::RED),
+                    store: false,
+                },
+            };
+
+            self.push(Low::BeginCommands)?;
+            self.push(Low::BeginRenderPass(RenderPassDescriptor {
+                color_attachments: vec![attachment],
+                depth_stencil: None,
+            }))?;
+            self.render(pipeline)?;
+            self.push(Low::EndRenderPass)?;
+            self.push(Low::EndCommands)?;
+
+            self.push(Low::RunTopCommand)?;
         }
+
+        Ok(())
     }
 
     /// Copy from texture to the memory buffer.
     fn copy_staging_to_buffer(&mut self, idx: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
-        let descriptor = &self.buffer_plan.texture[regmap.texture.0];
-        let size = descriptor.size();
-        // eprintln!("tex{:?} -> buf{:?} ({:?})", regmap.texture, regmap.buffer, size);
+        let size = self.buffer_plan.get_info(idx)?.descriptor.size();
+
+        let source_texture = if let Some(staging) = regmap.staging {
+            staging
+        } else {
+            regmap.texture
+        };
+
+        // eprintln!("!!! Copying {:?}: from {:?}", idx, source_texture);
 
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyTextureToBuffer {
-            source_texture: regmap.texture,
+            source_texture,
             offset: (0, 0),
             size,
             target_buffer: regmap.buffer,
@@ -1289,9 +1594,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn copy_buffer_to_output(&mut self, idx: Register, dst: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
         let target_image = self.ingest_image_data(dst)?;
-        let descriptor = &self.buffer_plan.texture[regmap.texture.0];
 
-        let size = descriptor.size();
+        let size = self.buffer_plan.get_info(idx)?.descriptor.size();
         let sizeu64 = regmap.buffer_layout.u64_len();
 
         let source_buffer = regmap.map_read.unwrap_or(regmap.buffer);
@@ -1326,13 +1630,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             .get(&dst)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
             .device;
-        // eprintln!("tex{:?} == tex{:?}", dst, texture);
 
         let descriptor = TextureViewDescriptor { texture };
 
         self.instructions.extend_one(Low::TextureView(descriptor));
         let id = self.texture_views;
         self.texture_views += 1;
+
+        // eprintln!("Texture {:?} (Device {:?}) in View {:?}", dst, texture, id);
 
         Ok(id)
     }
@@ -1385,7 +1690,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
-    fn make_paint_group(&mut self) -> usize {
+    fn make_paint_group_layout(&mut self) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
         *self.paint_group_layout.get_or_insert_with(|| {
@@ -1420,9 +1725,89 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
+    fn make_stage_group(&mut self, binding: u32) -> usize {
+        use shaders::stage::StageKind;
+        let bind_group_layouts = &mut self.bind_group_layouts;
+        let instructions = &mut self.instructions;
+
+        // For encoding we have two extra bindings, sampler and in_texture.
+        let encode: bool = binding > StageKind::ALL.len() as u32;
+
+        *self.stage_group_layout.entry(binding).or_insert_with(|| {
+            let mut entries = vec![];
+            for (num, kind) in StageKind::ALL.iter().enumerate() {
+                let i = num as u32;
+                if i != binding {
+                    continue;
+                }
+
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: i,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::ReadOnly,
+                        format: kind.texture_format(),
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                });
+            }
+
+            for (num, kind) in StageKind::ALL.iter().enumerate() {
+                let i = num as u32 + 16;
+                if i != binding {
+                    continue;
+                }
+
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: i,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: kind.texture_format(),
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                });
+            }
+
+            if encode {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 32,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                });
+
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 33,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler {
+                        filtering: true,
+                        comparison: false,
+                    },
+                    count: None,
+                });
+            }
+
+            let descriptor = BindGroupLayoutDescriptor { entries };
+            instructions.extend_one(Low::BindGroupLayout(descriptor));
+            let descriptor_id = *bind_group_layouts;
+            *bind_group_layouts += 1;
+            descriptor_id
+        })
+    }
+
     fn make_paint_layout(&mut self, desc: &SimpleRenderPipelineDescriptor) -> usize {
         let quad_bind_group = self.make_quad_bind_group();
-        let paint_bind_group = self.make_paint_group();
+        let paint_bind_group = match desc.fragment_texture {
+            TextureBind::Texture(_) => self.make_paint_group_layout(),
+            TextureBind::PreComputedGroup { layout, .. } => layout,
+        };
 
         let mut bind_group_layouts = vec![quad_bind_group, paint_bind_group];
 
@@ -1527,9 +1912,19 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn simple_render_pipeline(
         &mut self,
         desc: &SimpleRenderPipelineDescriptor,
-        format: wgpu::TextureFormat,
     ) -> Result<usize, LaunchError> {
         let layout = self.make_paint_layout(desc);
+        let format = match desc.pipeline_target {
+            PipelineTarget::Texture(texture) => {
+                let format = self.texture_map[&texture].format.format;
+                // eprintln!("Target texture {:?} with format {:?}", texture, format);
+                format
+            }
+            PipelineTarget::PreComputedGroup { target_format } => {
+                // eprintln!("Target attachment with format {:?}", target_format);
+                target_format
+            }
+        };
 
         let (vertex, vertex_entry_point) = match desc.vertex {
             ShaderBind::ShaderMain(shader) => (shader, "main"),
@@ -1564,13 +1959,13 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(pipeline)
     }
 
-    fn make_bind_group_sampled_texture(&mut self, texture: Texture) -> Result<usize, LaunchError> {
-        let view = self.texture_view(texture)?;
-
-        let sampler = {
-            let instructions = &mut self.instructions;
-            let sampler = &mut self.sampler;
-            *self.default_sampler.get_or_insert_with(|| {
+    fn make_sampler(&mut self, descriptor: SamplerDescriptor) -> usize {
+        let instructions = &mut self.instructions;
+        let sampler = &mut self.sampler;
+        *self
+            .known_samplers
+            .entry(descriptor)
+            .or_insert_with_key(|desc| {
                 let sampler_id = *sampler;
                 instructions.extend_one(Low::Sampler(SamplerDescriptor {
                     address_mode: wgpu::AddressMode::default(),
@@ -1580,15 +1975,79 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 *sampler += 1;
                 sampler_id
             })
-        };
+    }
+
+    fn make_bind_group_sampled_texture(&mut self, texture: Texture) -> Result<usize, LaunchError> {
+        let view = self.texture_view(texture)?;
+
+        let sampler = self.make_sampler(SamplerDescriptor {
+            address_mode: wgpu::AddressMode::default(),
+            border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+            resize_filter: wgpu::FilterMode::Nearest,
+        });
 
         let group = self.bind_groups;
         let descriptor = BindGroupDescriptor {
-            layout_idx: self.make_paint_group(),
+            layout_idx: self.make_paint_group_layout(),
             entries: vec![
                 BindingResource::TextureView(view),
                 BindingResource::Sampler(sampler),
             ],
+            sparse: vec![],
+        };
+
+        self.push(Low::BindGroup(descriptor))?;
+        Ok(group)
+    }
+
+    fn make_opto_fragment_group(
+        &mut self,
+        binding: u32,
+        // The staging texture, whose staging texture is bound to IO-storage image.
+        texture: Texture,
+        // The non-staging texture which we bind to the sampler.
+        view: Option<Texture>,
+    ) -> Result<usize, LaunchError> {
+        let texture = self
+            .staging_map
+            .get(&texture)
+            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
+            .device;
+
+        // FIXME: could be cached.
+        let image_id = self.texture_views;
+        self.push(Low::TextureView(TextureViewDescriptor { texture }))?;
+
+        let mut sparse = vec![(binding, BindingResource::TextureView(image_id))];
+
+        // For encoding we have two extra bindings, sampler and in_texture.
+        if let Some(view) = view {
+            // FIXME: unnecessary duplication.
+            let sampler = self.make_sampler(SamplerDescriptor {
+                address_mode: wgpu::AddressMode::default(),
+                border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+                resize_filter: wgpu::FilterMode::Nearest,
+            });
+
+            let view = self
+                .texture_map
+                .get(&view)
+                .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
+                .device;
+
+            // FIXME: could be cached.
+            let view_id = self.texture_views;
+            self.push(Low::TextureView(TextureViewDescriptor { texture: view }))?;
+
+            sparse.push((32, BindingResource::TextureView(view_id)));
+            sparse.push((33, BindingResource::Sampler(sampler)));
+        }
+
+        let group = self.bind_groups;
+        let descriptor = BindGroupDescriptor {
+            layout_idx: self.make_stage_group(binding),
+            entries: vec![],
+            sparse,
         };
 
         self.push(Low::BindGroup(descriptor))?;
@@ -1621,6 +2080,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 offset: 0,
                 size: None,
             }],
+            sparse: vec![],
         };
 
         self.push(Low::BindGroup(descriptor))?;
@@ -1633,6 +2093,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         descriptor: SimpleRenderPipelineDescriptor,
     ) -> Result<SimpleRenderPipeline, LaunchError> {
         let SimpleRenderPipelineDescriptor {
+            pipeline_target: _,
             vertex_bind_data,
             fragment_texture: texture,
             fragment_bind_data,
@@ -1640,12 +2101,21 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             fragment: _,
         } = &descriptor;
 
-        let format = self.texture_map[&texture].format.format;
-
+        let pipeline = self.simple_render_pipeline(&descriptor)?;
         let buffer = self.simple_quad_buffer();
-        let pipeline = self.simple_render_pipeline(&descriptor, format)?;
 
-        let group = self.make_bind_group_sampled_texture(*texture)?;
+        let group = match texture {
+            TextureBind::Texture(texture) => {
+                let group = self.make_bind_group_sampled_texture(*texture)?;
+                // eprintln!("Using Texture {:?} as group {:?}", texture, group);
+                group
+            }
+            &TextureBind::PreComputedGroup { group, .. } => {
+                // eprintln!("Using Target Group {:?}", group);
+                group
+            }
+        };
+
         let vertex_layout = self.make_quad_bind_group();
         let vertex_bind = self.make_bound_buffer(vertex_bind_data, vertex_layout)?;
 
@@ -1725,11 +2195,19 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     #[rustfmt::skip]
-    fn prepare_render(&mut self, texture: Texture, function: &Function)
+    fn prepare_render(
+        &mut self,
+        // The texture which we are using as the fragment source.
+        texture: Texture,
+        // The function we are using.
+        function: &Function,
+        // The texture we are rendering to.
+        target: Texture,
+    )
         -> Result<SimpleRenderPipeline, LaunchError>
     {
         match function {
-            Function::PaintOnTop { selection, target, viewport, paint_on_top } => {
+            Function::PaintOnTop { selection, target: target_coords, viewport, paint_on_top } => {
                 let (tex_width, tex_height) = self.texture_map[&texture].format.size;
 
                 let vertex = self.vertex_shader(
@@ -1747,11 +2225,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let min_v = (selection.y as f32) / (tex_height.get() as f32);
                 let max_v = (selection.max_y as f32) / (tex_height.get() as f32);
 
-                let target = viewport.meet_in_local_coordinates(*target);
-                let min_a = (target.x as f32) / (viewport.width() as f32);
-                let max_a = (target.max_x as f32) / (viewport.width() as f32);
-                let min_b = (target.y as f32) / (viewport.height() as f32);
-                let max_b = (target.max_y as f32) / (viewport.height() as f32);
+                let coords = target_coords.to_screenspace_coords(viewport);
 
                 // std140, always pad to 16 bytes.
                 let buffer: [[f32; 2]; 16] = [
@@ -1760,17 +2234,18 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     [max_u, max_v], [0.0, 0.0],
                     [min_u, max_v], [0.0, 0.0],
 
-                    [min_a, min_b], [0.0, 0.0],
-                    [max_a, min_b], [0.0, 0.0],
-                    [max_a, max_b], [0.0, 0.0],
-                    [min_a, max_b], [0.0, 0.0],
+                    coords[0], [0.0, 0.0],
+                    coords[1], [0.0, 0.0],
+                    coords[2], [0.0, 0.0],
+                    coords[3], [0.0, 0.0],
                 ];
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
+                    pipeline_target: PipelineTarget::Texture(target),
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
                     },
-                    fragment_texture: texture,
+                    fragment_texture: TextureBind::Texture(texture),
                     fragment_bind_data: BufferBind::None,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
@@ -1796,10 +2271,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 ];
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
+                    pipeline_target: PipelineTarget::Texture(target),
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
-                    fragment_texture: texture,
+                    fragment_texture: TextureBind::Texture(texture),
                     fragment_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&rgb_matrix[..]),
                     },
@@ -1807,7 +2283,144 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
             },
+            Function::ToLinearOpto { parameter, stage_kind } => {
+                let vertex = self.vertex_shader(
+                    Some(VertexShader::Noop),
+                    shader_include_to_spirv(shaders::VERT_NOOP))?;
+
+                let fragment = self.fragment_shader(
+                    Some(FragmentShader::Convert),
+                    shader_include_to_spirv(stage_kind.decode_src()))?;
+
+                let buffer = parameter.serialize_std140();
+                let entry_point = stage_kind.encode_entry_point();
+
+                let layout = self.make_stage_group(stage_kind.decode_binding());
+
+                let group = self.make_opto_fragment_group(
+                    stage_kind.decode_binding(),
+                    texture,
+                    None,
+                )?;
+
+                self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
+                    pipeline_target: PipelineTarget::PreComputedGroup {
+                        target_format: parameter.linear_format(),
+                    },
+                    vertex_bind_data: BufferBind::Set {
+                        data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
+                    },
+                    fragment_texture: TextureBind::PreComputedGroup {
+                        group,
+                        layout,
+                    },
+                    fragment_bind_data: BufferBind::Set {
+                        data: bytemuck::cast_slice(&buffer[..]),
+                    },
+                    vertex: ShaderBind::ShaderMain(vertex),
+                    fragment: ShaderBind::Shader {
+                        // FIXME: for some weird reason this MUST be `main` instead of the true
+                        // entry point. This is probably a 'bug' in the pass through `shaderc` in
+                        // preprocessing.
+                        entry_point: "main",
+                        id: fragment,
+                    },
+                })
+            }
+            Function::FromLinearOpto { parameter, stage_kind } => {
+                let vertex = self.vertex_shader(
+                    Some(VertexShader::Noop),
+                    shader_include_to_spirv(shaders::VERT_NOOP))?;
+
+                let fragment = self.fragment_shader(
+                    Some(FragmentShader::Convert),
+                    shader_include_to_spirv(stage_kind.encode_src()))?;
+
+                let buffer = parameter.serialize_std140();
+                let entry_point = stage_kind.decode_entry_point();
+
+                let layout = self.make_stage_group(stage_kind.encode_binding());
+
+                let group = self.make_opto_fragment_group(
+                    stage_kind.encode_binding(),
+                    texture,
+                    Some(texture),
+                )?;
+
+                // eprintln!("{:?} {:?}", parameter, buffer);
+
+                self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
+                    pipeline_target: PipelineTarget::PreComputedGroup {
+                        target_format: parameter.linear_format(),
+                    },
+                    vertex_bind_data: BufferBind::Set {
+                        data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
+                    },
+                    fragment_texture: TextureBind::PreComputedGroup {
+                        group,
+                        layout,
+                    },
+                    fragment_bind_data: BufferBind::Set {
+                        data: bytemuck::cast_slice(&buffer[..]),
+                    },
+                    vertex: ShaderBind::ShaderMain(vertex),
+                    fragment: ShaderBind::Shader {
+                        // FIXME: for some weird reason this MUST be `main` instead of the true
+                        // entry point. This is probably a 'bug' in the pass through `shaderc` in
+                        // preprocessing.
+                        entry_point: "main",
+                        id: fragment,
+                    },
+                })
+            }
+            _ => todo!(),
         }
+    }
+}
+
+impl QuadTarget {
+    pub(crate) fn affine(&self, transform: &RowMatrix) -> Self {
+        let [a, b, c, d] = self.to_screenspace_coords(&Rectangle::with_width_height(1, 1));
+        QuadTarget::Absolute([
+            transform.multiply_point(a),
+            transform.multiply_point(b),
+            transform.multiply_point(c),
+            transform.multiply_point(d),
+        ])
+    }
+
+    pub(crate) fn to_screenspace_coords(&self, viewport: &Rectangle) -> [[f32; 2]; 4] {
+        match self {
+            QuadTarget::Rect(target) => {
+                let min_a = (target.x as f32) / (viewport.width() as f32);
+                let max_a = (target.max_x as f32) / (viewport.width() as f32);
+                let min_b = (target.y as f32) / (viewport.height() as f32);
+                let max_b = (target.max_y as f32) / (viewport.height() as f32);
+
+                [
+                    [min_a, min_b],
+                    [max_a, min_b],
+                    [max_a, max_b],
+                    [min_a, max_b],
+                ]
+            }
+            QuadTarget::Absolute(coord) => {
+                let xy = |[cx, cy]: [f32; 2]| {
+                    [
+                        (cx - viewport.x as f32) / viewport.width() as f32,
+                        (cy - viewport.y as f32) / viewport.height() as f32,
+                    ]
+                };
+
+                [xy(coord[0]), xy(coord[1]), xy(coord[2]), xy(coord[3])]
+            }
+        }
+    }
+}
+
+impl From<Rectangle> for QuadTarget {
+    fn from(target: Rectangle) -> Self {
+        QuadTarget::Rect(target)
     }
 }
 

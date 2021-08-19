@@ -2,11 +2,11 @@
 layout (location = 0) in vec2 uv;
 
 // The base texture.
-layout(binding = 0) uniform sampler2D in_texture;
+layout(set = 1, binding = 0) uniform sampler2D in_texture;
 // The one which inserts some channels.
-layout(binding = 1) uniform sampler2D inject_texture;
+layout(set = 1, binding = 1) uniform sampler2D inject_texture;
 // The parameters..
-layout (binding = 2) uniform FragmentPushConstants {
+layout (set = 1, binding = 2) uniform FragmentPushConstants {
     vec4 select;
 } u_pushConstants;
 

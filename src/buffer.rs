@@ -24,6 +24,7 @@ pub struct RowLayoutDescription {
     pub stride: u64,
 }
 
+#[derive(Clone)]
 pub struct ImageBuffer {
     inner: Canvas<BufferLayout>,
 }
@@ -49,19 +50,20 @@ pub struct Texel {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[repr(u8)]
 pub enum Block {
     /// Each texel is a single pixel.
-    Pixel,
+    Pixel = 0,
     /// Each texel refers to two pixels across width.
-    Sub1x2,
+    Sub1x2 = 1,
     /// Each texel refers to four pixels across width.
-    Sub1x4,
+    Sub1x4 = 2,
     /// Each texel refers to a two-by-two block.
-    Sub2x2,
+    Sub2x2 = 3,
     /// Each texel refers to a two-by-four block.
-    Sub2x4,
+    Sub2x4 = 4,
     /// Each texel refers to a four-by-four block.
-    Sub4x4,
+    Sub4x4 = 5,
 }
 
 /// The bit encoding of values within the texel bytes.
@@ -76,8 +78,9 @@ pub struct Samples {
 /// Describes which values are present in a texel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[repr(u16)]
 pub enum SampleParts {
-    A,
+    A = 0,
     R,
     G,
     B,
@@ -98,6 +101,7 @@ pub enum SampleParts {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[repr(u8)]
 pub enum SampleBits {
     /// A single 8-bit integer.
     Int8,
@@ -169,6 +173,7 @@ pub enum Color {
 /// describes how scene lighting is encoded as an electric signal. These are applied to each
 /// stimulus value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 #[non_exhaustive]
 pub enum Transfer {
     /// Non-linear electrical data of Bt.709
@@ -192,9 +197,11 @@ pub enum Transfer {
     Bt2100Pq,
     /// Non-linear electrical data of Bt2100 Hybrid-Log-Gamma.
     Bt2100Hlg,
-    /// Linear color in scene luminance.
-    /// This is perfect for an artistic composition pipeline.
-    LinearScene,
+    /// Linear color in scene luminance of Bt2100.
+    /// This is perfect for an artistic composition pipeline. The rest of the type system will
+    /// ensure this is not accidentally and unwittingly mixed with `Linear` but otherwise this is
+    /// treated as `Linear`. You might always transmute.
+    Bt2100Scene,
 }
 
 /// The reference brightness of the color specification.
@@ -417,6 +424,28 @@ impl Color {
         transfer: Transfer::Srgb,
         whitepoint: Whitepoint::D65,
     };
+
+    pub const BT709: Color = Color::Xyz {
+        luminance: Luminance::Sdr,
+        primary: Primaries::Bt709,
+        transfer: Transfer::Bt709,
+        whitepoint: Whitepoint::D65,
+    };
+
+    /// Check if this color space contains the sample parts.
+    ///
+    /// For example, an Xyz color is expressed in terms of a subset of Rgb while HSV color spaces
+    /// contains the Hsv parts (duh!) and CIECAM and similar spaces have a polar representation of
+    /// hue etc.
+    ///
+    /// Note that one can always combine a color space with an alpha component.
+    pub fn is_consistent(&self, parts: SampleParts) -> bool {
+        use SampleParts::*;
+        match (self, parts) {
+            (Color::Xyz { .. }, R | G | B | Rgb | Rgba | Rgbx) => true,
+            _ => false,
+        }
+    }
 }
 
 #[rustfmt::skip]
@@ -519,12 +548,32 @@ impl RowMatrix {
         RowMatrix(rows)
     }
 
+    pub(crate) fn diag(x: f32, y: f32, z: f32) -> Self {
+        RowMatrix([
+            x, 0., 0.,
+            0., y, 0.,
+            0., 0., z,
+        ])
+    }
+
     pub(crate) fn inv(self) -> RowMatrix {
         ColMatrix::from(self).inv()
     }
 
+    pub(crate) fn det(self) -> f32 {
+        ColMatrix::from(self).det()
+    }
+
+    /// Multiply with a homogeneous point.
+    /// Note: might produce NaN if the matrix isn't a valid transform and may produce infinite
+    /// points.
+    pub(crate) fn multiply_point(self, point: [f32; 2]) -> [f32; 2] {
+        let [x, y, z] = self.multiply_column([point[0], point[1], 1.0]);
+        [x / z, y / z]
+    }
+
     /// Calculate self · other
-    pub(crate) fn multiply_right(self, ColMatrix([a, b, c]): ColMatrix) -> ColMatrix {
+    pub(crate) fn multiply_column(self, col: [f32; 3]) -> [f32; 3] {
         let x = &self.0[0..3];
         let y = &self.0[3..6];
         let z = &self.0[6..9];
@@ -533,10 +582,15 @@ impl RowMatrix {
             r[0] * c[0] + r[1] * c[1] + r[2] * c[2]
         };
 
+        [dot(x, col), dot(y, col), dot(z, col)]
+    }
+
+    /// Calculate self · other
+    pub(crate) fn multiply_right(self, ColMatrix([a, b, c]): ColMatrix) -> ColMatrix {
         ColMatrix([
-            [dot(x, a), dot(y, a), dot(z, a)],
-            [dot(x, b), dot(y, b), dot(z, b)],
-            [dot(x, c), dot(y, c), dot(z, c)],
+            self.multiply_column(a),
+            self.multiply_column(b),
+            self.multiply_column(c),
         ])
     }
 

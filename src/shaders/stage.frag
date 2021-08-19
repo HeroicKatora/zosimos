@@ -1,4 +1,22 @@
 #version 450
+
+/** Hacky way because shaderc only supports `main` for the name of the entry point.
+ *
+ * Hence we rename the current entry point to `main` through a macro in the
+ * compiler options while falling back to a non-main name... This is stupid and
+ * shaderc must have been written by monkeys with type writers. Especially its
+ * documentation which doesn't mention this detail at all apart from an internal
+ * method.
+ */
+#ifndef DECODE_R8UI_AS_MAIN
+#define DECODE_R8UI_AS_MAIN decode_r8ui
+#endif
+#ifndef DECODE_R32UI_AS_MAIN
+#define DECODE_R32UI_AS_MAIN decode_r32ui
+#endif
+#ifndef ENCODE_R32UI_AS_MAIN
+#define ENCODE_R32UI_AS_MAIN encode_r32ui
+#endif
 /** This is a special shader to convert to/from color spaces and texture
  * formats that are not natively supported. This works by introducing a staging
  * texture that is in the correct byte representation of the supposed format
@@ -27,13 +45,110 @@
 layout (location = 0) in vec2 uv;
 layout (location = 0) out vec4 f_color;
 
-layout (set = 1, binding = 0) uniform texture2D in_texture;
-layout (set = 1, binding = 1) uniform sampler texture_sampler;
+/* Not all those bindings will be bound!
+ */
+layout (set = 1, binding = 0, r8ui) uniform restrict readonly uimage2D image_r8ui;
+layout (set = 1, binding = 1, r16ui) uniform restrict readonly uimage2D image_r16ui;
+layout (set = 1, binding = 2, r32ui) uniform restrict readonly uimage2D image_r32ui;
+layout (set = 1, binding = 3, rgba16ui) uniform restrict readonly uimage2D image_rgba16ui;
+layout (set = 1, binding = 4, rgba32ui) uniform restrict readonly uimage2D image_rgba32ui;
+
+/* Output images. Same as input but writeonly instead.
+ */
+layout (set = 1, binding = 16, r8ui) uniform restrict writeonly uimage2D oimage_r8ui;
+layout (set = 1, binding = 17, r16ui) uniform restrict writeonly uimage2D oimage_r16ui;
+layout (set = 1, binding = 18, r32ui) uniform restrict writeonly uimage2D oimage_r32ui;
+layout (set = 1, binding = 19, rgba16ui) uniform restrict writeonly uimage2D oimage_rgba16ui;
+layout (set = 1, binding = 20, rgba32ui) uniform restrict writeonly uimage2D oimage_rgba32ui;
+
+/** For encoding, this is the input frame buffer.
+ */
+layout (set = 1, binding = 32) uniform texture2D in_texture;
+layout (set = 1, binding = 33) uniform sampler texture_sampler;
+
+layout (set = 2, binding = 0, std140) uniform Parameter {
+  uvec4 space;
+} parameter;
+
+// FIXME: this could and should be an auto-generated header with cbindgen
+
+const uint TRANSFER_Bt709 = 0;
+const uint TRANSFER_Bt470M = 1;
+const uint TRANSFER_Bt601 = 2;
+const uint TRANSFER_Smpte240 = 3;
+const uint TRANSFER_Linear = 4;
+const uint TRANSFER_Srgb = 5;
+const uint TRANSFER_Bt2020_10bit = 6;
+const uint TRANSFER_Bt2020_12bit = 7;
+const uint TRANSFER_Smpte2084 = 8;
+const uint TRANSFER_Bt2100Pq = 9;
+const uint TRANSFER_Bt2100Hlg = 10;
+const uint TRANSFER_LinearScene = 11;
+
+uint get_transfer() {
+  return parameter.space.x;
+}
+
+const uint SAMPLE_PARTS_A = 0;
+const uint SAMPLE_PARTS_R = 1;
+const uint SAMPLE_PARTS_G = 2;
+const uint SAMPLE_PARTS_B = 3;
+const uint SAMPLE_PARTS_Luma = 4;
+const uint SAMPLE_PARTS_LumaA = 5;
+const uint SAMPLE_PARTS_Rgb = 6;
+const uint SAMPLE_PARTS_Bgr = 7;
+const uint SAMPLE_PARTS_Rgba = 8;
+const uint SAMPLE_PARTS_Rgbx = 9;
+const uint SAMPLE_PARTS_Bgra = 10;
+const uint SAMPLE_PARTS_Bgrx = 11;
+const uint SAMPLE_PARTS_Argb = 12;
+const uint SAMPLE_PARTS_Xrgb = 13;
+const uint SAMPLE_PARTS_Abgr = 14;
+const uint SAMPLE_PARTS_Xbgr = 15;
+const uint SAMPLE_PARTS_Yuv = 16;
+
+uint get_sample_parts() {
+  return parameter.space.y;
+}
+
+const uint SAMPLE_BITS_Int8 = 0;
+const uint SAMPLE_BITS_Int332 = 1;
+const uint SAMPLE_BITS_Int233 = 2;
+const uint SAMPLE_BITS_Int16 = 3;
+const uint SAMPLE_BITS_Int4x4 = 4;
+const uint SAMPLE_BITS_Inti444 = 5;
+const uint SAMPLE_BITS_Int444i = 6;
+const uint SAMPLE_BITS_Int565 = 7;
+const uint SAMPLE_BITS_Int8x2 = 8;
+const uint SAMPLE_BITS_Int8x3 = 9;
+const uint SAMPLE_BITS_Int8x4 = 10;
+const uint SAMPLE_BITS_Int16x2 = 11;
+const uint SAMPLE_BITS_Int16x3 = 12;
+const uint SAMPLE_BITS_Int16x4 = 13;
+const uint SAMPLE_BITS_Int1010102 = 14;
+const uint SAMPLE_BITS_Int2101010 = 15;
+const uint SAMPLE_BITS_Int101010i = 16;
+const uint SAMPLE_BITS_Inti101010 = 17;
+const uint SAMPLE_BITS_Float16x4 = 18;
+const uint SAMPLE_BITS_Float32x4 = 19;
+
+uint get_sample_bits() {
+  return parameter.space.z;
+}
 
 /** Forward declarations.
  *
- * For all signals in these functions we assume normalized values.
+ * For all signals in transfer functions we assume normalized values.
  */
+
+vec4 demux_uint(uint, uint kind);
+uint mux_uint(vec4, uint kind);
+
+vec4 parts_normalize(vec4, uint);
+vec4 parts_denormalize(vec4, uint);
+
+vec4 parts_transfer(vec4, uint);
+vec4 parts_untransfer(vec4, uint);
 
 float transfer_oe_bt709(float val);
 float transfer_eo_bt709(float val);
@@ -197,4 +312,210 @@ vec3 transfer_scene_display_bt2100hlg(vec3 rgb) {
   return vec3(0.0);
 }
 
-void main() {}
+/** All decode methods work in several stages:
+ *
+ * 1. Demux the bit-encoded components into a vector.
+ * 2. Reorder the components into a normalized form for the color type.
+ * 3. Apply transfer function (and primary transform such as YUV).
+ * 4. We now hold a vector of floating point linear color encoding, write it.
+ *
+ * The encoding works the other way around. Note that there are some invalid
+ * combinations (Bits::Int332 and Parts::A for example) and it is expected that
+ * the calling layer handles those.
+ */
+
+void DECODE_R8UI_AS_MAIN() {
+  uint num = imageLoad(image_r8ui, ivec2(gl_FragCoord)).x;
+  vec4 components = demux_uint(num, get_sample_bits());
+
+  // FIXME: YUV transform and accurate YUV transform.
+  vec4 electrical = parts_normalize(components, get_sample_parts());
+  vec4 primaries = parts_untransfer(electrical, get_transfer());
+
+  f_color = primaries;
+}
+
+void encode_r8ui() {
+}
+
+void DECODE_R32UI_AS_MAIN() {
+  uint num = imageLoad(image_r32ui, ivec2(gl_FragCoord)).x;
+  vec4 components = demux_uint(num, get_sample_bits());
+
+  // FIXME: YUV transform and accurate YUV transform.
+  vec4 electrical = parts_normalize(components, get_sample_parts());
+  vec4 primaries = parts_untransfer(electrical, get_transfer());
+
+  f_color = primaries;
+}
+
+void ENCODE_R32UI_AS_MAIN() {
+  vec4 primaries = texture(sampler2D(in_texture, texture_sampler), uv).rgba;
+
+  vec4 electrical = parts_transfer(primaries, get_transfer());
+  // FIXME: YUV transform and accurate YUV transform.
+  vec4 components = parts_denormalize(electrical, get_sample_parts());
+
+  uint num = mux_uint(components, get_sample_bits());
+  imageStore(oimage_r32ui, ivec2(gl_FragCoord), uvec4(num));
+}
+
+vec4 demux_uint(uint num, uint kind) {
+  switch (kind) {
+  case SAMPLE_BITS_Int8:
+    return vec4(num) / 255.;
+  // FIXME: rescale.
+  case SAMPLE_BITS_Int332:
+    return vec4(num & 0x3, (num >> 2) & 0xf, num >> 5, 1.0);
+  case SAMPLE_BITS_Int233:
+    return vec4(num & 0xf, (num >> 3) & 0xf, num >> 6, 1.0);
+  case SAMPLE_BITS_Int8x3:
+    return vec4(num & 0xff, (num >> 8) & 0xff, (num >> 16) & 0xff, 255.0) / 255.;
+  case SAMPLE_BITS_Int8x4:
+    return vec4(num & 0xff, (num >> 8) & 0xff, (num >> 16) & 0xff, num >> 24) / 255.;
+  // FIXME: other bits.
+  }
+}
+
+uint mux_uint(vec4 c, uint kind) {
+  switch (kind) {
+  case SAMPLE_BITS_Int8:
+    return uint(c.x * 255.);
+  case SAMPLE_BITS_Int8x3:
+    return uint(c.x * 255.)
+      + (uint(c.y * 255.) << 8)
+      + (uint(c.z * 255.) << 16);
+  case SAMPLE_BITS_Int8x4:
+    return uint(c.x * 255.)
+      + (uint(c.y * 255.) << 8)
+      + (uint(c.z * 255.) << 16)
+      + (uint(c.w * 255.) << 24);
+  // FIXME: other bits.
+  }
+}
+
+vec4 parts_normalize(vec4 components, uint parts) {
+  switch (parts) {
+  case SAMPLE_PARTS_A:
+    return vec4(0.0, 0.0, 0.0, components.x);
+  case SAMPLE_PARTS_R:
+    return vec4(components.x, 0.0, 0.0, 1.0);
+  case SAMPLE_PARTS_G:
+    return vec4(0.0, components.x, 0.0, 1.0);
+  case SAMPLE_PARTS_B:
+    return vec4(0.0, 0.0, components.x, 1.0);
+  case SAMPLE_PARTS_Luma:
+    return vec4(vec3(components.x), 1.0);
+  case SAMPLE_PARTS_LumaA:
+    return vec4(vec3(components.x), 1.0);
+  case SAMPLE_PARTS_Rgb:
+  case SAMPLE_PARTS_Rgbx:
+    return vec4(components.xyz, 1.0);
+  case SAMPLE_PARTS_Bgr:
+  case SAMPLE_PARTS_Bgrx:
+    return vec4(components.zyx, 1.0);
+  case SAMPLE_PARTS_Rgba:
+    return components.xyzw;
+  case SAMPLE_PARTS_Bgra:
+    return components.xyzw;
+  case SAMPLE_PARTS_Argb:
+    return components.yzwx;
+  case SAMPLE_PARTS_Abgr:
+    return components.wzyx;
+  case SAMPLE_PARTS_Xrgb:
+    return vec4(components.yzw, 1.0);
+  case SAMPLE_PARTS_Xbgr:
+    return vec4(components.wzy, 1.0);
+  }
+}
+
+vec4 parts_denormalize(vec4 components, uint parts) {
+  switch (parts) {
+  case SAMPLE_PARTS_Rgba:
+    return components.xyzw;
+  /*
+  case SAMPLE_PARTS_A:
+    return vec4(0.0, 0.0, 0.0, components.x);
+  case SAMPLE_PARTS_R:
+    return vec4(components.x, 0.0, 0.0, 1.0);
+  case SAMPLE_PARTS_G:
+    return vec4(0.0, components.x, 0.0, 1.0);
+  case SAMPLE_PARTS_B:
+    return vec4(0.0, 0.0, components.x, 1.0);
+  case SAMPLE_PARTS_Luma:
+    return vec4(vec3(components.x), 1.0);
+  case SAMPLE_PARTS_LumaA:
+    return vec4(vec3(components.x), 1.0);
+  case SAMPLE_PARTS_Rgb:
+  case SAMPLE_PARTS_Rgbx:
+    return vec4(components.xyz, 1.0);
+  case SAMPLE_PARTS_Bgr:
+  case SAMPLE_PARTS_Bgrx:
+    return vec4(components.zyx, 1.0);
+  case SAMPLE_PARTS_Bgra:
+    return components.xyzw;
+  case SAMPLE_PARTS_Argb:
+    return components.yzwx;
+  case SAMPLE_PARTS_Abgr:
+    return components.wzyx;
+  case SAMPLE_PARTS_Xrgb:
+    return vec4(components.yzw, 1.0);
+  case SAMPLE_PARTS_Xbgr:
+    return vec4(components.wzy, 1.0);
+  */
+  }
+}
+
+vec4 parts_transfer(vec4 optical, uint fnk) {
+#define TRANSFER_WITH_XYZ(E, FN) vec4(FN(E.x), FN(E.y), FN(E.z), E.a)
+  switch (fnk) {
+  case TRANSFER_Bt709:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt709);
+  case TRANSFER_Bt470M:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt470m);
+  case TRANSFER_Bt601:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt601);
+  case TRANSFER_Smpte240:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_smpte240);
+  case TRANSFER_Linear:
+  return optical;
+  case TRANSFER_Srgb:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_srgb);
+  case TRANSFER_Bt2020_10bit:
+  case TRANSFER_Bt2020_12bit:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt2020_10b);
+  case TRANSFER_Smpte2084:
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_smpte2084);
+  return TRANSFER_WITH_XYZ(optical, transfer_oe_smpte2084);
+  case TRANSFER_Bt2100Hlg:
+  // FIXME: unimplemented.
+  return optical;
+  }
+}
+
+vec4 parts_untransfer(vec4 electrical, uint fnk) {
+#define TRANSFER_WITH_XYZ(E, FN) vec4(FN(E.x), FN(E.y), FN(E.z), E.a)
+  switch (fnk) {
+  case TRANSFER_Bt709:
+  return TRANSFER_WITH_XYZ(electrical, transfer_eo_bt709);
+  case TRANSFER_Bt470M:
+  return TRANSFER_WITH_XYZ(electrical, transfer_eo_bt470m);
+  case TRANSFER_Bt601:
+  return TRANSFER_WITH_XYZ(electrical, transfer_eo_bt601);
+  case TRANSFER_Smpte240:
+  return TRANSFER_WITH_XYZ(electrical, transfer_eo_smpte240);
+  case TRANSFER_Linear:
+  return electrical;
+  case TRANSFER_Srgb:
+  return TRANSFER_WITH_XYZ(electrical, transfer_eo_srgb);
+  case TRANSFER_Bt2020_10bit:
+  case TRANSFER_Bt2020_12bit:
+  return TRANSFER_WITH_XYZ(electrical, transfer_eo_bt2020_10b);
+  case TRANSFER_Smpte2084:
+  return TRANSFER_WITH_XYZ(electrical, transfer_eo_smpte2084);
+  return TRANSFER_WITH_XYZ(electrical, transfer_eo_smpte2084);
+  case TRANSFER_Bt2100Hlg:
+  // FIXME: unimplemented.
+  return electrical;
+  }
+}

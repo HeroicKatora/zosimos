@@ -22,18 +22,6 @@ jobs:
     - name: build
       run: >
         cargo build --verbose
-  test:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        target: x86_64-unknown-linux-gnu
-    - run: sudo apt-get update
-    - run: sudo apt-get install -y libglu1-mesa-dev freeglut3-dev mesa-common-dev
-    - name: test
-      run: cargo test --release
 
   rustfmt:
     runs-on: ubuntu-latest

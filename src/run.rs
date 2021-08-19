@@ -41,23 +41,6 @@ pub(crate) struct Gpu {
     pub(crate) queue: Queue,
 }
 
-/// One fragment shader execution with pipeline:
-/// FS:
-///   in: vec2 uv
-///   region: vec4 (parameter)
-///   bind: sampler2D
-///   out: vec4 (color)
-pub(crate) struct PaintRectFragment {
-    /// The 'selected' region relative to which uv is to be interpreted.
-    region: Rectangle,
-    /// The index of the sampler which we should bind to `bind`.
-    region_sampler_id: usize,
-    /// The target region we want to paint.
-    target: Rectangle,
-    /// The shader to compile for this.
-    fragment_shader: &'static [u8],
-}
-
 type DynStep = dyn core::future::Future<Output = Result<Cleanup, StepError>>;
 
 struct DevicePolled<'exe> {
@@ -132,12 +115,16 @@ impl Execution {
 
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
         let instruction_pointer = self.machine.instruction_pointer;
-        eprintln!(
+
+        /*
+        // eprintln!(
             "{:?}",
             self.machine
                 .instructions
                 .get(self.machine.instruction_pointer)
         );
+        */
+
         match self.step_inner() {
             Ok(sync) => Ok(sync),
             Err(mut error) => {
@@ -155,6 +142,7 @@ impl Execution {
                 let group = self
                     .descriptors
                     .bind_group_layout(desc, &mut entry_buffer)?;
+                // eprintln!("{:?}", group);
                 let group = self.gpu.device.create_bind_group_layout(&group);
                 self.descriptors.bind_group_layouts.push(group);
                 Ok(SyncPoint::NO_SYNC)
@@ -263,9 +251,11 @@ impl Execution {
                     usage: match desc.usage {
                         program::TextureUsage::DataIn => U::COPY_DST | U::SAMPLED,
                         program::TextureUsage::DataOut => U::COPY_SRC | U::RENDER_ATTACHMENT,
-                        program::TextureUsage::Storage => {
+                        program::TextureUsage::Attachment => {
                             U::COPY_SRC | U::COPY_DST | U::SAMPLED | U::RENDER_ATTACHMENT
                         }
+                        program::TextureUsage::Staging => U::COPY_SRC | U::COPY_DST | U::STORAGE,
+                        program::TextureUsage::Transient => U::SAMPLED | U::RENDER_ATTACHMENT,
                     },
                 };
                 let texture = self.gpu.device.create_texture(&desc);
@@ -468,6 +458,13 @@ impl Execution {
                     depth_or_array_layers: 1,
                 };
 
+                // eprintln!("Source: {:?}", source_buffer);
+                // eprintln!("Target: {:?}", target_texture);
+
+                // eprintln!("{:?}", buffer);
+                // eprintln!("{:?}", texture);
+                // eprintln!("{:?}", extent);
+
                 encoder.copy_buffer_to_texture(buffer, texture, extent);
 
                 Ok(SyncPoint::NO_SYNC)
@@ -631,6 +628,14 @@ impl Descriptors {
             });
         }
 
+        for &(idx, ref entry) in desc.sparse.iter() {
+            let resource = self.binding_resource(entry)?;
+            buf.push(wgpu::BindGroupEntry {
+                binding: idx as u32,
+                resource,
+            });
+        }
+
         Ok(wgpu::BindGroupDescriptor {
             label: None,
             layout: self
@@ -710,6 +715,7 @@ impl Descriptors {
         &self,
         desc: &program::ColorAttachmentDescriptor,
     ) -> Result<wgpu::RenderPassColorAttachment<'_>, StepError> {
+        // eprintln!("Attaching {:?}", desc);
         Ok(wgpu::RenderPassColorAttachment {
             view: self
                 .texture_views
