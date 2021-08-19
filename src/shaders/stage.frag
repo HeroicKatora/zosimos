@@ -12,10 +12,10 @@
 #define DECODE_R8UI_AS_MAIN decode_r8ui
 #endif
 #ifndef DECODE_R32UI_AS_MAIN
-#define DECODE_R32UI_AS_MAIN encode_r32ui
+#define DECODE_R32UI_AS_MAIN decode_r32ui
 #endif
 #ifndef ENCODE_R32UI_AS_MAIN
-#define ENCODE_R32UI_AS_MAIN decode_r32ui
+#define ENCODE_R32UI_AS_MAIN encode_r32ui
 #endif
 /** This is a special shader to convert to/from color spaces and texture
  * formats that are not natively supported. This works by introducing a staging
@@ -370,9 +370,9 @@ vec4 demux_uint(uint num, uint kind) {
   case SAMPLE_BITS_Int233:
     return vec4(num & 0xf, (num >> 3) & 0xf, num >> 6, 1.0);
   case SAMPLE_BITS_Int8x3:
-    return vec4(num & 0xf, (num >> 8) & 0xf, num >> 16, 255.0) / 255.;
+    return vec4(num & 0xff, (num >> 8) & 0xff, (num >> 16) & 0xff, 255.0) / 255.;
   case SAMPLE_BITS_Int8x4:
-    return vec4(num & 0xf, (num >> 8) & 0xf, (num >> 16) & 0xf, num >> 24) / 255.;
+    return vec4(num & 0xff, (num >> 8) & 0xff, (num >> 16) & 0xff, num >> 24) / 255.;
   // FIXME: other bits.
   }
 }
