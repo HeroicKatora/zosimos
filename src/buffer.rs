@@ -442,10 +442,7 @@ impl Color {
     pub fn is_consistent(&self, parts: SampleParts) -> bool {
         use SampleParts::*;
         match (self, parts) {
-            (
-                Color::Xyz { .. }, 
-                R | G | B | Rgb | Rgba | Rgbx
-            ) => true,
+            (Color::Xyz { .. }, R | G | B | Rgb | Rgba | Rgbx) => true,
             _ => false,
         }
     }

@@ -1,6 +1,4 @@
-use crate::buffer::{
-    BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint,
-};
+use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint};
 use crate::pool::PoolImage;
 use crate::program::{
     CompileError, Function, ImageBufferAssignment, ImageBufferPlan, PaintOnTopKind, Program,
@@ -344,11 +342,13 @@ impl CommandBuffer {
             (
                 Color::Xyz {
                     primary: primary_src,
-                    whitepoint: wp_src, ..
+                    whitepoint: wp_src,
+                    ..
                 },
                 Color::Xyz {
                     primary: primary_dst,
-                    whitepoint: wp_dst, ..
+                    whitepoint: wp_dst,
+                    ..
                 },
             ) if wp_src == wp_dst => {
                 conversion = ColorConversion {
@@ -747,7 +747,6 @@ impl CommandBuffer {
                             // light representation are used in a single paint call but this
                             // violates it on purpose.
 
-
                             // FIXME: using a copy here but this means we do this in unnecessarily
                             // many steps. We first decode to linear color, then draw, then code
                             // back to the non-linear electrical space.
@@ -760,7 +759,7 @@ impl CommandBuffer {
                                     matrix: color.into_matrix(),
                                 },
                             });
-                        },
+                        }
                         _ => return Err(CompileError::NotYetImplemented),
                     }
 

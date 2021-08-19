@@ -278,7 +278,6 @@ struct StagingTexture {
     /// (op:write is disabled for that draw call).
     /// FIXME: find a way to avoid this texture allocation.
     temporary_attachment_buffer_for_encoding_remove_if_possible: DeviceTexture,
-
 }
 
 /// The gpu buffer associated with an image buffer.
@@ -689,9 +688,7 @@ struct SimpleRenderPipelineDescriptor<'data> {
 
 enum PipelineTarget {
     Texture(Texture),
-    PreComputedGroup {
-        target_format: wgpu::TextureFormat,
-    }
+    PreComputedGroup { target_format: wgpu::TextureFormat },
 }
 
 enum TextureBind {
@@ -756,9 +753,10 @@ impl ImageBufferPlan {
             .map(ImageBufferAssignment::clone)
     }
 
-    pub(crate) fn get_info(&self, idx: Register)
-        -> Result<ImageBufferDescriptors<'_>, LaunchError>
-    {
+    pub(crate) fn get_info(
+        &self,
+        idx: Register,
+    ) -> Result<ImageBufferDescriptors<'_>, LaunchError> {
         let assigned = self.get(idx)?;
         Ok(self.describe(&assigned))
     }
@@ -1197,7 +1195,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Texel {
                 block: Block::Pixel,
                 samples,
-                color: Color::Xyz { transfer, ..  },
+                color: Color::Xyz { transfer, .. },
             } => {
                 let parameter = shaders::stage::XyzParameter {
                     transfer,
@@ -1206,7 +1204,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 };
 
                 let result = parameter.linear_format();
-                let stage_kind = parameter.stage_kind()
+                let stage_kind = parameter
+                    .stage_kind()
                     // Unsupported format.
                     .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
@@ -1216,7 +1215,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 });
 
                 result
-            },
+            }
             _ => return Err(LaunchError::InternalCommandError(line!())),
         };
 
@@ -1350,7 +1349,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         );
 
         if let Some(staging) = staging_format {
-            let st_parameter = staged.staging
+            let st_parameter = staged
+                .staging
                 .as_ref()
                 .expect("Have a format for staging texture when we have staging texture");
 
@@ -1367,11 +1367,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 self.push(Low::Texture(TextureDescriptor {
                     usage: TextureUsage::Transient,
                     size: staging.size,
-                    .. texture_format
+                    ..texture_format
                 }))?;
                 DeviceTexture(texture)
             };
-
 
             // eprintln!("{} {:?}", reg_texture.0, staging);
             self.staging_map.insert(
@@ -1531,9 +1530,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             };
 
             let dst_view = {
-                let descriptor = TextureViewDescriptor {
-                    texture,
-                };
+                let descriptor = TextureViewDescriptor { texture };
 
                 let id = self.texture_views;
                 self.push(Low::TextureView(descriptor))?;
@@ -1736,75 +1733,73 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // For encoding we have two extra bindings, sampler and in_texture.
         let encode: bool = binding > StageKind::ALL.len() as u32;
 
-        *self.stage_group_layout
-            .entry(binding)
-            .or_insert_with(|| {
-                let mut entries = vec![];
-                for (num, kind) in StageKind::ALL.iter().enumerate() {
-                    let i = num as u32;
-                    if i != binding {
-                        continue;
-                    }
-
-                    entries.push(wgpu::BindGroupLayoutEntry {
-                        binding: i,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
-                        ty: wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::ReadOnly,
-                            format: kind.texture_format(),
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
-                    });
+        *self.stage_group_layout.entry(binding).or_insert_with(|| {
+            let mut entries = vec![];
+            for (num, kind) in StageKind::ALL.iter().enumerate() {
+                let i = num as u32;
+                if i != binding {
+                    continue;
                 }
 
-                for (num, kind) in StageKind::ALL.iter().enumerate() {
-                    let i = num as u32 + 16;
-                    if i != binding {
-                        continue;
-                    }
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: i,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::ReadOnly,
+                        format: kind.texture_format(),
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                });
+            }
 
-                    entries.push(wgpu::BindGroupLayoutEntry {
-                        binding: i,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
-                        ty: wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::WriteOnly,
-                            format: kind.texture_format(),
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
-                    });
+            for (num, kind) in StageKind::ALL.iter().enumerate() {
+                let i = num as u32 + 16;
+                if i != binding {
+                    continue;
                 }
 
-                if encode {
-                    entries.push(wgpu::BindGroupLayoutEntry {
-                        binding: 32,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
-                    });
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: i,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: kind.texture_format(),
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                });
+            }
 
-                    entries.push(wgpu::BindGroupLayoutEntry {
-                        binding: 33,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler {
-                            filtering: true,
-                            comparison: false,
-                        },
-                        count: None,
-                    });
-                }
+            if encode {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 32,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                });
 
-                let descriptor = BindGroupLayoutDescriptor { entries };
-                instructions.extend_one(Low::BindGroupLayout(descriptor));
-                let descriptor_id = *bind_group_layouts;
-                *bind_group_layouts += 1;
-                descriptor_id
-            })
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 33,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler {
+                        filtering: true,
+                        comparison: false,
+                    },
+                    count: None,
+                });
+            }
+
+            let descriptor = BindGroupLayoutDescriptor { entries };
+            instructions.extend_one(Low::BindGroupLayout(descriptor));
+            let descriptor_id = *bind_group_layouts;
+            *bind_group_layouts += 1;
+            descriptor_id
+        })
     }
 
     fn make_paint_layout(&mut self, desc: &SimpleRenderPipelineDescriptor) -> usize {
@@ -1924,7 +1919,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let format = self.texture_map[&texture].format.format;
                 // eprintln!("Target texture {:?} with format {:?}", texture, format);
                 format
-            },
+            }
             PipelineTarget::PreComputedGroup { target_format } => {
                 // eprintln!("Target attachment with format {:?}", target_format);
                 target_format
@@ -2013,20 +2008,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // The non-staging texture which we bind to the sampler.
         view: Option<Texture>,
     ) -> Result<usize, LaunchError> {
-        let texture = self.staging_map
+        let texture = self
+            .staging_map
             .get(&texture)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
             .device;
 
         // FIXME: could be cached.
         let image_id = self.texture_views;
-        self.push(Low::TextureView(TextureViewDescriptor {
-            texture,
-        }))?;
+        self.push(Low::TextureView(TextureViewDescriptor { texture }))?;
 
-        let mut sparse = vec![
-            (binding, BindingResource::TextureView(image_id)),
-        ];
+        let mut sparse = vec![(binding, BindingResource::TextureView(image_id))];
 
         // For encoding we have two extra bindings, sampler and in_texture.
         if let Some(view) = view {
@@ -2037,16 +2029,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 resize_filter: wgpu::FilterMode::Nearest,
             });
 
-            let view = self.texture_map
+            let view = self
+                .texture_map
                 .get(&view)
                 .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
                 .device;
 
             // FIXME: could be cached.
             let view_id = self.texture_views;
-            self.push(Low::TextureView(TextureViewDescriptor {
-                texture: view,
-            }))?;
+            self.push(Low::TextureView(TextureViewDescriptor { texture: view }))?;
 
             sparse.push((32, BindingResource::TextureView(view_id)));
             sparse.push((33, BindingResource::Sampler(sampler)));

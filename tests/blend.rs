@@ -61,7 +61,7 @@ fn integration() {
 
 fn run_blending(
     pool: &mut Pool,
-    adapters: impl Iterator<Item=wgpu::Adapter>,
+    adapters: impl Iterator<Item = wgpu::Adapter>,
     (fg_key, foreground): (PoolKey, Descriptor),
     (bg_key, background): (PoolKey, Descriptor),
 ) {
@@ -108,15 +108,13 @@ fn run_blending(
 
     let mut retire = execution.retire_gracefully(pool);
 
-    let image = retire
-        .output(output)
-        .expect("A valid image output");
+    let image = retire.output(output).expect("A valid image output");
     util::assert_reference(image, "composed.png.crc");
 }
 
 fn run_affine(
     pool: &mut Pool,
-    adapters: impl Iterator<Item=wgpu::Adapter>,
+    adapters: impl Iterator<Item = wgpu::Adapter>,
     (fg_key, foreground): (PoolKey, Descriptor),
     (bg_key, background): (PoolKey, Descriptor),
 ) {
@@ -170,15 +168,13 @@ fn run_affine(
 
     let mut retire = execution.retire_gracefully(pool);
 
-    let image_affine = retire
-        .output(output_affine)
-        .expect("A valid image output");
+    let image_affine = retire.output(output_affine).expect("A valid image output");
     util::assert_reference(image_affine, "affine.png.crc");
 }
 
 fn run_adaptation(
     pool: &mut Pool,
-    adapters: impl Iterator<Item=wgpu::Adapter>,
+    adapters: impl Iterator<Item = wgpu::Adapter>,
     (bg_key, background): (PoolKey, Descriptor),
 ) {
     let mut commands = CommandBuffer::default();
@@ -217,15 +213,13 @@ fn run_adaptation(
 
     let mut retire = execution.retire_gracefully(pool);
 
-    let image_adapted = retire
-        .output(output_affine)
-        .expect("A valid image output");
+    let image_adapted = retire.output(output_affine).expect("A valid image output");
     util::assert_reference(image_adapted, "adapted.png.crc");
 }
 
 fn run_conversion(
     pool: &mut Pool,
-    adapters: impl Iterator<Item=wgpu::Adapter>,
+    adapters: impl Iterator<Item = wgpu::Adapter>,
     (orig_key, orig_descriptor): (PoolKey, Descriptor),
 ) {
     // Pretend the input is BT709 instead of SRGB.
@@ -236,17 +230,13 @@ fn run_conversion(
     };
 
     let mut commands = CommandBuffer::default();
-    let input = commands
-        .input(bt_descriptor)
-        .unwrap();
+    let input = commands.input(bt_descriptor).unwrap();
 
     let converted = commands
         .color_convert(input, orig_descriptor.texel)
         .unwrap();
 
-    let (output, _outformat) = commands
-        .output(converted)
-        .expect("Valid for output");
+    let (output, _outformat) = commands.output(converted).expect("Valid for output");
 
     let result = run_once_with_output(
         commands,
@@ -264,13 +254,11 @@ fn run_conversion(
 fn run_once_with_output<T>(
     commands: CommandBuffer,
     pool: &mut Pool,
-    adapters: impl Iterator<Item=wgpu::Adapter>,
-    binds: impl IntoIterator<Item=(Register, PoolKey)>,
+    adapters: impl Iterator<Item = wgpu::Adapter>,
+    binds: impl IntoIterator<Item = (Register, PoolKey)>,
     output: impl FnOnce(Retire) -> T,
 ) -> T {
-    let plan = commands
-        .compile()
-        .expect("Could build command buffer");
+    let plan = commands.compile().expect("Could build command buffer");
     let adapter = plan
         .choose_adapter(adapters)
         .expect("Did not find any adapter for executing the blend operation");
@@ -281,9 +269,7 @@ fn run_once_with_output<T>(
         launcher = launcher.bind(target, key).unwrap();
     }
 
-    let mut execution = launcher
-        .launch(&adapter)
-        .expect("Launching failed");
+    let mut execution = launcher.launch(&adapter).expect("Launching failed");
 
     while execution.is_running() {
         let _wait_point = execution.step().expect("Shouldn't fail but");
@@ -292,10 +278,6 @@ fn run_once_with_output<T>(
     output(execution.retire_gracefully(pool))
 }
 
-fn retire_with_one_image(reg: Register)
-    -> impl FnOnce(Retire) -> PoolKey
-{
-    move |mut retire: Retire| {
-        retire.output(reg).expect("Valid for output").key()
-    }
+fn retire_with_one_image(reg: Register) -> impl FnOnce(Retire) -> PoolKey {
+    move |mut retire: Retire| retire.output(reg).expect("Valid for output").key()
 }

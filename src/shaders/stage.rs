@@ -22,12 +22,7 @@ pub(crate) enum StageKind {
 
 impl XyzParameter {
     pub(crate) fn serialize_std140(&self) -> [u32; 4] {
-        [
-            self.transfer as u32,
-            self.parts as u32,
-            self.bits as u32,
-            0,
-        ]
+        [self.transfer as u32, self.parts as u32, self.bits as u32, 0]
     }
 
     pub(crate) fn stage_kind(&self) -> Option<StageKind> {
