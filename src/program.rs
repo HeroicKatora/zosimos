@@ -930,7 +930,7 @@ impl Launcher<'_> {
                     encoder.copy_buffer_to_staging(dst)?;
                 }
                 &High::Output { src, dst } => {
-                    eprintln!("Output {:?} to {:?}", src, dst);
+                    // eprintln!("Output {:?} to {:?}", src, dst);
                     // Identify if we need to transform the texture from the internal format to the
                     // one actually chosen for this texture.
                     encoder.copy_staging_to_buffer(src)?;
@@ -1278,9 +1278,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 usage: BufferUsage::DataOut,
             }))?;
 
-            eprintln!("Buffer {:?} {:?}", buffer, buffer_layout.u64_len());
-            eprintln!("Buffer {:?} {:?}", buffer + 1, buffer_layout.u64_len());
-            eprintln!("Buffer {:?} {:?}", buffer + 2, buffer_layout.u64_len());
+            // eprintln!("Buffer {:?} {:?}", buffer, buffer_layout.u64_len());
+            // eprintln!("Buffer {:?} {:?}", buffer + 1, buffer_layout.u64_len());
+            // eprintln!("Buffer {:?} {:?}", buffer + 2, buffer_layout.u64_len());
 
             (
                 DeviceBuffer(buffer),
@@ -1336,7 +1336,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let texture = {
             let texture = self.textures;
-            eprintln!("Texture {:?} {:?}", texture, &texture_format);
+            // eprintln!("Texture {:?} {:?}", texture, &texture_format);
             self.push(Low::Texture(texture_format.clone()))?;
             DeviceTexture(texture)
         };
@@ -1356,14 +1356,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             let device = {
                 let texture = self.textures;
-                eprintln!("Storage Texture {:?} {:?}", texture, &staging);
+                // eprintln!("Storage Texture {:?} {:?}", texture, &staging);
                 self.push(Low::Texture(staging.clone()))?;
                 DeviceTexture(texture)
             };
 
             let fallback = {
                 let texture = self.textures;
-                eprintln!("Fallback Texture {:?} {:?}", texture, &staging);
+                // eprintln!("Fallback Texture {:?} {:?}", texture, &staging);
                 self.push(Low::Texture(TextureDescriptor {
                     usage: TextureUsage::Transient,
                     size: staging.size,
@@ -1373,7 +1373,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             };
 
 
-            eprintln!("{} {:?}", reg_texture.0, staging);
+            // eprintln!("{} {:?}", reg_texture.0, staging);
             self.staging_map.insert(
                 reg_texture,
                 StagingTexture {
@@ -1449,7 +1449,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             regmap.texture
         };
 
-        eprintln!("!!! Copying {:?}: to {:?}", idx, target_texture);
+        // eprintln!("!!! Copying {:?}: to {:?}", idx, target_texture);
 
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyBufferToTexture {
@@ -1473,7 +1473,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// quantization happens as part of the pipeline.
     fn copy_staging_to_texture(&mut self, idx: Texture) -> Result<(), LaunchError> {
         if let Some(staging) = self.staging_map.get(&idx) {
-            eprintln!("{} {:?}", idx.0, staging);
+            // eprintln!("{} {:?}", idx.0, staging);
             // Try to use the cached version of this pipeline.
             let pipeline = if let Some(pipeline) = self.staged_to_pipelines.get(&idx) {
                 pipeline.clone()
@@ -1517,7 +1517,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         if let Some(staging) = self.staging_map.get(&idx) {
             let texture = staging.temporary_attachment_buffer_for_encoding_remove_if_possible;
 
-            eprintln!("{} {:?}", idx.0, staging);
+            // eprintln!("{} {:?}", idx.0, staging);
             // Try to use the cached version of this pipeline.
             let pipeline = if let Some(pipeline) = self.staged_from_pipelines.get(&idx) {
                 pipeline.clone()
@@ -1576,7 +1576,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             regmap.texture
         };
 
-        eprintln!("!!! Copying {:?}: from {:?}", idx, source_texture);
+        // eprintln!("!!! Copying {:?}: from {:?}", idx, source_texture);
 
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyTextureToBuffer {
@@ -1640,7 +1640,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let id = self.texture_views;
         self.texture_views += 1;
 
-        eprintln!("Texture {:?} (Device {:?}) in View {:?}", dst, texture, id);
+        // eprintln!("Texture {:?} (Device {:?}) in View {:?}", dst, texture, id);
 
         Ok(id)
     }
@@ -1922,11 +1922,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let format = match desc.pipeline_target {
             PipelineTarget::Texture(texture) => {
                 let format = self.texture_map[&texture].format.format;
-                eprintln!("Target texture {:?} with format {:?}", texture, format);
+                // eprintln!("Target texture {:?} with format {:?}", texture, format);
                 format
             },
             PipelineTarget::PreComputedGroup { target_format } => {
-                eprintln!("Target attachment with format {:?}", target_format);
+                // eprintln!("Target attachment with format {:?}", target_format);
                 target_format
             }
         };
@@ -2116,11 +2116,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let group = match texture {
             TextureBind::Texture(texture) => {
                 let group = self.make_bind_group_sampled_texture(*texture)?;
-                eprintln!("Using Texture {:?} as group {:?}", texture, group);
+                // eprintln!("Using Texture {:?} as group {:?}", texture, group);
                 group
             }
             &TextureBind::PreComputedGroup { group, .. } => {
-                eprintln!("Using Target Group {:?}", group);
+                // eprintln!("Using Target Group {:?}", group);
                 group
             }
         };
@@ -2356,7 +2356,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     Some(texture),
                 )?;
 
-                eprintln!("{:?} {:?}", parameter, buffer);
+                // eprintln!("{:?} {:?}", parameter, buffer);
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
                     pipeline_target: PipelineTarget::PreComputedGroup {

@@ -228,15 +228,12 @@ fn run_conversion(
     adapters: impl Iterator<Item=wgpu::Adapter>,
     (orig_key, orig_descriptor): (PoolKey, Descriptor),
 ) {
-    eprintln!("!!!!!\n\n\n!!!!!");
     // Pretend the input is BT709 instead of SRGB.
     let (bt_key, bt_descriptor) = {
         let mut bt = pool.allocate_like(orig_key);
         bt.set_color(buffer::Color::BT709);
         (bt.key(), bt.descriptor())
     };
-
-    eprintln!("{:?}", bt_descriptor);
 
     let mut commands = CommandBuffer::default();
     let input = commands

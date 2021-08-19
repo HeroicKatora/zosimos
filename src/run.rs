@@ -117,7 +117,7 @@ impl Execution {
         let instruction_pointer = self.machine.instruction_pointer;
 
         /*
-        eprintln!(
+        // eprintln!(
             "{:?}",
             self.machine
                 .instructions
@@ -142,7 +142,7 @@ impl Execution {
                 let group = self
                     .descriptors
                     .bind_group_layout(desc, &mut entry_buffer)?;
-                eprintln!("{:?}", group);
+                // eprintln!("{:?}", group);
                 let group = self.gpu.device.create_bind_group_layout(&group);
                 self.descriptors.bind_group_layouts.push(group);
                 Ok(SyncPoint::NO_SYNC)
@@ -462,12 +462,12 @@ impl Execution {
                     depth_or_array_layers: 1,
                 };
 
-                eprintln!("Source: {:?}", source_buffer);
-                eprintln!("Target: {:?}", target_texture);
+                // eprintln!("Source: {:?}", source_buffer);
+                // eprintln!("Target: {:?}", target_texture);
 
-                eprintln!("{:?}", buffer);
-                eprintln!("{:?}", texture);
-                eprintln!("{:?}", extent);
+                // eprintln!("{:?}", buffer);
+                // eprintln!("{:?}", texture);
+                // eprintln!("{:?}", extent);
 
                 encoder.copy_buffer_to_texture(buffer, texture, extent);
 
@@ -719,7 +719,7 @@ impl Descriptors {
         &self,
         desc: &program::ColorAttachmentDescriptor,
     ) -> Result<wgpu::RenderPassColorAttachment<'_>, StepError> {
-        eprintln!("Attaching {:?}", desc);
+        // eprintln!("Attaching {:?}", desc);
         Ok(wgpu::RenderPassColorAttachment {
             view: self
                 .texture_views
