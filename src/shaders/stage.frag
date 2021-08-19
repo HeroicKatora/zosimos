@@ -1,4 +1,22 @@
 #version 450
+
+/** Hacky way because shaderc only supports `main` for the name of the entry point.
+ *
+ * Hence we rename the current entry point to `main` through a macro in the
+ * compiler options while falling back to a non-main name... This is stupid and
+ * shaderc must have been written by monkeys with type writers. Especially its
+ * documentation which doesn't mention this detail at all apart from an internal
+ * method.
+ */
+#ifndef DECODE_R8UI_AS_MAIN
+#define DECODE_R8UI_AS_MAIN decode_r8ui
+#endif
+#ifndef DECODE_R32UI_AS_MAIN
+#define DECODE_R32UI_AS_MAIN encode_r32ui
+#endif
+#ifndef ENCODE_R32UI_AS_MAIN
+#define ENCODE_R32UI_AS_MAIN decode_r32ui
+#endif
 /** This is a special shader to convert to/from color spaces and texture
  * formats that are not natively supported. This works by introducing a staging
  * texture that is in the correct byte representation of the supposed format
@@ -42,6 +60,11 @@ layout (set = 1, binding = 17, r16ui) uniform restrict writeonly uimage2D oimage
 layout (set = 1, binding = 18, r32ui) uniform restrict writeonly uimage2D oimage_r32ui;
 layout (set = 1, binding = 19, rgba16ui) uniform restrict writeonly uimage2D oimage_rgba16ui;
 layout (set = 1, binding = 20, rgba32ui) uniform restrict writeonly uimage2D oimage_rgba32ui;
+
+/** For encoding, this is the input frame buffer.
+ */
+layout (set = 1, binding = 32) uniform texture2D in_texture;
+layout (set = 1, binding = 33) uniform sampler texture_sampler;
 
 layout (set = 2, binding = 0, std140) uniform Parameter {
   uvec4 space;
@@ -289,9 +312,6 @@ vec3 transfer_scene_display_bt2100hlg(vec3 rgb) {
   return vec3(0.0);
 }
 
-// GLSL compiler wants this...
-void main() {}
-
 /** All decode methods work in several stages:
  *
  * 1. Demux the bit-encoded components into a vector.
@@ -304,7 +324,7 @@ void main() {}
  * the calling layer handles those.
  */
 
-void decode_r8ui() {
+void DECODE_R8UI_AS_MAIN() {
   uint num = imageLoad(image_r8ui, ivec2(gl_FragCoord)).x;
   vec4 components = demux_uint(num, get_sample_bits());
 
@@ -318,7 +338,7 @@ void decode_r8ui() {
 void encode_r8ui() {
 }
 
-void decode_r32ui() {
+void DECODE_R32UI_AS_MAIN() {
   uint num = imageLoad(image_r32ui, ivec2(gl_FragCoord)).x;
   vec4 components = demux_uint(num, get_sample_bits());
 
@@ -329,8 +349,8 @@ void decode_r32ui() {
   f_color = primaries;
 }
 
-void encode_r32ui() {
-  vec4 primaries = vec4(0.0, 1.0, 0.0, 1.0);
+void ENCODE_R32UI_AS_MAIN() {
+  vec4 primaries = texture(sampler2D(in_texture, texture_sampler), uv).rgba;
 
   vec4 electrical = parts_transfer(primaries, get_transfer());
   // FIXME: YUV transform and accurate YUV transform.
@@ -346,11 +366,11 @@ vec4 demux_uint(uint num, uint kind) {
     return vec4(num) / 255.;
   // FIXME: rescale.
   case SAMPLE_BITS_Int332:
-    return vec4(num & 0x3, (num >> 2) & 0xf, num >> 5, 0.0);
+    return vec4(num & 0x3, (num >> 2) & 0xf, num >> 5, 1.0);
   case SAMPLE_BITS_Int233:
-    return vec4(num & 0xf, (num >> 3) & 0xf, num >> 6, 0.0);
+    return vec4(num & 0xf, (num >> 3) & 0xf, num >> 6, 1.0);
   case SAMPLE_BITS_Int8x3:
-    return vec4(num & 0xf, (num >> 8) & 0xf, num >> 16, 0.0) / 255.;
+    return vec4(num & 0xf, (num >> 8) & 0xf, num >> 16, 255.0) / 255.;
   case SAMPLE_BITS_Int8x4:
     return vec4(num & 0xf, (num >> 8) & 0xf, (num >> 16) & 0xf, num >> 24) / 255.;
   // FIXME: other bits.

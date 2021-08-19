@@ -74,12 +74,20 @@ fn main() -> Result<(), BuildError> {
         str_source.clear();
         file.read_to_string(&mut str_source)?;
 
+        let mut options = shaderc::CompileOptions::new()
+            .expect("Could initialize compile options");
+        if shader.entry != "main" {
+            let macro_name = shader.entry.to_uppercase() + "_AS_MAIN";
+            options.add_macro_definition(&macro_name, Some("main"));
+        }
+
         let binary = compiler.compile_into_spirv(
             &str_source,
             shader.kind,
             shader.path,
             shader.entry,
-            None
+            // Needed, but empty. Without this the `shader.entry` parameter is ignored!
+            Some(&options),
         )?;
 
         let spirv = binary.as_binary_u8();

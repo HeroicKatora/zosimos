@@ -136,6 +136,13 @@ pub struct ImageBufferAssignment {
     pub(crate) buffer: Buffer,
 }
 
+/// Get the descriptors of a particular buffer plan.
+#[derive(Clone, Copy, Debug)]
+pub struct ImageBufferDescriptors<'a> {
+    descriptor: &'a Descriptor,
+    layout: &'a BufferLayout,
+}
+
 /// Identifies one layout based buffer in the render pipeline, by an index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Buffer(pub(crate) usize);
@@ -262,6 +269,15 @@ struct StagingTexture {
     format: TextureDescriptor,
     stage_kind: shaders::stage::StageKind,
     parameter: shaders::stage::XyzParameter,
+    /// A texture which we use as an attachment for encoding.
+    ///
+    /// The current implementation for encoding attaches the staging buffer as a storage image and
+    /// the texture as a sampled source texture. However, this means we can not use either of them
+    /// as the target attachment. So we have this additional texture that has the right size and
+    /// format to be used as a target attachment for encoding while we _never_ actually write to it
+    /// (op:write is disabled for that draw call).
+    /// FIXME: find a way to avoid this texture allocation.
+    temporary_attachment_buffer_for_encoding_remove_if_possible: DeviceTexture,
 
 }
 
@@ -585,6 +601,9 @@ pub(crate) enum TextureUsage {
     /// A staging texture
     /// Copy Src/Dst + Storage.
     Staging,
+    /// A texture which we never reach from.
+    /// Sampled + Render Attachment
+    Transient,
 }
 
 #[derive(Debug)]
@@ -735,6 +754,20 @@ impl ImageBufferPlan {
             .get(idx.0)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))
             .map(ImageBufferAssignment::clone)
+    }
+
+    pub(crate) fn get_info(&self, idx: Register)
+        -> Result<ImageBufferDescriptors<'_>, LaunchError>
+    {
+        let assigned = self.get(idx)?;
+        Ok(self.describe(&assigned))
+    }
+
+    pub(crate) fn describe(&self, assigned: &ImageBufferAssignment) -> ImageBufferDescriptors<'_> {
+        ImageBufferDescriptors {
+            descriptor: &self.texture[assigned.texture.0],
+            layout: &self.buffer[assigned.buffer.0],
+        }
     }
 }
 
@@ -897,6 +930,7 @@ impl Launcher<'_> {
                     encoder.copy_buffer_to_staging(dst)?;
                 }
                 &High::Output { src, dst } => {
+                    eprintln!("Output {:?} to {:?}", src, dst);
                     // Identify if we need to transform the texture from the internal format to the
                     // one actually chosen for this texture.
                     encoder.copy_staging_to_buffer(src)?;
@@ -920,7 +954,7 @@ impl Launcher<'_> {
                         Target::Discard(_) => {
                             wgpu::Operations {
                                 // TODO: we could let choose a replacement color..
-                                load: wgpu::LoadOp::Clear(wgpu::Color::RED),
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
                                 store: true,
                             }
                         }
@@ -1285,23 +1319,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             },
         );
 
-        if let Some(staging) = in_map.staging {
-            let st_parameter = staged.staging
-                .as_ref()
-                .expect("Have a format for staging texture when we have staging texture");
-
-            eprintln!("{} {:?}", reg_texture.0, staging);
-            self.staging_map.insert(
-                reg_texture,
-                StagingTexture {
-                    device: staging,
-                    format: staged.to_staging_texture().unwrap(),
-                    stage_kind: st_parameter.stage_kind,
-                    parameter: st_parameter.parameter.clone(),
-                },
-            );
-        }
-
         Ok(())
     }
 
@@ -1344,6 +1361,18 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 DeviceTexture(texture)
             };
 
+            let fallback = {
+                let texture = self.textures;
+                eprintln!("Fallback Texture {:?} {:?}", texture, &staging);
+                self.push(Low::Texture(TextureDescriptor {
+                    usage: TextureUsage::Transient,
+                    size: staging.size,
+                    .. texture_format
+                }))?;
+                DeviceTexture(texture)
+            };
+
+
             eprintln!("{} {:?}", reg_texture.0, staging);
             self.staging_map.insert(
                 reg_texture,
@@ -1352,6 +1381,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     format: staging.clone(),
                     stage_kind: st_parameter.stage_kind,
                     parameter: st_parameter.parameter.clone(),
+                    temporary_attachment_buffer_for_encoding_remove_if_possible: fallback,
                 },
             );
         }
@@ -1419,6 +1449,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             regmap.texture
         };
 
+        eprintln!("!!! Copying {:?}: to {:?}", idx, target_texture);
+
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyBufferToTexture {
             source_buffer: regmap.buffer,
@@ -1459,7 +1491,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 texture_view: dst_view,
                 ops: wgpu::Operations {
                     // TODO: we could let choose a replacement color..
-                    load: wgpu::LoadOp::Clear(wgpu::Color::RED),
+                    load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
                     store: true,
                 },
             };
@@ -1472,6 +1504,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             self.render(pipeline)?;
             self.push(Low::EndRenderPass)?;
             self.push(Low::EndCommands)?;
+
+            self.push(Low::RunTopCommand)?;
         }
 
         Ok(())
@@ -1481,6 +1515,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// May be a no-op, see reverse operation.
     fn copy_texture_to_staging(&mut self, idx: Texture) -> Result<(), LaunchError> {
         if let Some(staging) = self.staging_map.get(&idx) {
+            let texture = staging.temporary_attachment_buffer_for_encoding_remove_if_possible;
+
             eprintln!("{} {:?}", idx.0, staging);
             // Try to use the cached version of this pipeline.
             let pipeline = if let Some(pipeline) = self.staged_from_pipelines.get(&idx) {
@@ -1494,7 +1530,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 self.prepare_render(idx, &fn_, idx)?
             };
 
-            let dst_view = self.texture_view(idx)?;
+            let dst_view = {
+                let descriptor = TextureViewDescriptor {
+                    texture,
+                };
+
+                let id = self.texture_views;
+                self.push(Low::TextureView(descriptor))?;
+                self.texture_views += 1;
+                id
+            };
+
             let attachment = ColorAttachmentDescriptor {
                 texture_view: dst_view,
                 ops: wgpu::Operations {
@@ -1512,6 +1558,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             self.render(pipeline)?;
             self.push(Low::EndRenderPass)?;
             self.push(Low::EndCommands)?;
+
+            self.push(Low::RunTopCommand)?;
         }
 
         Ok(())
@@ -1520,15 +1568,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// Copy from texture to the memory buffer.
     fn copy_staging_to_buffer(&mut self, idx: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
-        let descriptor = &self.buffer_plan.texture[regmap.texture.0];
-        let size = descriptor.size();
-        // eprintln!("tex{:?} -> buf{:?} ({:?})", regmap.texture, regmap.buffer, size);
+        let size = self.buffer_plan.get_info(idx)?.descriptor.size();
 
         let source_texture = if let Some(staging) = regmap.staging {
             staging
         } else {
             regmap.texture
         };
+
+        eprintln!("!!! Copying {:?}: from {:?}", idx, source_texture);
 
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyTextureToBuffer {
@@ -1549,9 +1597,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn copy_buffer_to_output(&mut self, idx: Register, dst: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
         let target_image = self.ingest_image_data(dst)?;
-        let descriptor = &self.buffer_plan.texture[regmap.texture.0];
 
-        let size = descriptor.size();
+        let size = self.buffer_plan.get_info(idx)?.descriptor.size();
         let sizeu64 = regmap.buffer_layout.u64_len();
 
         let source_buffer = regmap.map_read.unwrap_or(regmap.buffer);
@@ -1586,7 +1633,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             .get(&dst)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
             .device;
-        // eprintln!("tex{:?} == tex{:?}", dst, texture);
 
         let descriptor = TextureViewDescriptor { texture };
 
@@ -1686,6 +1732,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         use shaders::stage::StageKind;
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
+
+        // For encoding we have two extra bindings, sampler and in_texture.
+        let encode: bool = binding > StageKind::ALL.len() as u32;
+
         *self.stage_group_layout
             .entry(binding)
             .or_insert_with(|| {
@@ -1721,6 +1771,29 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                             access: wgpu::StorageTextureAccess::WriteOnly,
                             format: kind.texture_format(),
                             view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    });
+                }
+
+                if encode {
+                    entries.push(wgpu::BindGroupLayoutEntry {
+                        binding: 32,
+                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    });
+
+                    entries.push(wgpu::BindGroupLayoutEntry {
+                        binding: 33,
+                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler {
+                            filtering: true,
+                            comparison: false,
                         },
                         count: None,
                     });
@@ -1932,27 +2005,58 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(group)
     }
 
-    fn make_opto_fragment_group(&mut self, binding: u32, texture: Texture)
-        -> Result<usize, LaunchError>
-    {
+    fn make_opto_fragment_group(
+        &mut self,
+        binding: u32,
+        // The staging texture, whose staging texture is bound to IO-storage image.
+        texture: Texture,
+        // The non-staging texture which we bind to the sampler.
+        view: Option<Texture>,
+    ) -> Result<usize, LaunchError> {
         let texture = self.staging_map
             .get(&texture)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
             .device;
 
         // FIXME: could be cached.
-        let view = self.texture_views;
+        let image_id = self.texture_views;
         self.push(Low::TextureView(TextureViewDescriptor {
             texture,
-        }));
+        }))?;
+
+        let mut sparse = vec![
+            (binding, BindingResource::TextureView(image_id)),
+        ];
+
+        // For encoding we have two extra bindings, sampler and in_texture.
+        if let Some(view) = view {
+            // FIXME: unnecessary duplication.
+            let sampler = self.make_sampler(SamplerDescriptor {
+                address_mode: wgpu::AddressMode::default(),
+                border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+                resize_filter: wgpu::FilterMode::Nearest,
+            });
+
+            let view = self.texture_map
+                .get(&view)
+                .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
+                .device;
+
+            // FIXME: could be cached.
+            let view_id = self.texture_views;
+            self.push(Low::TextureView(TextureViewDescriptor {
+                texture: view,
+            }))?;
+
+            sparse.push((32, BindingResource::TextureView(view_id)));
+            sparse.push((33, BindingResource::Sampler(sampler)));
+        }
 
         let group = self.bind_groups;
         let descriptor = BindGroupDescriptor {
             layout_idx: self.make_stage_group(binding),
             entries: vec![],
-            sparse: vec![
-                (binding, BindingResource::TextureView(view)),
-            ]
+            sparse,
         };
 
         self.push(Low::BindGroup(descriptor))?;
@@ -2205,6 +2309,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let group = self.make_opto_fragment_group(
                     stage_kind.decode_binding(),
                     texture,
+                    None,
                 )?;
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
@@ -2248,7 +2353,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let group = self.make_opto_fragment_group(
                     stage_kind.encode_binding(),
                     texture,
+                    Some(texture),
                 )?;
+
+                eprintln!("{:?} {:?}", parameter, buffer);
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
                     pipeline_target: PipelineTarget::PreComputedGroup {

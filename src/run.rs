@@ -257,6 +257,9 @@ impl Execution {
                         program::TextureUsage::Staging => {
                             U::COPY_SRC | U::COPY_DST | U::STORAGE
                         }
+                        program::TextureUsage::Transient => {
+                            U::SAMPLED | U::RENDER_ATTACHMENT
+                        }
                     },
                 };
                 let texture = self.gpu.device.create_texture(&desc);
