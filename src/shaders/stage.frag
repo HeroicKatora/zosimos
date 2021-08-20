@@ -358,6 +358,7 @@ void ENCODE_R32UI_AS_MAIN() {
 
   uint num = mux_uint(components, get_sample_bits());
   imageStore(oimage_r32ui, ivec2(gl_FragCoord), uvec4(num));
+  discard;
 }
 
 vec4 demux_uint(uint num, uint kind) {
@@ -375,6 +376,7 @@ vec4 demux_uint(uint num, uint kind) {
     return vec4(num & 0xff, (num >> 8) & 0xff, (num >> 16) & 0xff, num >> 24) / 255.;
   // FIXME: other bits.
   }
+  return vec4(0.0);
 }
 
 uint mux_uint(vec4 c, uint kind) {
@@ -392,6 +394,7 @@ uint mux_uint(vec4 c, uint kind) {
       + (uint(c.w * 255.) << 24);
   // FIXME: other bits.
   }
+  return 0;
 }
 
 vec4 parts_normalize(vec4 components, uint parts) {
@@ -427,6 +430,7 @@ vec4 parts_normalize(vec4 components, uint parts) {
   case SAMPLE_PARTS_Xbgr:
     return vec4(components.wzy, 1.0);
   }
+  return vec4(0.0);
 }
 
 vec4 parts_denormalize(vec4 components, uint parts) {
@@ -464,6 +468,7 @@ vec4 parts_denormalize(vec4 components, uint parts) {
     return vec4(components.wzy, 1.0);
   */
   }
+  return components.xyzw;
 }
 
 vec4 parts_transfer(vec4 optical, uint fnk) {
@@ -491,6 +496,7 @@ vec4 parts_transfer(vec4 optical, uint fnk) {
   // FIXME: unimplemented.
   return optical;
   }
+  return optical;
 }
 
 vec4 parts_untransfer(vec4 electrical, uint fnk) {
@@ -518,4 +524,5 @@ vec4 parts_untransfer(vec4 electrical, uint fnk) {
   // FIXME: unimplemented.
   return electrical;
   }
+  return electrical;
 }

@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Andreas Molzer <andreas.molzer@gmx.de>"]
 edition = "2018"
 license = "MPL-2.0"
+resolver = "2"
 
 [dependencies]
 bytemuck = "1.4"
@@ -32,15 +33,20 @@ version = "1"
 default-features = false
 
 [dependencies.wgpu]
-version = "0.9"
+version = "0.10.1"
+features = ["spirv"]
 
 [build-dependencies]
 shaderc = "0.7"
 
 [dev-dependencies]
-image = "0.23.13"
 crc32fast = "1.2"
 env_logger = "0.9"
+
+[dev-dependencies.image]
+version = "0.23.13"
+default-features = false
+features = ["png"]
 
 [[test]]
 name = "blend"

@@ -14,7 +14,7 @@ const FOREGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/foreg
 fn integration() {
     env_logger::init();
 
-    const ANY: wgpu::BackendBit = wgpu::BackendBit::all();
+    const ANY: wgpu::Backends = wgpu::Backends::all();
     // FIXME: this drop SEGFAULTs for me...
     let instance = core::mem::ManuallyDrop::new(wgpu::Instance::new(ANY));
 

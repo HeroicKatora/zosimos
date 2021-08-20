@@ -179,10 +179,11 @@ impl Execution {
                 Ok(SyncPoint::NO_SYNC)
             }
             Low::Shader(desc) => {
+                eprintln!("{:?}", desc.source_spirv);
+
                 let desc = wgpu::ShaderModuleDescriptor {
                     label: Some(desc.name),
                     source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
-                    flags: desc.flags,
                 };
 
                 let shader = self.gpu.device.create_shader_module(&desc);
@@ -236,7 +237,7 @@ impl Execution {
                 Ok(SyncPoint::NO_SYNC)
             }
             Low::Texture(desc) => {
-                use wgpu::TextureUsage as U;
+                use wgpu::TextureUsages as U;
                 let desc = wgpu::TextureDescriptor {
                     label: None,
                     size: wgpu::Extent3d {
@@ -249,13 +250,13 @@ impl Execution {
                     dimension: wgpu::TextureDimension::D2,
                     format: desc.format,
                     usage: match desc.usage {
-                        program::TextureUsage::DataIn => U::COPY_DST | U::SAMPLED,
+                        program::TextureUsage::DataIn => U::COPY_DST | U::TEXTURE_BINDING,
                         program::TextureUsage::DataOut => U::COPY_SRC | U::RENDER_ATTACHMENT,
                         program::TextureUsage::Attachment => {
-                            U::COPY_SRC | U::COPY_DST | U::SAMPLED | U::RENDER_ATTACHMENT
+                            U::COPY_SRC | U::COPY_DST | U::TEXTURE_BINDING | U::RENDER_ATTACHMENT
                         }
-                        program::TextureUsage::Staging => U::COPY_SRC | U::COPY_DST | U::STORAGE,
-                        program::TextureUsage::Transient => U::SAMPLED | U::RENDER_ATTACHMENT,
+                        program::TextureUsage::Staging => U::COPY_SRC | U::COPY_DST | U::STORAGE_BINDING | U::TEXTURE_BINDING,
+                        program::TextureUsage::Transient => U::TEXTURE_BINDING | U::RENDER_ATTACHMENT,
                     },
                 };
                 let texture = self.gpu.device.create_texture(&desc);
@@ -787,7 +788,7 @@ impl Descriptors {
         buf.clear();
         buf.push(wgpu::VertexBufferLayout {
             array_stride: 8,
-            step_mode: wgpu::InputStepMode::Vertex,
+            step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x2,
                 offset: 0,
@@ -847,6 +848,7 @@ impl Descriptors {
                 .ok_or(StepError::InvalidInstruction(line!()))?,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
         })
     }
 }

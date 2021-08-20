@@ -374,7 +374,7 @@ pub(crate) enum Low {
         vertices: u32,
     },
     SetPushConstants {
-        stages: wgpu::ShaderStage,
+        stages: wgpu::ShaderStages,
         offset: u32,
         data: Cow<'static, [u8]>,
     },
@@ -533,7 +533,6 @@ pub(crate) struct BufferDescriptorInit {
 pub(crate) struct ShaderDescriptor {
     pub name: &'static str,
     pub source_spirv: Cow<'static, [u32]>,
-    pub flags: wgpu::ShaderFlags,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -800,10 +799,11 @@ impl Program {
         mut from: impl Iterator<Item = wgpu::Adapter>,
     ) -> Result<wgpu::Adapter, MismatchError> {
         #[allow(non_snake_case)]
-        let ALL_TEXTURE_USAGE: wgpu::TextureUsage = wgpu::TextureUsage::COPY_DST
-            | wgpu::TextureUsage::COPY_SRC
-            | wgpu::TextureUsage::SAMPLED
-            | wgpu::TextureUsage::RENDER_ATTACHMENT;
+        let ALL_TEXTURE_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT;
 
         while let Some(adapter) = from.next() {
             // FIXME: check limits.
@@ -1653,10 +1653,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             let descriptor = BindGroupLayoutDescriptor {
                 entries: vec![wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStage::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(2 * 8 * 4),
+                        min_binding_size: None,
                         ty: wgpu::BufferBindingType::Uniform,
                     },
                     count: None,
@@ -1677,7 +1677,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             let descriptor = BindGroupLayoutDescriptor {
                 entries: vec![wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         has_dynamic_offset: false,
                         min_binding_size: None,
@@ -1702,7 +1702,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 entries: vec![
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             multisampled: false,
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -1712,7 +1712,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler {
                             filtering: true,
                             comparison: false,
@@ -1747,7 +1747,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: i,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::ReadOnly,
                         format: kind.texture_format(),
@@ -1765,7 +1765,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: i,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
                         format: kind.texture_format(),
@@ -1778,7 +1778,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             if encode {
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: 32,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         multisampled: false,
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -1789,7 +1789,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: 33,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler {
                         filtering: true,
                         comparison: false,
@@ -1866,7 +1866,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         self.shader(ShaderDescriptor {
             name: "",
-            flags: wgpu::ShaderFlags::empty(),
             source_spirv: source,
         })
     }
@@ -1882,7 +1881,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         self.shader(ShaderDescriptor {
             name: "",
-            flags: wgpu::ShaderFlags::empty(),
             source_spirv: source,
         })
     }
@@ -1950,7 +1948,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment_module: fragment,
                     targets: vec![wgpu::ColorTargetState {
                         blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrite::ALL,
+                        write_mask: wgpu::ColorWrites::ALL,
                         format,
                     }],
                 },
@@ -2445,8 +2443,8 @@ impl PaintOnTopKind {
 }
 
 impl BufferUsage {
-    pub fn to_wgpu(self) -> wgpu::BufferUsage {
-        use wgpu::BufferUsage as U;
+    pub fn to_wgpu(self) -> wgpu::BufferUsages {
+        use wgpu::BufferUsages as U;
         match self {
             BufferUsage::InVertices => U::COPY_DST | U::VERTEX,
             BufferUsage::DataIn => U::MAP_WRITE | U::COPY_SRC,
