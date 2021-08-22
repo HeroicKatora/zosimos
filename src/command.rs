@@ -291,6 +291,7 @@ enum CommandErrorKind {
     ConflictingTypes(Descriptor, Descriptor),
     GenericTypeError,
     Other,
+    Unimplemented,
 }
 
 impl CommandBuffer {
@@ -512,7 +513,7 @@ impl CommandBuffer {
     /// This can be necessary when it has been algorithmically created or when one wants to
     /// intentionally ignore such meaning.
     pub fn transmute(&mut self, _: Register, _: Texel) -> Result<Register, CommandError> {
-        Err(CommandError::OTHER)
+        Err(CommandError::UNIMPLEMENTED)
     }
 
     /// Overwrite some channels with overlaid data.
@@ -551,7 +552,8 @@ impl CommandBuffer {
         _channel: Palette,
         _above: Register,
     ) -> Result<Register, CommandError> {
-        todo!()
+        // TODO: What blending should we support
+        Err(CommandError::UNIMPLEMENTED)
     }
 
     /// Overlay this image as part of a larger one, performing blending.
@@ -563,7 +565,7 @@ impl CommandBuffer {
         _blend: Blend,
     ) -> Result<Register, CommandError> {
         // TODO: What blending should we support
-        Err(CommandError::OTHER)
+        Err(CommandError::UNIMPLEMENTED)
     }
 
     /// A solid color image, from a descriptor and a single texel.
@@ -1122,6 +1124,15 @@ impl CommandError {
 
     /// Specifies that a register reference was invalid.
     const BAD_REGISTER: Self = Self::OTHER;
+
+    /// This has not yet been implemented, sorry.
+    ///
+    /// Errors of this kind will be removed over the course of bringing the crate to a first stable
+    /// release, this this will be removed. The method, and importantly its signature, are already
+    /// added for the purpose of exposition and documenting the intention.
+    const UNIMPLEMENTED: Self = CommandError {
+        inner: CommandErrorKind::Unimplemented,
+    };
 
     pub fn is_type_err(&self) -> bool {
         matches!(
