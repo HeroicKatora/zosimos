@@ -65,7 +65,7 @@ pub(crate) enum Function {
         /// The target coordinates are relative to this and the fragment shader given by
         /// paint_on_top is only executed within that rectangle.
         viewport: Rectangle,
-        paint_on_top: PaintOnTopKind,
+        shader: FragmentShader,
     },
     /// VS: id
     ///   in: vec3 position
@@ -192,13 +192,15 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     /// each potential usage.
     stage_group_layout: HashMap<u32, usize>,
     known_samplers: HashMap<SamplerDescriptor, usize>,
-    fragment_shaders: HashMap<FragmentShader, usize>,
+    fragment_shaders: HashMap<FragmentShaderKey, usize>,
     vertex_shaders: HashMap<VertexShader, usize>,
     simple_quad_buffer: Option<DeviceBuffer>,
     /// The render pipeline state for staging a texture.
     staged_to_pipelines: HashMap<Texture, SimpleRenderPipeline>,
     /// The render pipeline state for undoing staging a texture.
     staged_from_pipelines: HashMap<Texture, SimpleRenderPipeline>,
+    /// The allocate binary data for runtime execution.
+    binary_data: Vec<u8>,
 
     // Fields regarding the status of registers.
     /// Describes how registers where mapped to buffers.
@@ -292,8 +294,14 @@ enum VertexShader {
     Noop,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum FragmentShader {
+    PaintOnTop(PaintOnTopKind),
+    LinearColorMatrix(shaders::LinearColorTransform),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum FragmentShader {
+pub(crate) enum FragmentShaderKey {
     PaintOnTop(PaintOnTopKind),
     /// Linear color transformation.
     LinearColorMatrix,
@@ -525,8 +533,18 @@ pub(crate) struct BufferDescriptor {
 /// For constructing a new buffer, of anonymous memory.
 #[derive(Debug)]
 pub(crate) struct BufferDescriptorInit {
-    pub content: Cow<'static, [u8]>,
+    pub content: BufferInitContent,
     pub usage: BufferUsage,
+}
+
+#[derive(Debug)]
+pub(crate) enum BufferInitContent {
+    Owned(Vec<u8>),
+    /// The buffer init data is from the program 'data segment'.
+    Defer {
+        start: usize,
+        end: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -1002,6 +1020,7 @@ impl Launcher<'_> {
             device,
             queue,
             buffers,
+            binary_data: encoder.binary_data,
         };
 
         Ok(run::Execution::new(init))
@@ -1857,7 +1876,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     fn fragment_shader(
         &mut self,
-        kind: Option<FragmentShader>,
+        kind: Option<FragmentShaderKey>,
         source: Cow<'static, [u32]>,
     ) -> Result<usize, LaunchError> {
         if let Some(&shader) = kind.and_then(|k| self.fragment_shaders.get(&k)) {
@@ -1902,7 +1921,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             let descriptor = BufferDescriptorInit {
                 usage: BufferUsage::InVertices,
-                content: bytemuck::cast_slice(content).into(),
+                content: bytemuck::cast_slice(content).to_vec().into(),
             };
 
             instructions.extend_one(Low::BufferInit(descriptor));
@@ -2067,9 +2086,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             BufferBind::None => return Ok(None),
             BufferBind::Set { data } => {
                 let buffer = self.buffers;
+                let content = self.ingest_data(data);
                 self.push(Low::BufferInit(BufferDescriptorInit {
-                    // FIXME: avoid the allocation here?
-                    content: Cow::Owned(data.to_vec()),
+                    content: content,
                     usage: BufferUsage::Uniform,
                 }))?;
                 DeviceBuffer(buffer)
@@ -2211,17 +2230,19 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         -> Result<SimpleRenderPipeline, LaunchError>
     {
         match function {
-            Function::PaintOnTop { selection, target: target_coords, viewport, paint_on_top } => {
+            Function::PaintOnTop { selection, target: target_coords, viewport, shader } => {
                 let (tex_width, tex_height) = self.texture_map[&texture].format.size;
 
                 let vertex = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
-                let fragment = paint_on_top.fragment_shader();
-                let fragment = self.fragment_shader(
-                    Some(FragmentShader::PaintOnTop(paint_on_top.clone())),
-                    shader_include_to_spirv(fragment))?;
+                let shader = shader.shader();
+
+                let key = shader.key();
+                let fragment = shader.shader();
+
+                let fragment = self.fragment_shader(key, shader_include_to_spirv_static(fragment))?;
 
                 // FIXME: there seems to be two floats padding after each vec2.
                 let min_u = (selection.x as f32) / (tex_width.get() as f32);
@@ -2261,7 +2282,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(FragmentShader::LinearColorMatrix),
+                    Some(FragmentShaderKey::LinearColorMatrix),
                     shader_include_to_spirv(shaders::FRAG_LINEAR))?;
 
                 let matrix = matrix.into_inner();
@@ -2293,7 +2314,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(FragmentShader::Convert),
+                    Some(FragmentShaderKey::Convert),
                     shader_include_to_spirv(stage_kind.decode_src()))?;
 
                 let buffer = parameter.serialize_std140();
@@ -2338,7 +2359,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(FragmentShader::Convert),
+                    Some(FragmentShaderKey::Convert),
                     shader_include_to_spirv(stage_kind.encode_src()))?;
 
                 let buffer = parameter.serialize_std140();
@@ -2380,6 +2401,37 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 })
             }
         }
+    }
+
+    fn ingest_data(&mut self, data: &[impl bytemuck::Pod]) -> BufferInitContent {
+        BufferInitContent::new(&mut self.binary_data, data)
+    }
+}
+
+impl BufferInitContent {
+    /// Construct a reference to data by allocating it freshly within the buffer.
+    pub fn new(buf: &mut Vec<u8>, data: &[impl bytemuck::Pod]) -> Self {
+        let start = buf.len();
+        buf.extend_from_slice(bytemuck::cast_slice(data));
+        let end = buf.len();
+        BufferInitContent::Defer {
+            start,
+            end,
+        }
+    }
+
+    /// Get a reference to the binary data, given the allocator/buffer.
+    pub fn as_slice<'lt>(&'lt self, buffer: &'lt Vec<u8>) -> &'lt [u8] {
+        match self {
+            BufferInitContent::Owned(ref data) => &data,
+            &BufferInitContent::Defer { start, end } => &buffer[start..end],
+        }
+    }
+}
+
+impl From<Vec<u8>> for BufferInitContent {
+    fn from(vec: Vec<u8>) -> Self {
+        BufferInitContent::Owned(vec)
     }
 }
 
@@ -2429,11 +2481,30 @@ impl From<Rectangle> for QuadTarget {
     }
 }
 
+fn shader_include_to_spirv_static(src: Cow<'static, [u8]>) -> Cow<'static, [u32]> {
+    if let Cow::Borrowed(src) = src {
+        if let Ok(cast) = bytemuck::try_cast_slice(src) {
+            return Cow::Borrowed(cast);
+        }
+    }
+
+    shader_include_to_spirv(&src)
+}
+
 fn shader_include_to_spirv(src: &[u8]) -> Cow<'static, [u32]> {
     assert!(src.len() % 4 == 0);
     let mut target = vec![0u32; src.len() / 4];
     bytemuck::cast_slice_mut(&mut target).copy_from_slice(src);
     Cow::Owned(target)
+}
+
+impl FragmentShader {
+    fn shader(&self) -> &dyn shaders::FragmentShader {
+        match self {
+            FragmentShader::PaintOnTop(kind) => kind,
+            FragmentShader::LinearColorMatrix(shader) => shader,
+        }
+    }
 }
 
 impl PaintOnTopKind {

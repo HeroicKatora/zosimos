@@ -58,6 +58,18 @@ fn main() -> Result<(), BuildError> {
             entry: "encode_r32ui",
             name_overwrite: Some("stage_e32ui"),
         },
+        SimpleSource {
+            path: "src/shaders/fill.frag",
+            kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
+        },
+        SimpleSource {
+            path: "src/shaders/distribution_normal2d.frag",
+            kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
+        },
     ];
 
     let mut compiler = Compiler::new().unwrap();

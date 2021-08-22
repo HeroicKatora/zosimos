@@ -1,8 +1,8 @@
 use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint};
 use crate::pool::PoolImage;
 use crate::program::{
-    CompileError, Function, ImageBufferAssignment, ImageBufferPlan, PaintOnTopKind, Program,
-    QuadTarget, Texture,
+    CompileError, FragmentShader, Function, ImageBufferAssignment, ImageBufferPlan, PaintOnTopKind,
+    Program, QuadTarget, Texture,
 };
 use std::collections::HashMap;
 
@@ -714,7 +714,7 @@ impl CommandBuffer {
                                     selection: region,
                                     target: target.into(),
                                     viewport: target,
-                                    paint_on_top: PaintOnTopKind::Copy,
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
                                 },
                             });
                         }
@@ -786,7 +786,7 @@ impl CommandBuffer {
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
-                                    paint_on_top: PaintOnTopKind::Copy,
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
                                 },
                             });
 
@@ -797,7 +797,7 @@ impl CommandBuffer {
                                     selection: upper_region,
                                     target: QuadTarget::from(upper_region).affine(&affine_matrix),
                                     viewport: lower_region,
-                                    paint_on_top: affine.sampling.as_paint_on_top()?,
+                                    shader: FragmentShader::PaintOnTop(affine.sampling.as_paint_on_top()?),
                                 },
                             })
                         }
@@ -809,7 +809,7 @@ impl CommandBuffer {
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
-                                    paint_on_top: PaintOnTopKind::Copy,
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
                                 },
                             });
 
@@ -820,7 +820,7 @@ impl CommandBuffer {
                                     selection: upper_region,
                                     target: (*placement).into(),
                                     viewport: lower_region,
-                                    paint_on_top: PaintOnTopKind::Copy,
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
                                 },
                             });
                         }

@@ -1,0 +1,2 @@
+pub struct Mat2 {
+}
