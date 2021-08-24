@@ -13,7 +13,9 @@ pub(crate) struct XyzParameter {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum StageKind {
+    #[deprecated = "Not necessarily supported as a Storage texture."]
     R8ui = 0,
+    #[deprecated = "Not necessarily supported as a Storage texture."]
     R16ui = 1,
     R32ui = 2,
     Rgba16ui = 3,

@@ -39,6 +39,7 @@ void main() {
     vec2 pos = (screenSpace - u_fragmentParams.expectation);
     float exponent = 0.5 * dot(pos, u_fragmentParams.covariance_inverse * pos);
     float value = exp(-exponent) / sqrt(u_fragmentParams.pseudo_determinant);
+
     // TODO: can we provide useful information in other channels?
-    f_color = vec4(vec3(clamp(value, 0.0, 1.0)), 1.0);
+    f_color = vec4(vec3(value), 1.0);
 }

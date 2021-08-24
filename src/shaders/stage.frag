@@ -367,7 +367,7 @@ void ENCODE_R32UI_AS_MAIN() {
   // FIXME: YUV transform and accurate YUV transform.
   vec4 components = parts_denormalize(electrical, get_sample_parts());
 
-  uint num = mux_uint(components, get_sample_bits());
+  uint num = mux_uint(clamp(components, 0.0, 1.0), get_sample_bits());
   imageStore(oimage_r32ui, ivec2(gl_FragCoord), uvec4(num));
 }
 
