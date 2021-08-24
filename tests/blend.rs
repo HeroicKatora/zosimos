@@ -269,7 +269,7 @@ fn run_distribution(
 
     let mut commands = CommandBuffer::default();
     let generated = commands
-        .distribution_normal2d(descriptor, command::DistributionNormal2d::with_diagonal(1.0, 1.0))
+        .distribution_normal2d(descriptor, command::DistributionNormal2d::with_diagonal(0.2, 0.2))
         .unwrap();
 
     let (output, _outformat) = commands

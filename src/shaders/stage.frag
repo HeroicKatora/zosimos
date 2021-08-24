@@ -222,7 +222,7 @@ float transfer_oe_smpte240(float val) {
   if (val < 0.0228)
     return 4.0 * val;
   else
-    return 1.1115 * pow(val, 0.45);
+    return 1.1115 * pow(val, 0.45) - 0.1115;
 }
 
 // Used Reference: https://www.kernel.org/doc/html/v4.11/media/uapi/v4l/pixfmt-007.html#colorspace-smpte-240m-v4l2-colorspace-smpte240m
@@ -230,7 +230,7 @@ float transfer_eo_smpte240(float val) {
   if (val < 0.0913)
     return val / 4.0;
   else
-    return pow(val / 1.1115, 1.0 / 0.045);
+    return pow((val - 0.1115) / 1.1115, 1.0 / 0.45);
 }
 
 // Used Reference: https://www.kernel.org/doc/html/v4.11/media/uapi/v4l/pixfmt-007.html#
@@ -238,7 +238,7 @@ float transfer_eo_smpte240(float val) {
 float transfer_oe_srgb(float val) {
   if (val < -0.0031308)
     return -1.055 * pow(-val, 1.0 / 2.4) + 0.055;
-  else if (val <= 0.04045)
+  else if (val <= 0.0031308)
     return val * 12.92;
   else
     return 1.055 * pow(val, 1.0 / 2.4) - 0.055;
