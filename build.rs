@@ -49,6 +49,12 @@ fn main() -> Result<(), BuildError> {
         SimpleSource {
             path: "src/shaders/stage.frag",
             kind: ShaderKind::Fragment,
+            entry: "encode_r8ui",
+            name_overwrite: Some("stage_e8ui"),
+        },
+        SimpleSource {
+            path: "src/shaders/stage.frag",
+            kind: ShaderKind::Fragment,
             entry: "decode_r32ui",
             name_overwrite: Some("stage_d32ui"),
         },

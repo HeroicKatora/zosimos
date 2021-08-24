@@ -46,6 +46,10 @@ pub struct Program {
 /// A single command might be translated to multiple functions.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Function {
+    /// Execute a shader on an target rectangle.
+    ///
+    /// The UV coordinates and position is determined by vertex shader parameters computed from a
+    /// selection, a target location, and a viewport.
     /// VS: id
     ///   in: vec3 position
     ///   in: vec2 vertUv
@@ -55,8 +59,9 @@ pub(crate) enum Function {
     ///   in: vec2 uv
     ///   bind(1,0): texture
     ///   bind(1,1): sampler2D
+    ///   bind(2,0): shader specific data.
     ///   out: vec4 (color)
-    PaintOnTop {
+    PaintToSelection {
         /// Source selection (relative to texture coordinates).
         selection: Rectangle,
         /// Target location in target texture.
@@ -65,8 +70,9 @@ pub(crate) enum Function {
         /// The target coordinates are relative to this and the fragment shader given by
         /// paint_on_top is only executed within that rectangle.
         viewport: Rectangle,
-        shader: FragmentShader,
+        shader: shaders::FragmentShader,
     },
+    /// Execute a shader on full textures.
     /// VS: id
     ///   in: vec3 position
     ///   in: vec2 vertUv
@@ -76,9 +82,11 @@ pub(crate) enum Function {
     ///   in: vec2 uv
     ///   bind(1,0): texture
     ///   bind(1,1): sampler2D
-    ///   bind(2,0): transform matrix
+    ///   bind(2,0): shader specific data.
     ///   out: vec4 (color)
-    Transform { matrix: RowMatrix },
+    PaintFullScreen {
+        shader: shaders::FragmentShader,
+    },
     /// VS: id
     /// FS:
     ///   bind(1, …) readonly inputs uimage2D
@@ -106,11 +114,6 @@ pub(crate) enum Function {
 pub enum QuadTarget {
     Rect(Rectangle),
     Absolute([[f32; 2]; 4]),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum PaintOnTopKind {
-    Copy,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -192,7 +195,7 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     /// each potential usage.
     stage_group_layout: HashMap<u32, usize>,
     known_samplers: HashMap<SamplerDescriptor, usize>,
-    fragment_shaders: HashMap<FragmentShaderKey, usize>,
+    fragment_shaders: HashMap<shaders::FragmentShaderKey, usize>,
     vertex_shaders: HashMap<VertexShader, usize>,
     simple_quad_buffer: Option<DeviceBuffer>,
     /// The render pipeline state for staging a texture.
@@ -294,20 +297,6 @@ enum VertexShader {
     Noop,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum FragmentShader {
-    PaintOnTop(PaintOnTopKind),
-    LinearColorMatrix(shaders::LinearColorTransform),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum FragmentShaderKey {
-    PaintOnTop(PaintOnTopKind),
-    /// Linear color transformation.
-    LinearColorMatrix,
-    /// The conversion of texel format.
-    Convert,
-}
 
 #[derive(Debug)]
 pub struct LaunchError {
@@ -721,12 +710,17 @@ enum TextureBind {
         /// The layout corresponding to the bind group.
         layout: usize,
     },
+    None,
 }
 
 enum BufferBind<'data> {
     /// Upload the data, then bind the buffer.
     Set {
         data: &'data [u8],
+    },
+    /// The data has already been planned beforehand.
+    Planned {
+        data: BufferInitContent,
     },
     None,
     // /// The data is already there, simply bind the buffer.
@@ -745,7 +739,7 @@ enum ShaderBind {
 struct SimpleRenderPipeline {
     pipeline: usize,
     buffer: DeviceBuffer,
-    group: usize,
+    group: Option<usize>,
     vertex_bind: Option<usize>,
     vertices: u32,
     fragment_bind: Option<usize>,
@@ -956,8 +950,52 @@ impl Launcher<'_> {
                     encoder.copy_staging_to_buffer(src)?;
                     encoder.copy_buffer_to_output(src, dst)?;
                 }
-                High::Construct { .. } => {
-                    todo!()
+                High::Construct { dst, fn_ } => {
+                    let dst_texture = match dst {
+                        Target::Discard(texture) | Target::Load(texture) => *texture,
+                    };
+
+                    encoder.ensure_allocate_texture(dst_texture)?;
+                    let dst_view = encoder.texture_view(dst_texture)?;
+
+                    let ops = match dst {
+                        Target::Discard(_) => {
+                            wgpu::Operations {
+                                // TODO: we could let choose a replacement color..
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
+                                store: true,
+                            }
+                        }
+                        Target::Load(_) => wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: true,
+                        },
+                    };
+
+                    let attachment = ColorAttachmentDescriptor {
+                        texture_view: dst_view,
+                        ops,
+                    };
+
+                    let render = encoder.prepare_render(None, fn_, dst_texture)?;
+
+                    // TODO: we need to remember the attachment format here.
+                    // This is need to to automatically construct the shader pipeline.
+                    encoder.push(Low::BeginCommands)?;
+                    encoder.push(Low::BeginRenderPass(RenderPassDescriptor {
+                        color_attachments: vec![attachment],
+                        depth_stencil: None,
+                    }))?;
+                    encoder.render(render)?;
+                    encoder.push(Low::EndRenderPass)?;
+                    encoder.push(Low::EndCommands)?;
+
+                    // Actually run it immediately.
+                    // TODO: this might not be the most efficient.
+                    encoder.push(Low::RunTopCommand)?;
+
+                    // Post paint, make sure we quantize everything.
+                    encoder.copy_texture_to_staging(dst_texture)?;
                 }
                 High::Paint { texture, dst, fn_ } => {
                     let dst_texture = match dst {
@@ -989,7 +1027,7 @@ impl Launcher<'_> {
                         ops,
                     };
 
-                    let render = encoder.prepare_render(*texture, fn_, dst_texture)?;
+                    let render = encoder.prepare_render(Some(*texture), fn_, dst_texture)?;
 
                     // TODO: we need to remember the attachment format here.
                     // This is need to to automatically construct the shader pipeline.
@@ -1007,7 +1045,7 @@ impl Launcher<'_> {
                     encoder.push(Low::RunTopCommand)?;
 
                     // Post paint, make sure we quantize everything.
-                    encoder.copy_texture_to_staging(*texture)?;
+                    encoder.copy_texture_to_staging(dst_texture)?;
                 }
             }
         }
@@ -1505,7 +1543,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     stage_kind: staging.stage_kind,
                 };
 
-                self.prepare_render(idx, &fn_, idx)?
+                self.prepare_render(Some(idx), &fn_, idx)?
             };
 
             let dst_view = self.texture_view(idx)?;
@@ -1549,7 +1587,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     stage_kind: staging.stage_kind,
                 };
 
-                self.prepare_render(idx, &fn_, idx)?
+                self.prepare_render(Some(idx), &fn_, idx)?
             };
 
             let dst_view = {
@@ -1748,6 +1786,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
+    fn make_empty_group_layout(&mut self) -> usize {
+        let descriptor = BindGroupLayoutDescriptor {
+            entries: vec![],
+        };
+
+        self.instructions.extend_one(Low::BindGroupLayout(descriptor));
+        let descriptor_id = self.bind_group_layouts;
+        self.bind_group_layouts += 1;
+        descriptor_id
+    }
+
     fn make_stage_group(&mut self, binding: u32) -> usize {
         use shaders::stage::StageKind;
         let bind_group_layouts = &mut self.bind_group_layouts;
@@ -1827,12 +1876,19 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     fn make_paint_layout(&mut self, desc: &SimpleRenderPipelineDescriptor) -> usize {
         let quad_bind_group = self.make_quad_bind_group();
-        let paint_bind_group = match desc.fragment_texture {
-            TextureBind::Texture(_) => self.make_paint_group_layout(),
-            TextureBind::PreComputedGroup { layout, .. } => layout,
+
+        let mut bind_group_layouts = vec![quad_bind_group];
+
+        match desc.fragment_texture {
+            TextureBind::Texture(_) => {
+                bind_group_layouts.push(self.make_paint_group_layout())
+            }
+            TextureBind::PreComputedGroup { layout, .. } => {
+                bind_group_layouts.push(layout);
+            }
+            TextureBind::None  => {},
         };
 
-        let mut bind_group_layouts = vec![quad_bind_group, paint_bind_group];
 
         if let BufferBind::None = desc.fragment_bind_data {
             let layouts = &mut self.pipeline_layouts;
@@ -1876,7 +1932,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     fn fragment_shader(
         &mut self,
-        kind: Option<FragmentShaderKey>,
+        kind: Option<shaders::FragmentShaderKey>,
         source: Cow<'static, [u32]>,
     ) -> Result<usize, LaunchError> {
         if let Some(&shader) = kind.and_then(|k| self.fragment_shaders.get(&k)) {
@@ -2023,6 +2079,18 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(group)
     }
 
+    fn make_bind_group_empty_texture(&mut self) -> Result<usize, LaunchError> {
+        let group = self.bind_groups;
+        let descriptor = BindGroupDescriptor {
+            layout_idx: self.make_empty_group_layout(),
+            entries: vec![],
+            sparse: vec![],
+        };
+
+        self.push(Low::BindGroup(descriptor))?;
+        Ok(group)
+    }
+
     fn make_opto_fragment_group(
         &mut self,
         binding: u32,
@@ -2079,7 +2147,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     fn make_bound_buffer(
         &mut self,
-        bind: &BufferBind<'_>,
+        bind: BufferBind<'_>,
         layout_idx: usize,
     ) -> Result<Option<usize>, LaunchError> {
         let buffer = match bind {
@@ -2089,6 +2157,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let content = self.ingest_data(data);
                 self.push(Low::BufferInit(BufferDescriptorInit {
                     content: content,
+                    usage: BufferUsage::Uniform,
+                }))?;
+                DeviceBuffer(buffer)
+            }
+            BufferBind::Planned { data } => {
+                let buffer = self.buffers;
+                self.push(Low::BufferInit(BufferDescriptorInit {
+                    content: data,
                     usage: BufferUsage::Uniform,
                 }))?;
                 DeviceBuffer(buffer)
@@ -2131,20 +2207,23 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             TextureBind::Texture(texture) => {
                 let group = self.make_bind_group_sampled_texture(*texture)?;
                 // eprintln!("Using Texture {:?} as group {:?}", texture, group);
-                group
+                Some(group)
             }
             &TextureBind::PreComputedGroup { group, .. } => {
                 // eprintln!("Using Target Group {:?}", group);
-                group
+                Some(group)
+            }
+            TextureBind::None => {
+                None
             }
         };
 
         let vertex_layout = self.make_quad_bind_group();
-        let vertex_bind = self.make_bound_buffer(vertex_bind_data, vertex_layout)?;
+        let vertex_bind = self.make_bound_buffer(descriptor.vertex_bind_data, vertex_layout)?;
 
         // FIXME: this builds the layout even when it is not required.
         let vertex_layout = self.make_generic_fragment_bind_group();
-        let fragment_bind = self.make_bound_buffer(fragment_bind_data, vertex_layout)?;
+        let fragment_bind = self.make_bound_buffer(descriptor.fragment_bind_data, vertex_layout)?;
 
         Ok(SimpleRenderPipeline {
             pipeline,
@@ -2185,19 +2264,24 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         self.push(Low::SetPipeline(pipeline))?;
 
+        let mut group_idx = 0;
         if let Some(quad) = vertex_bind {
             self.push(Low::SetBindGroup {
                 group: quad,
-                index: 0,
+                index: group_idx,
                 offsets: Cow::Borrowed(&[]),
             })?;
+            group_idx += 1;
         }
 
-        self.push(Low::SetBindGroup {
-            group,
-            index: 1,
-            offsets: Cow::Borrowed(&[]),
-        })?;
+        if let Some(group) = group {
+            self.push(Low::SetBindGroup {
+                group,
+                index: group_idx,
+                offsets: Cow::Borrowed(&[]),
+            })?;
+            group_idx += 1;
+        }
 
         self.push(Low::SetVertexBuffer {
             buffer: buffer.0,
@@ -2207,7 +2291,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         if let Some(bind) = fragment_bind {
             self.push(Low::SetBindGroup {
                 group: bind,
-                index: 2,
+                index: group_idx,
                 offsets: Cow::Borrowed(&[]),
             })?;
         }
@@ -2221,7 +2305,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn prepare_render(
         &mut self,
         // The texture which we are using as the fragment source.
-        texture: Texture,
+        texture: Option<Texture>,
         // The function we are using.
         function: &Function,
         // The texture we are rendering to.
@@ -2230,7 +2314,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         -> Result<SimpleRenderPipeline, LaunchError>
     {
         match function {
-            Function::PaintOnTop { selection, target: target_coords, viewport, shader } => {
+            Function::PaintToSelection { selection, target: target_coords, viewport, shader } => {
+                let texture = texture.ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
                 let (tex_width, tex_height) = self.texture_map[&texture].format.size;
 
                 let vertex = self.vertex_shader(
@@ -2238,12 +2323,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let shader = shader.shader();
-
                 let key = shader.key();
-                let fragment = shader.shader();
+                let spirv = shader.spirv_source();
 
-                let fragment = self.fragment_shader(key, shader_include_to_spirv_static(fragment))?;
+                let fragment = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
 
+                let buffer: [[f32; 2]; 16];
                 // FIXME: there seems to be two floats padding after each vec2.
                 let min_u = (selection.x as f32) / (tex_width.get() as f32);
                 let max_u = (selection.max_x as f32) / (tex_width.get() as f32);
@@ -2253,7 +2338,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let coords = target_coords.to_screenspace_coords(viewport);
 
                 // std140, always pad to 16 bytes.
-                let buffer: [[f32; 2]; 16] = [
+                buffer = [
                     [min_u, min_v], [0.0, 0.0],
                     [max_u, min_v], [0.0, 0.0],
                     [max_u, max_v], [0.0, 0.0],
@@ -2276,45 +2361,43 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
             },
-            Function::Transform { matrix } => {
+            Function::PaintFullScreen { shader } => {
                 let vertex = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
-                let fragment = self.fragment_shader(
-                    Some(FragmentShaderKey::LinearColorMatrix),
-                    shader_include_to_spirv(shaders::FRAG_LINEAR))?;
+                let shader = shader.shader();
+                let key = shader.key();
+                let spirv = shader.spirv_source();
 
-                let matrix = matrix.into_inner();
-
-                // std140, always pad to 16 bytes.
-                // matrix is an array of its columns.
-                let rgb_matrix: [f32; 12] = [
-                   matrix[0], matrix[3], matrix[6], 0.0,
-                   matrix[1], matrix[4], matrix[7], 0.0,
-                   matrix[2], matrix[5], matrix[8], 0.0,
-                ];
+                let fragment = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
+                let fragment_bind_data = shader.binary_data(&mut self.binary_data)
+                    .map(|data| BufferBind::Planned { data })
+                    .unwrap_or(BufferBind::None);
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
                     pipeline_target: PipelineTarget::Texture(target),
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
-                    fragment_texture: TextureBind::Texture(texture),
-                    fragment_bind_data: BufferBind::Set {
-                        data: bytemuck::cast_slice(&rgb_matrix[..]),
+                    fragment_texture: if let Some(texture) = texture {
+                        TextureBind::Texture(texture)
+                    } else {
+                        TextureBind::None
                     },
+                    fragment_bind_data,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
             },
             Function::ToLinearOpto { parameter, stage_kind } => {
+                let texture = texture.ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
                 let vertex = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(FragmentShaderKey::Convert),
+                    Some(shaders::FragmentShaderKey::Convert),
                     shader_include_to_spirv(stage_kind.decode_src()))?;
 
                 let buffer = parameter.serialize_std140();
@@ -2354,12 +2437,13 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 })
             }
             Function::FromLinearOpto { parameter, stage_kind } => {
+                let texture = texture.ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
                 let vertex = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(FragmentShaderKey::Convert),
+                    Some(shaders::FragmentShaderKey::Convert),
                     shader_include_to_spirv(stage_kind.encode_src()))?;
 
                 let buffer = parameter.serialize_std140();
@@ -2496,23 +2580,6 @@ fn shader_include_to_spirv(src: &[u8]) -> Cow<'static, [u32]> {
     let mut target = vec![0u32; src.len() / 4];
     bytemuck::cast_slice_mut(&mut target).copy_from_slice(src);
     Cow::Owned(target)
-}
-
-impl FragmentShader {
-    fn shader(&self) -> &dyn shaders::FragmentShader {
-        match self {
-            FragmentShader::PaintOnTop(kind) => kind,
-            FragmentShader::LinearColorMatrix(shader) => shader,
-        }
-    }
-}
-
-impl PaintOnTopKind {
-    fn fragment_shader(&self) -> &[u8] {
-        match self {
-            PaintOnTopKind::Copy => shaders::FRAG_COPY,
-        }
-    }
 }
 
 impl BufferUsage {

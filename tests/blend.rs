@@ -57,6 +57,11 @@ fn integration() {
         instance.enumerate_adapters(ANY),
         pool_background.clone(),
     );
+
+    run_distribution(
+        &mut pool,
+        instance.enumerate_adapters(ANY),
+    );
 }
 
 fn run_blending(
@@ -248,6 +253,48 @@ fn run_conversion(
 
     let image_converted = pool.entry(result).unwrap();
     util::assert_reference(image_converted.into(), "convert_bt709.png.crc");
+}
+
+fn run_distribution(
+    pool: &mut Pool,
+    adapters: impl Iterator<Item = wgpu::Adapter>,
+) {
+    let mut layout = image::DynamicImage::new_luma_a16(400, 400);
+
+    let descriptor = Descriptor {
+        layout: (&layout).into(),
+        texel: buffer::Texel::with_srgb_image(&layout),
+    };
+
+
+    let mut commands = CommandBuffer::default();
+    let generated = commands
+        .distribution_normal2d(descriptor, command::DistributionNormal2d::with_diagonal(1.0, 1.0))
+        .unwrap();
+
+    let (output, _outformat) = commands
+        .output(generated)
+        .expect("Valid for output");
+
+    let result = run_once_with_output(
+        commands,
+        pool,
+        adapters,
+        vec![],
+        retire_with_one_image(output),
+    );
+
+    let image_generated = pool.entry(result).unwrap();
+
+    match layout {
+        image::DynamicImage::ImageLumaA16(ref mut buffer) => {
+            let bytes = image_generated.as_bytes().expect("Not a byte image");
+            bytemuck::cast_slice_mut(&mut *buffer).copy_from_slice(bytes);
+        }
+        _ => unreachable!(),
+    }
+
+    util::assert_reference_image(layout, "distribution_normal2d.png.crc");
 }
 
 /* Utility methods  */

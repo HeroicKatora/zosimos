@@ -10,7 +10,10 @@ pub fn assert_reference(image: PoolImage, key: &str) {
     let image = image
         .to_image()
         .expect("Invalid image, must be convertible to `image` image");
+    assert_reference_image(image, key);
+}
 
+pub fn assert_reference_image(image: image::DynamicImage, key: &str) {
     let mut crc = crc32fast::Hasher::new();
     let (width, height) = image.dimensions();
     crc.write_u32(width);

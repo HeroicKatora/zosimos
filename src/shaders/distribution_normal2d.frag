@@ -2,7 +2,7 @@
 layout (location = 0) in vec2 uv;
 layout (location = 0) out vec4 f_color;
 
-layout (set = 2, binding = 0) uniform FragmentColor {
+layout (set = 1, binding = 0) uniform FragmentColor {
     // The expected value of each coordinate (often denoted mu).
     vec2 expectation;
     // The covariance matrix of random values (often denoted Sigma). This is
@@ -17,6 +17,7 @@ layout (set = 2, binding = 0) uniform FragmentColor {
     float pseudo_determinant;
 } u_fragmentParams;
 
+/*
 double pseudoDeterminant(mat2 m) {
     double c = determinant(m);
     double b = -(m[0].x + m[1].y);
@@ -29,13 +30,17 @@ double pseudoDeterminant(mat2 m) {
     // c) the product is the determinant c otherwise
     return determinant(m);
 }
+*/
 
 #define PI 3.1415926538
 
 void main() {
-    vec2 pos = (uv - u_fragmentParams.expectation);
-    double exponent = dot(pos, u_fragmentParams.covariance_inverse * pos);
-    double value = u_fragmentParams.pseudo_determinant * exp(exponent);
+    vec2 screenSpace = uv - vec2(0.5);
+    vec2 pos = (screenSpace - vec2(0.0)); // u_fragmentParams.expectation);
+    // float exponent = dot(pos, pos);
+    float exponent = dot(pos, u_fragmentParams.covariance_inverse * pos);
+    float value = exp(-exponent) / u_fragmentParams.pseudo_determinant;
+    // float value = (1.0/PI) * exp(-exponent);
     // TODO: can we provide useful information in other channels?
-    f_color = vec4(value);
+    f_color = vec4(vec3(value), 1.0);
 }

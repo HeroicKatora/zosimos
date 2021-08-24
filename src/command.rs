@@ -1,9 +1,13 @@
-use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint};
+use crate::buffer::{
+    BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, SampleParts, Texel, Whitepoint
+};
 use crate::pool::PoolImage;
 use crate::program::{
-    CompileError, FragmentShader, Function, ImageBufferAssignment, ImageBufferPlan, PaintOnTopKind,
-    Program, QuadTarget, Texture,
+    CompileError, Function, ImageBufferAssignment, ImageBufferPlan, Program, QuadTarget, Texture,
 };
+use crate::shaders::{self, FragmentShader, PaintOnTopKind};
+pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
+
 use std::collections::HashMap;
 
 /// A reference to one particular value.
@@ -65,6 +69,8 @@ enum Op {
 pub(crate) enum ConstructOp {
     // TODO: can optimize this repr for the common case.
     Solid(Vec<u8>),
+    /// A 2d normal distribution.
+    DistributionNormal(shaders::DistributionNormal2d),
 }
 
 /// A high-level, device independent, translation of ops.
@@ -87,8 +93,10 @@ pub(crate) enum High {
         /// The target texture.
         dst: Register,
     },
-    #[deprecated = "Should be mapped to of paint with a discarding load or another buffer initialization."]
-    Construct { dst: Texture, op: ConstructOp },
+    Construct {
+        dst: Target,
+        fn_: Function,
+    },
     Paint {
         texture: Texture,
         dst: Target,
@@ -588,6 +596,37 @@ impl CommandBuffer {
         }))
     }
 
+    /// A 2d image with a normal distribution.
+    ///
+    /// The parameters are controlled through the `distribution` parameter while the `texel`
+    /// parameter controls the eventual binary encoding of the image. It must be compatible with a
+    /// single gray channel (but you can have electrical transfer functions, choose arbitrary bit
+    /// widths etc.).
+    pub fn distribution_normal2d(
+        &mut self,
+        describe: Descriptor,
+        distribution: shaders::DistributionNormal2d,
+    ) -> Result<Register, CommandError> {
+        if !describe.is_consistent() {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(describe),
+            });
+        }
+
+        if describe.texel.samples.parts != SampleParts::Luma
+            && describe.texel.samples.parts != SampleParts::LumaA
+        {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(describe),
+            });
+        }
+
+        Ok(self.push(Op::Construct {
+            desc: describe,
+            op: ConstructOp::DistributionNormal(distribution),
+        }))
+    }
+
     /// Overlay an affine transformation of the image.
     pub fn affine(
         &mut self,
@@ -696,10 +735,18 @@ impl CommandBuffer {
                     });
                 }
                 Op::Construct { desc: _, op } => {
-                    high_ops.push(High::Construct {
-                        dst: texture,
-                        op: op.clone(),
-                    });
+                    match op {
+                        &ConstructOp::DistributionNormal(ref distribution) => {
+                            high_ops.push(High::Construct {
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::Normal2d(distribution.clone()),
+                                },
+                            })
+                        },
+                        _ => return Err(CompileError::NotYetImplemented),
+                    }
+
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 Op::Unary { desc: _, src, op } => {
@@ -710,7 +757,7 @@ impl CommandBuffer {
                             high_ops.push(High::Paint {
                                 texture: reg_to_texture[src],
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
                                     selection: region,
                                     target: target.into(),
                                     viewport: target,
@@ -733,8 +780,10 @@ impl CommandBuffer {
                             high_ops.push(High::Paint {
                                 texture: reg_to_texture[src],
                                 dst: Target::Discard(texture),
-                                fn_: Function::Transform {
-                                    matrix: matrix.into(),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::LinearColorMatrix(shaders::LinearColorTransform {
+                                        matrix: matrix.into(),
+                                    })
                                 },
                             });
                         }
@@ -756,8 +805,10 @@ impl CommandBuffer {
                             high_ops.push(High::Paint {
                                 texture: reg_to_texture[src],
                                 dst: Target::Discard(texture),
-                                fn_: Function::Transform {
-                                    matrix: color.into_matrix(),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::LinearColorMatrix(shaders::LinearColorTransform {
+                                        matrix: color.into_matrix(),
+                                    })
                                 },
                             });
                         }
@@ -782,7 +833,7 @@ impl CommandBuffer {
                             high_ops.push(High::Paint {
                                 dst: Target::Discard(texture),
                                 texture: reg_to_texture[lhs],
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
@@ -793,7 +844,7 @@ impl CommandBuffer {
                             high_ops.push(High::Paint {
                                 texture: reg_to_texture[rhs],
                                 dst: Target::Load(texture),
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
                                     selection: upper_region,
                                     target: QuadTarget::from(upper_region).affine(&affine_matrix),
                                     viewport: lower_region,
@@ -805,7 +856,7 @@ impl CommandBuffer {
                             high_ops.push(High::Paint {
                                 dst: Target::Discard(texture),
                                 texture: reg_to_texture[lhs],
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
@@ -816,7 +867,7 @@ impl CommandBuffer {
                             high_ops.push(High::Paint {
                                 dst: Target::Load(texture),
                                 texture: reg_to_texture[rhs],
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
                                     selection: upper_region,
                                     target: (*placement).into(),
                                     viewport: lower_region,
