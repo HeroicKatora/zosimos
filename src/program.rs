@@ -1047,6 +1047,22 @@ impl Launcher<'_> {
                     // Post paint, make sure we quantize everything.
                     encoder.copy_texture_to_staging(dst_texture)?;
                 }
+                High::Copy { src, dst } => {
+                    let &RegisterMap { buffer: source_buffer, ref buffer_layout, .. } =
+                        encoder.allocate_register(*src)?;
+                    let size = buffer_layout.u64_len();
+                    let target_buffer = encoder.allocate_register(*dst)?.buffer;
+
+                    encoder.copy_staging_to_buffer(*src)?;
+
+                    encoder.push(Low::CopyBufferToBuffer {
+                        source_buffer,
+                        size,
+                        target_buffer,
+                    })?;
+
+                    encoder.copy_buffer_to_staging(*dst)?;
+                }
             }
         }
 
@@ -1786,17 +1802,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
-    fn make_empty_group_layout(&mut self) -> usize {
-        let descriptor = BindGroupLayoutDescriptor {
-            entries: vec![],
-        };
-
-        self.instructions.extend_one(Low::BindGroupLayout(descriptor));
-        let descriptor_id = self.bind_group_layouts;
-        self.bind_group_layouts += 1;
-        descriptor_id
-    }
-
     fn make_stage_group(&mut self, binding: u32) -> usize {
         use shaders::stage::StageKind;
         let bind_group_layouts = &mut self.bind_group_layouts;
@@ -2072,18 +2077,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 BindingResource::TextureView(view),
                 BindingResource::Sampler(sampler),
             ],
-            sparse: vec![],
-        };
-
-        self.push(Low::BindGroup(descriptor))?;
-        Ok(group)
-    }
-
-    fn make_bind_group_empty_texture(&mut self) -> Result<usize, LaunchError> {
-        let group = self.bind_groups;
-        let descriptor = BindGroupDescriptor {
-            layout_idx: self.make_empty_group_layout(),
-            entries: vec![],
             sparse: vec![],
         };
 

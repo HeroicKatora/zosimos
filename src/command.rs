@@ -105,6 +105,11 @@ pub(crate) enum High {
     /// Last phase marking a register as done.
     /// This is emitted after the Command defining the register has been translated.
     Done(usize),
+    /// Copy binary data from a buffer to another.
+    Copy {
+        src: Register,
+        dst: Register,
+    }
 }
 
 /// The target image texture of a paint operation (pipeline).
@@ -129,6 +134,9 @@ pub(crate) enum UnaryOp {
     /// This is a partial method for CIE XYZ-ish color spaces. Note that ICC requires adaptation to
     /// D50 for example as the reference color space.
     ChromaticAdaptation(ChromaticAdaptation),
+    /// Opt(T) = T[.texel=texel]
+    /// And the byte width of new texel must be consistent with the current byte width.
+    Transmute,
 }
 
 #[derive(Clone)]
@@ -520,7 +528,32 @@ impl CommandBuffer {
     /// One important use of this method is to add or removed the color interpretation of an image.
     /// This can be necessary when it has been algorithmically created or when one wants to
     /// intentionally ignore such meaning.
-    pub fn transmute(&mut self, _: Register, _: Texel) -> Result<Register, CommandError> {
+    pub fn transmute(&mut self, src: Register, texel: Texel) -> Result<Register, CommandError> {
+        let desc = self.describe_reg(src)?;
+
+        let supposed_type = Descriptor {
+            layout: desc.layout.clone(),
+            texel,
+        };
+
+        if desc.texel.samples.bits.bytes() != supposed_type.texel.samples.bits.bytes() {
+            return Err(CommandError{
+                inner: CommandErrorKind::ConflictingTypes(desc.clone(), supposed_type),
+            });
+        }
+
+        if !supposed_type.is_consistent() {
+            return Err(CommandError{
+                inner: CommandErrorKind::BadDescriptor(supposed_type),
+            });
+        }
+
+        let op = Op::Unary {
+            src,
+            op: UnaryOp::Transmute,
+            desc: supposed_type,
+        };
+
         Err(CommandError::UNIMPLEMENTED)
     }
 
@@ -649,7 +682,8 @@ impl CommandBuffer {
         match affine.sampling {
             AffineSample::Nearest => (),
             AffineSample::BiLinear => {
-                todo!("Check for a color which we can sample bi-linearly")
+                // "Check for a color which we can sample bi-linearly"
+                return Err(CommandError::UNIMPLEMENTED);
             }
         }
 
@@ -811,6 +845,12 @@ impl CommandBuffer {
                                     })
                                 },
                             });
+                        }
+                        UnaryOp::Transmute => {
+                            high_ops.push(High::Copy {
+                                src: *src,
+                                dst: Register(idx),
+                            })
                         }
                         _ => return Err(CompileError::NotYetImplemented),
                     }
