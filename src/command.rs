@@ -791,10 +791,11 @@ impl CommandBuffer {
                         &UnaryOp::Crop(region) => {
                             let target =
                                 Rectangle::with_width_height(region.width(), region.height());
-                            high_ops.push(High::Paint {
-                                texture: reg_to_texture[src],
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[src],
                                     selection: region,
                                     target: target.into(),
                                     viewport: target,
@@ -814,8 +815,8 @@ impl CommandBuffer {
                             // eprintln!("{:?}", adapt);
                             // eprintln!("{:?}", matrix);
 
-                            high_ops.push(High::Paint {
-                                texture: reg_to_texture[src],
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Function::PaintFullScreen {
                                     shader: FragmentShader::LinearColorMatrix(shaders::LinearColorTransform {
@@ -834,13 +835,13 @@ impl CommandBuffer {
                             // light representation are used in a single paint call but this
                             // violates it on purpose.
 
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
                             // FIXME: using a copy here but this means we do this in unnecessarily
                             // many steps. We first decode to linear color, then draw, then code
                             // back to the non-linear electrical space.
                             // We could do this directly from one matrix to another or try using an
                             // ephemeral intermediate attachment?
-                            high_ops.push(High::Paint {
-                                texture: reg_to_texture[src],
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Function::PaintFullScreen {
                                     shader: FragmentShader::LinearColorMatrix(shaders::LinearColorTransform {
@@ -873,10 +874,11 @@ impl CommandBuffer {
                         BinaryOp::Affine(affine) => {
                             let affine_matrix = RowMatrix::new(affine.transformation);
 
-                            high_ops.push(High::Paint {
+                            high_ops.push(High::PushOperand(reg_to_texture[lhs]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                texture: reg_to_texture[lhs],
                                 fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[lhs],
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
@@ -884,10 +886,11 @@ impl CommandBuffer {
                                 },
                             });
 
-                            high_ops.push(High::Paint {
-                                texture: reg_to_texture[rhs],
+                            high_ops.push(High::PushOperand(reg_to_texture[rhs]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
                                 fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[rhs],
                                     selection: upper_region,
                                     target: QuadTarget::from(upper_region).affine(&affine_matrix),
                                     viewport: lower_region,
@@ -896,10 +899,11 @@ impl CommandBuffer {
                             })
                         }
                         BinaryOp::Inscribe { placement } => {
-                            high_ops.push(High::Paint {
+                            high_ops.push(High::PushOperand(reg_to_texture[lhs]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                texture: reg_to_texture[lhs],
                                 fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[lhs],
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
@@ -907,10 +911,11 @@ impl CommandBuffer {
                                 },
                             });
 
-                            high_ops.push(High::Paint {
+                            high_ops.push(High::PushOperand(reg_to_texture[rhs]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
-                                texture: reg_to_texture[rhs],
                                 fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[rhs],
                                     selection: upper_region,
                                     target: (*placement).into(),
                                     viewport: lower_region,

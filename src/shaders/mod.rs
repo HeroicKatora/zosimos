@@ -27,6 +27,9 @@ pub(crate) trait FragmentShaderData:
     fn binary_data(&self, _: &mut Vec<u8>) -> Option<BufferInitContent> {
         None
     }
+    fn num_args(&self) -> u32 {
+        1
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

@@ -62,6 +62,9 @@ pub(crate) enum Function {
     ///   bind(2,0): shader specific data.
     ///   out: vec4 (color)
     PaintToSelection {
+        /// The texture which is used as source.
+        /// We require this to compute the specific quad coordinates.
+        texture: Texture,
         /// Source selection (relative to texture coordinates).
         selection: Rectangle,
         /// Target location in target texture.
@@ -1084,6 +1087,7 @@ impl Launcher<'_> {
         // Unbalanced operands shouldn't happen.
         // This is part of validation layer but cheap and we always do it.
         if !encoder.operands.is_empty() {
+            eprintln!("{:?}", encoder.operands.as_slice());
             return Err(LaunchError::InternalCommandError(line!()));
         }
 
@@ -1582,7 +1586,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     stage_kind: staging.stage_kind,
                 };
 
-                self.push_operand(idx)?;
                 self.prepare_render(Some(idx), &fn_, idx)?
             };
 
@@ -1627,7 +1630,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     stage_kind: staging.stage_kind,
                 };
 
-                self.push_operand(idx)?;
                 self.prepare_render(Some(idx), &fn_, idx)?
             };
 
@@ -2331,7 +2333,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn prepare_render(
         &mut self,
         // The texture which we are using as the fragment source.
-        texture: Option<Texture>,
+        _: Option<Texture>,
         // The function we are using.
         function: &Function,
         // The texture we are rendering to.
@@ -2340,8 +2342,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         -> Result<SimpleRenderPipeline, LaunchError>
     {
         match function {
-            Function::PaintToSelection { selection, target: target_coords, viewport, shader } => {
-                let texture = texture.ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+            Function::PaintToSelection { texture, selection, target: target_coords, viewport, shader } => {
                 let (tex_width, tex_height) = self.texture_map[&texture].format.size;
 
                 let vertex = self.vertex_shader(
@@ -2401,23 +2402,20 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     .map(|data| BufferBind::Planned { data })
                     .unwrap_or(BufferBind::None);
 
+                let arguments = shader.num_args();
+
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
                     pipeline_target: PipelineTarget::Texture(target),
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
-                    fragment_texture: if let Some(texture) = texture {
-                        TextureBind::Textures(1)
-                    } else {
-                        TextureBind::Textures(0)
-                    },
+                    fragment_texture: TextureBind::Textures(arguments as usize),
                     fragment_bind_data,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
             },
             Function::ToLinearOpto { parameter, stage_kind } => {
-                let texture = texture.ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
                 let vertex = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
@@ -2434,7 +2432,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 let group = self.make_opto_fragment_group(
                     stage_kind.decode_binding(),
-                    texture,
+                    target,
                     None,
                 )?;
 
@@ -2463,7 +2461,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 })
             }
             Function::FromLinearOpto { parameter, stage_kind } => {
-                let texture = texture.ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
                 let vertex = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
@@ -2480,8 +2477,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 let group = self.make_opto_fragment_group(
                     stage_kind.encode_binding(),
-                    texture,
-                    Some(texture),
+                    target,
+                    Some(target),
                 )?;
 
                 // eprintln!("{:?} {:?}", parameter, buffer);

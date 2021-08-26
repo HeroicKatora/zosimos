@@ -119,4 +119,8 @@ impl FragmentShaderData for Shader {
 
         Some(BufferInitContent::new(buffer, &rgb_data))
     }
+
+    fn num_args(&self) -> u32 {
+        0
+    }
 }
