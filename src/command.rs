@@ -100,11 +100,6 @@ pub(crate) enum High {
         dst: Target,
         fn_: Function,
     },
-    Paint {
-        texture: Texture,
-        dst: Target,
-        fn_: Function,
-    },
     /// Last phase marking a register as done.
     /// This is emitted after the Command defining the register has been translated.
     Done(usize),

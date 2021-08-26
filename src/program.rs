@@ -987,64 +987,13 @@ impl Launcher<'_> {
                         ops,
                     };
 
-                    let render = encoder.prepare_render(None, fn_, dst_texture)?;
+                    let render = encoder.prepare_render(fn_, dst_texture)?;
 
                     // TODO: we need to remember the attachment format here.
                     // This is need to to automatically construct the shader pipeline.
                     encoder.push(Low::BeginCommands)?;
                     encoder.push(Low::BeginRenderPass(RenderPassDescriptor {
-                        color_attachments: vec![attachment],
-                        depth_stencil: None,
-                    }))?;
-                    encoder.render(render)?;
-                    encoder.push(Low::EndRenderPass)?;
-                    encoder.push(Low::EndCommands)?;
-
-                    // Actually run it immediately.
-                    // TODO: this might not be the most efficient.
-                    encoder.push(Low::RunTopCommand)?;
-
-                    // Post paint, make sure we quantize everything.
-                    encoder.copy_texture_to_staging(dst_texture)?;
-                }
-                High::Paint { texture, dst, fn_ } => {
-                    let dst_texture = match dst {
-                        Target::Discard(texture) | Target::Load(texture) => *texture,
-                    };
-
-                    encoder.ensure_allocate_texture(dst_texture)?;
-
-                    encoder.copy_staging_to_texture(*texture)?;
-                    encoder.push_operand(*texture)?;
-
-                    let dst_view = encoder.texture_view(dst_texture)?;
-                    // eprintln!("tex{:?} +> tex{:?}", texture, dst_texture);
-
-                    let ops = match dst {
-                        Target::Discard(_) => {
-                            wgpu::Operations {
-                                // TODO: we could let choose a replacement color..
-                                load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
-                                store: true,
-                            }
-                        }
-                        Target::Load(_) => wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: true,
-                        },
-                    };
-
-                    let attachment = ColorAttachmentDescriptor {
-                        texture_view: dst_view,
-                        ops,
-                    };
-
-                    let render = encoder.prepare_render(Some(*texture), fn_, dst_texture)?;
-
-                    // TODO: we need to remember the attachment format here.
-                    // This is need to to automatically construct the shader pipeline.
-                    encoder.push(Low::BeginCommands)?;
-                    encoder.push(Low::BeginRenderPass(RenderPassDescriptor {
+                        // FIXME: allocation?
                         color_attachments: vec![attachment],
                         depth_stencil: None,
                     }))?;
@@ -1330,13 +1279,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(())
     }
 
+    // We must trick the borrow checker here..
     fn allocate_register(&mut self, idx: Register) -> Result<&RegisterMap, LaunchError> {
         self.ensure_allocate_register(idx)?;
         // Trick, reborrow the thing..
         Ok(&self.register_map[&idx])
     }
 
-    // We must trick the borrow checker here..
+    /// Construct and allocate mappings for the register.
+    /// We can't return the finished mapping due to borrow checker issues (would need to borrow
+    /// from self but access it 'later' in the function; will be fixed with Polonius). Thus one
+    /// should prefer to call `allocate_register` instead.
     fn ensure_allocate_register(&mut self, idx: Register) -> Result<(), LaunchError> {
         let ImageBufferAssignment {
             buffer: reg_buffer,
@@ -1586,7 +1539,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     stage_kind: staging.stage_kind,
                 };
 
-                self.prepare_render(Some(idx), &fn_, idx)?
+                self.prepare_render(&fn_, idx)?
             };
 
             let dst_view = self.texture_view(idx)?;
@@ -1630,7 +1583,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     stage_kind: staging.stage_kind,
                 };
 
-                self.prepare_render(Some(idx), &fn_, idx)?
+                self.prepare_render(&fn_, idx)?
             };
 
             let dst_view = {
@@ -2332,15 +2285,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     #[rustfmt::skip]
     fn prepare_render(
         &mut self,
-        // The texture which we are using as the fragment source.
-        _: Option<Texture>,
         // The function we are using.
         function: &Function,
         // The texture we are rendering to.
         target: Texture,
-    )
-        -> Result<SimpleRenderPipeline, LaunchError>
-    {
+    ) -> Result<SimpleRenderPipeline, LaunchError> {
         match function {
             Function::PaintToSelection { texture, selection, target: target_coords, viewport, shader } => {
                 let (tex_width, tex_height) = self.texture_map[&texture].format.size;
