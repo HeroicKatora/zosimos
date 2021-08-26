@@ -1055,11 +1055,14 @@ impl Launcher<'_> {
 
                     encoder.copy_staging_to_buffer(*src)?;
 
+                    encoder.push(Low::BeginCommands)?;
                     encoder.push(Low::CopyBufferToBuffer {
                         source_buffer,
                         size,
                         target_buffer,
                     })?;
+                    encoder.push(Low::EndCommands)?;
+                    encoder.push(Low::RunTopCommand)?;
 
                     encoder.copy_buffer_to_staging(*dst)?;
                 }

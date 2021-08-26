@@ -554,7 +554,7 @@ impl CommandBuffer {
             desc: supposed_type,
         };
 
-        Err(CommandError::UNIMPLEMENTED)
+        Ok(self.push(op))
     }
 
     /// Overwrite some channels with overlaid data.
