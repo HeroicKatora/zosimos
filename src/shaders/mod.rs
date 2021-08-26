@@ -110,4 +110,4 @@ impl FragmentShaderData for LinearColorTransform {
     }
 }
 
-pub(crate) use distribution_normal2d::{Shader as DistributionNormal2d, Mat2};
+pub(crate) use distribution_normal2d::{Shader as DistributionNormal2d};

@@ -93,6 +93,9 @@ pub(crate) enum High {
         /// The target texture.
         dst: Register,
     },
+    /// Add an additional texture operand to the next operation.
+    PushOperand(Texture),
+    /// Call a function on the currently prepared operands.
     Construct {
         dst: Target,
         fn_: Function,

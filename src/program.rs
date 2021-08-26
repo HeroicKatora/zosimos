@@ -204,6 +204,8 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     staged_from_pipelines: HashMap<Texture, SimpleRenderPipeline>,
     /// The allocate binary data for runtime execution.
     binary_data: Vec<u8>,
+    /// The texture operands collected for the next render preparation.
+    operands: Vec<Texture>,
 
     // Fields regarding the status of registers.
     /// Describes how registers where mapped to buffers.
@@ -703,14 +705,15 @@ enum PipelineTarget {
 }
 
 enum TextureBind {
-    Texture(Texture),
+    /// Use the currently pushed texture operands.
+    /// The arguments are taken from the back of the operand vector.
+    Textures(usize),
     PreComputedGroup {
         /// The index of the bind group we're binding to set `1`, the fragment set.
         group: usize,
         /// The layout corresponding to the bind group.
         layout: usize,
     },
-    None,
 }
 
 enum BufferBind<'data> {
@@ -950,6 +953,10 @@ impl Launcher<'_> {
                     encoder.copy_staging_to_buffer(src)?;
                     encoder.copy_buffer_to_output(src, dst)?;
                 }
+                &High::PushOperand(texture) => {
+                    encoder.copy_staging_to_texture(texture)?;
+                    encoder.push_operand(texture)?;
+                }
                 High::Construct { dst, fn_ } => {
                     let dst_texture = match dst {
                         Target::Discard(texture) | Target::Load(texture) => *texture,
@@ -1003,7 +1010,9 @@ impl Launcher<'_> {
                     };
 
                     encoder.ensure_allocate_texture(dst_texture)?;
+
                     encoder.copy_staging_to_texture(*texture)?;
+                    encoder.push_operand(*texture)?;
 
                     let dst_view = encoder.texture_view(dst_texture)?;
                     // eprintln!("tex{:?} +> tex{:?}", texture, dst_texture);
@@ -1071,6 +1080,12 @@ impl Launcher<'_> {
 
         let mut buffers = self.binds;
         encoder.extract_buffers(&mut buffers, &mut self.pool)?;
+
+        // Unbalanced operands shouldn't happen.
+        // This is part of validation layer but cheap and we always do it.
+        if !encoder.operands.is_empty() {
+            return Err(LaunchError::InternalCommandError(line!()));
+        }
 
         let init = run::InitialState {
             instructions: encoder.instructions,
@@ -1304,6 +1319,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             staging,
             size,
         })
+    }
+
+    fn push_operand(&mut self, texture: Texture) -> Result<(), LaunchError> {
+        self.operands.push(texture);
+        Ok(())
     }
 
     fn allocate_register(&mut self, idx: Register) -> Result<&RegisterMap, LaunchError> {
@@ -1562,6 +1582,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     stage_kind: staging.stage_kind,
                 };
 
+                self.push_operand(idx)?;
                 self.prepare_render(Some(idx), &fn_, idx)?
             };
 
@@ -1606,6 +1627,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     stage_kind: staging.stage_kind,
                 };
 
+                self.push_operand(idx)?;
                 self.prepare_render(Some(idx), &fn_, idx)?
             };
 
@@ -1770,35 +1792,38 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
-    fn make_paint_group_layout(&mut self) -> usize {
+    fn make_paint_group_layout(&mut self, count: usize) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
         *self.paint_group_layout.get_or_insert_with(|| {
-            let descriptor = BindGroupLayoutDescriptor {
-                entries: vec![
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
+            let mut entries = vec![
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler {
+                        filtering: true,
+                        comparison: false,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler {
-                            filtering: true,
-                            comparison: false,
-                        },
-                        count: None,
-                    },
-                ],
-            };
+                    count: None,
+                },
+            ];
 
+            for i in 0..count {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 1 + i as u32,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                });
+            }
+
+            let descriptor = BindGroupLayoutDescriptor { entries };
             instructions.extend_one(Low::BindGroupLayout(descriptor));
+
             let descriptor_id = *bind_group_layouts;
             *bind_group_layouts += 1;
             descriptor_id
@@ -1888,13 +1913,13 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let mut bind_group_layouts = vec![quad_bind_group];
 
         match desc.fragment_texture {
-            TextureBind::Texture(_) => {
-                bind_group_layouts.push(self.make_paint_group_layout())
+            TextureBind::Textures(0) => {},
+            TextureBind::Textures(count) => {
+                bind_group_layouts.push(self.make_paint_group_layout(count))
             }
             TextureBind::PreComputedGroup { layout, .. } => {
                 bind_group_layouts.push(layout);
             }
-            TextureBind::None  => {},
         };
 
 
@@ -2064,8 +2089,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             })
     }
 
-    fn make_bind_group_sampled_texture(&mut self, texture: Texture) -> Result<usize, LaunchError> {
-        let view = self.texture_view(texture)?;
+    fn make_bind_group_sampled_texture(&mut self, count: usize) -> Result<usize, LaunchError> {
+        let start_of_operands = match self.operands.len().checked_sub(count) {
+            None => return Err(LaunchError::InternalCommandError(line!())),
+            Some(i) => i,
+        };
 
         let sampler = self.make_sampler(SamplerDescriptor {
             address_mode: wgpu::AddressMode::default(),
@@ -2073,13 +2101,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             resize_filter: wgpu::FilterMode::Nearest,
         });
 
+        let mut entries = vec![BindingResource::Sampler(sampler)];
+        let textures: Vec<_> = self.operands.drain(start_of_operands..).collect();
+        for texture in textures {
+            let view = self.texture_view(texture)?;
+            entries.push(BindingResource::TextureView(view));
+        }
+
         let group = self.bind_groups;
         let descriptor = BindGroupDescriptor {
-            layout_idx: self.make_paint_group_layout(),
-            entries: vec![
-                BindingResource::TextureView(view),
-                BindingResource::Sampler(sampler),
-            ],
+            layout_idx: self.make_paint_group_layout(count),
+            entries: entries,
             sparse: vec![],
         };
 
@@ -2200,17 +2232,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let buffer = self.simple_quad_buffer();
 
         let group = match texture {
-            TextureBind::Texture(texture) => {
-                let group = self.make_bind_group_sampled_texture(*texture)?;
+            TextureBind::Textures(0) => None,
+            &TextureBind::Textures(count) => {
+                let group = self.make_bind_group_sampled_texture(count)?;
                 // eprintln!("Using Texture {:?} as group {:?}", texture, group);
                 Some(group)
             }
             &TextureBind::PreComputedGroup { group, .. } => {
                 // eprintln!("Using Target Group {:?}", group);
                 Some(group)
-            }
-            TextureBind::None => {
-                None
             }
         };
 
@@ -2351,7 +2381,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
                     },
-                    fragment_texture: TextureBind::Texture(texture),
+                    fragment_texture: TextureBind::Textures(1),
                     fragment_bind_data: BufferBind::None,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
@@ -2377,9 +2407,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
                     fragment_texture: if let Some(texture) = texture {
-                        TextureBind::Texture(texture)
+                        TextureBind::Textures(1)
                     } else {
-                        TextureBind::None
+                        TextureBind::Textures(0)
                     },
                     fragment_bind_data,
                     vertex: ShaderBind::ShaderMain(vertex),
