@@ -4,6 +4,7 @@ use crate::program::BufferInitContent;
 
 pub mod stage;
 pub mod distribution_normal2d;
+pub mod palette;
 
 /// A vertex box shader, rendering a sole quad with given vertex and uv coordinate system.
 pub const VERT_NOOP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/box.vert.v"));
@@ -42,6 +43,8 @@ pub(crate) enum FragmentShaderKey {
     Convert,
     /// The generic distribution normal 2d.
     DistributionNormal2d,
+    /// Sample discrete colors from a palette.
+    Palette,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -49,6 +52,7 @@ pub(crate) enum FragmentShader {
     PaintOnTop(PaintOnTopKind),
     LinearColorMatrix(LinearColorTransform),
     Normal2d(DistributionNormal2d),
+    Palette(self::palette::Shader),
 }
 
 impl FragmentShader {
@@ -57,6 +61,7 @@ impl FragmentShader {
             FragmentShader::PaintOnTop(kind) => kind,
             FragmentShader::LinearColorMatrix(shader) => shader,
             FragmentShader::Normal2d(normal) => normal,
+            FragmentShader::Palette(palette) => palette,
         }
     }
 }
@@ -113,4 +118,5 @@ impl FragmentShaderData for LinearColorTransform {
     }
 }
 
-pub(crate) use distribution_normal2d::{Shader as DistributionNormal2d};
+pub(crate) use self::distribution_normal2d::{Shader as DistributionNormal2d};
+pub(crate) use self::palette::Shader as PaletteShader;

@@ -1,5 +1,6 @@
 use crate::buffer::{
-    BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, SampleParts, Texel, Whitepoint
+    self, BufferLayout, ChannelPosition, Color, ColorChannel, Descriptor, RowMatrix, SampleParts,
+    Texel, Whitepoint
 };
 use crate::pool::PoolImage;
 use crate::program::{
@@ -148,6 +149,9 @@ pub(crate) enum BinaryOp {
     /// Op[T, U] = T
     /// where select(channel, T.color) = U.color
     Inject { channel: ColorChannel },
+    /// Sample from a palette based on the color value of another image.
+    /// Op[T, U] = T
+    Palette(shaders::PaletteShader),
 }
 
 /// A rectangle in `u32` space.
@@ -289,9 +293,14 @@ pub enum ChromaticAdaptationMethod {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     /// Which color channel will provide the texture coordinate along width axis.
-    pub width: ColorChannel,
+    pub width: Option<ColorChannel>,
     /// Which color channel will provide the texture coordinate along height axis.
-    pub height: ColorChannel,
+    pub height: Option<ColorChannel>,
+    /// The base coordinate for sampling along width.
+    pub width_base: i32,
+    /// The base coordinate for sampling along height.
+    pub height_base: i32,
+    // FIXME: wrapping?
 }
 
 #[derive(Debug)]
@@ -308,6 +317,15 @@ enum CommandErrorKind {
     Unimplemented,
 }
 
+/// FIXME: missing functions
+/// - a way to represent colors as a function of wavelength, then evaluate with the standard
+/// observers.
+/// - implement simulation of color blindness (reuses matrix multiplication, related to observer)
+/// - generate color ramps
+/// - color interpolation along a cubic spline (how do we represent the parameters?)
+/// - hue shift, transforms on the a*b* circle, such as mobius transform (z-a)/(1-z·adj(a)) i.e or
+///   other holomorphic functions. Ways to construct mobius transfrom from three key points. That
+///   is particular relevant for color correction.
 impl CommandBuffer {
     /// Declare an input.
     ///
@@ -587,12 +605,51 @@ impl CommandBuffer {
     /// Grab colors from a palette based on an underlying image of indices.
     pub fn palette(
         &mut self,
-        _below: Register,
-        _channel: Palette,
-        _above: Register,
+        palette: Register,
+        config: Palette,
+        indices: Register,
     ) -> Result<Register, CommandError> {
-        // TODO: What blending should we support
-        Err(CommandError::UNIMPLEMENTED)
+        let desc = self.describe_reg(palette)?;
+        let idx_desc = self.describe_reg(indices)?;
+
+        // FIXME: check that channels are actually in indices' color type.
+        let x_coord = if let Some(coord) = config.width {
+            let pos = ChannelPosition::new(coord).ok_or_else(|| CommandError::TYPE_ERR)?;
+            pos.into_vec4()
+        } else {
+            [0.0; 4]
+        };
+
+        let y_coord = if let Some(coord) = config.height {
+            let pos = ChannelPosition::new(coord).ok_or_else(|| CommandError::TYPE_ERR)?;
+            pos.into_vec4()
+        } else {
+            [0.0; 4]
+        };
+
+        // Compute the target layout (and that we can represent it).
+        let target_layout = BufferLayout::with_row_layout(buffer::RowLayoutDescription {
+            width: idx_desc.layout.width(),
+            height: idx_desc.layout.height(),
+            .. desc.layout.as_row_layout()
+        }).ok_or_else(|| CommandError::OTHER)?;
+
+        let op = Op::Binary {
+            lhs: palette,
+            rhs: indices,
+            op: BinaryOp::Palette(shaders::PaletteShader {
+                x_coord,
+                y_coord,
+                base_x: config.width_base,
+                base_y: config.height_base,
+            }),
+            desc: Descriptor {
+                layout: target_layout,
+                texel: desc.texel.clone(),
+            },
+        };
+        
+        Ok(self.push(op))
     }
 
     /// Overlay this image as part of a larger one, performing blending.
@@ -915,6 +972,17 @@ impl CommandBuffer {
                                     target: (*placement).into(),
                                     viewport: lower_region,
                                     shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
+                                },
+                            });
+                        }
+                        BinaryOp::Palette(shader) => {
+                            high_ops.push(High::PushOperand(reg_to_texture[lhs]));
+                            high_ops.push(High::PushOperand(reg_to_texture[rhs]));
+
+                            high_ops.push(High::Construct {
+                                dst: Target::Load(texture),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::Palette(shader.clone()),
                                 },
                             });
                         }
