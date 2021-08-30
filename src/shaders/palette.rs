@@ -1,8 +1,7 @@
 use std::borrow::Cow;
 
 use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey};
-use crate::buffer::{ColorChannel, ChannelPosition};
-
+use crate::buffer::{ChannelPosition, ColorChannel};
 
 /// a linear transformation on rgb color.
 pub const SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/palette.frag.v"));

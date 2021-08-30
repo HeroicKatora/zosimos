@@ -1,11 +1,11 @@
-use std::borrow::Cow;
 use crate::buffer::RowMatrix;
 use crate::program::BufferInitContent;
+use std::borrow::Cow;
 
 pub mod bilinear;
-pub mod stage;
 pub mod distribution_normal2d;
 pub mod palette;
+pub mod stage;
 
 /// A vertex box shader, rendering a sole quad with given vertex and uv coordinate system.
 pub const VERT_NOOP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/box.vert.v"));
@@ -18,9 +18,7 @@ pub const FRAG_MIX_RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv
 pub const FRAG_LINEAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/linear.frag.v"));
 
 /// A simplification of a fragment shader interface.
-pub(crate) trait FragmentShaderData:
-    core::fmt::Debug 
-{
+pub(crate) trait FragmentShaderData: core::fmt::Debug {
     /// The unique key identifying this shader module.
     fn key(&self) -> Option<FragmentShaderKey>;
     /// The SPIR-V shader source code.
@@ -114,14 +112,13 @@ impl FragmentShaderData for LinearColorTransform {
         // std140, always pad to 16 bytes.
         // matrix is an array of its columns.
         let rgb_matrix: [f32; 12] = [
-            matrix[0], matrix[3], matrix[6], 0.0,
-            matrix[1], matrix[4], matrix[7], 0.0,
-            matrix[2], matrix[5], matrix[8], 0.0,
+            matrix[0], matrix[3], matrix[6], 0.0, matrix[1], matrix[4], matrix[7], 0.0, matrix[2],
+            matrix[5], matrix[8], 0.0,
         ];
 
         Some(BufferInitContent::new(buffer, &rgb_matrix))
     }
 }
 
-pub(crate) use self::distribution_normal2d::{Shader as DistributionNormal2d};
+pub(crate) use self::distribution_normal2d::Shader as DistributionNormal2d;
 pub(crate) use self::palette::Shader as PaletteShader;

@@ -87,9 +87,7 @@ pub(crate) enum Function {
     ///   bind(1,1): sampler2D
     ///   bind(2,0): shader specific data.
     ///   out: vec4 (color)
-    PaintFullScreen {
-        shader: shaders::FragmentShader,
-    },
+    PaintFullScreen { shader: shaders::FragmentShader },
     /// VS: id
     /// FS:
     ///   bind(1, …) readonly inputs uimage2D
@@ -301,7 +299,6 @@ struct BufferMap {
 enum VertexShader {
     Noop,
 }
-
 
 #[derive(Debug)]
 pub struct LaunchError {
@@ -1009,8 +1006,11 @@ impl Launcher<'_> {
                     encoder.copy_texture_to_staging(dst_texture)?;
                 }
                 High::Copy { src, dst } => {
-                    let &RegisterMap { buffer: source_buffer, ref buffer_layout, .. } =
-                        encoder.allocate_register(*src)?;
+                    let &RegisterMap {
+                        buffer: source_buffer,
+                        ref buffer_layout,
+                        ..
+                    } = encoder.allocate_register(*src)?;
                     let size = buffer_layout.u64_len();
                     let target_buffer = encoder.allocate_register(*dst)?.buffer;
 
@@ -1751,17 +1751,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
         *self.paint_group_layout.get_or_insert_with(|| {
-            let mut entries = vec![
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler {
-                        filtering: true,
-                        comparison: false,
-                    },
-                    count: None,
+            let mut entries = vec![wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStage::FRAGMENT,
+                ty: wgpu::BindingType::Sampler {
+                    filtering: true,
+                    comparison: false,
                 },
-            ];
+                count: None,
+            }];
 
             for i in 0..count {
                 entries.push(wgpu::BindGroupLayoutEntry {
@@ -1868,7 +1866,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let mut bind_group_layouts = vec![quad_bind_group];
 
         match desc.fragment_texture {
-            TextureBind::Textures(0) => {},
+            TextureBind::Textures(0) => {}
             TextureBind::Textures(count) => {
                 bind_group_layouts.push(self.make_paint_group_layout(count))
             }
@@ -1876,7 +1874,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 bind_group_layouts.push(layout);
             }
         };
-
 
         if let BufferBind::None = desc.fragment_bind_data {
             let layouts = &mut self.pipeline_layouts;
@@ -2470,10 +2467,7 @@ impl BufferInitContent {
         let start = buf.len();
         buf.extend_from_slice(bytemuck::cast_slice(data));
         let end = buf.len();
-        BufferInitContent::Defer {
-            start,
-            end,
-        }
+        BufferInitContent::Defer { start, end }
     }
 
     /// Get a reference to the binary data, given the allocator/buffer.

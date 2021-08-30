@@ -1,14 +1,14 @@
 use crate::buffer::{
     self, BufferLayout, ChannelPosition, Color, ColorChannel, Descriptor, RowMatrix, SampleParts,
-    Texel, Whitepoint
+    Texel, Whitepoint,
 };
 use crate::pool::PoolImage;
 use crate::program::{
     CompileError, Function, ImageBufferAssignment, ImageBufferPlan, Program, QuadTarget, Texture,
 };
-use crate::shaders::{self, FragmentShader, PaintOnTopKind};
-pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
 pub use crate::shaders::bilinear::Shader as Bilinear;
+pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
+use crate::shaders::{self, FragmentShader, PaintOnTopKind};
 
 use std::collections::HashMap;
 
@@ -99,18 +99,12 @@ pub(crate) enum High {
     /// Add an additional texture operand to the next operation.
     PushOperand(Texture),
     /// Call a function on the currently prepared operands.
-    Construct {
-        dst: Target,
-        fn_: Function,
-    },
+    Construct { dst: Target, fn_: Function },
     /// Last phase marking a register as done.
     /// This is emitted after the Command defining the register has been translated.
     Done(Register),
     /// Copy binary data from a buffer to another.
-    Copy {
-        src: Register,
-        dst: Register,
-    }
+    Copy { src: Register, dst: Register },
 }
 
 /// The target image texture of a paint operation (pipeline).
@@ -555,13 +549,13 @@ impl CommandBuffer {
         };
 
         if desc.texel.samples.bits.bytes() != supposed_type.texel.samples.bits.bytes() {
-            return Err(CommandError{
+            return Err(CommandError {
                 inner: CommandErrorKind::ConflictingTypes(desc.clone(), supposed_type),
             });
         }
 
         if !supposed_type.is_consistent() {
-            return Err(CommandError{
+            return Err(CommandError {
                 inner: CommandErrorKind::BadDescriptor(supposed_type),
             });
         }
@@ -635,7 +629,8 @@ impl CommandBuffer {
             height: idx_desc.layout.height(),
             row_stride: (idx_desc.layout.width() * u32::from(desc.layout.bytes_per_texel)).into(),
             texel_stride: desc.layout.bytes_per_texel.into(),
-        }).ok_or_else(|| CommandError::OTHER)?;
+        })
+        .ok_or_else(|| CommandError::OTHER)?;
 
         let op = Op::Binary {
             lhs: palette,
@@ -651,7 +646,7 @@ impl CommandBuffer {
                 texel: desc.texel.clone(),
             },
         };
-        
+
         Ok(self.push(op))
     }
 
@@ -858,15 +853,13 @@ impl CommandBuffer {
                                     shader: FragmentShader::Normal2d(distribution.clone()),
                                 },
                             })
-                        },
-                        ConstructOp::Bilinear(bilinear) => {
-                            high_ops.push(High::Construct {
-                                dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen {
-                                    shader: FragmentShader::Bilinear(bilinear.clone()),
-                                },
-                            })
                         }
+                        ConstructOp::Bilinear(bilinear) => high_ops.push(High::Construct {
+                            dst: Target::Discard(texture),
+                            fn_: Function::PaintFullScreen {
+                                shader: FragmentShader::Bilinear(bilinear.clone()),
+                            },
+                        }),
                         _ => return Err(CompileError::NotYetImplemented),
                     }
 
@@ -905,9 +898,11 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Function::PaintFullScreen {
-                                    shader: FragmentShader::LinearColorMatrix(shaders::LinearColorTransform {
-                                        matrix: matrix.into(),
-                                    })
+                                    shader: FragmentShader::LinearColorMatrix(
+                                        shaders::LinearColorTransform {
+                                            matrix: matrix.into(),
+                                        },
+                                    ),
                                 },
                             });
                         }
@@ -930,18 +925,18 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Function::PaintFullScreen {
-                                    shader: FragmentShader::LinearColorMatrix(shaders::LinearColorTransform {
-                                        matrix: color.into_matrix(),
-                                    })
+                                    shader: FragmentShader::LinearColorMatrix(
+                                        shaders::LinearColorTransform {
+                                            matrix: color.into_matrix(),
+                                        },
+                                    ),
                                 },
                             });
                         }
-                        UnaryOp::Transmute => {
-                            high_ops.push(High::Copy {
-                                src: *src,
-                                dst: Register(idx),
-                            })
-                        }
+                        UnaryOp::Transmute => high_ops.push(High::Copy {
+                            src: *src,
+                            dst: Register(idx),
+                        }),
                         _ => return Err(CompileError::NotYetImplemented),
                     }
 
@@ -980,7 +975,9 @@ impl CommandBuffer {
                                     selection: upper_region,
                                     target: QuadTarget::from(upper_region).affine(&affine_matrix),
                                     viewport: lower_region,
-                                    shader: FragmentShader::PaintOnTop(affine.sampling.as_paint_on_top()?),
+                                    shader: FragmentShader::PaintOnTop(
+                                        affine.sampling.as_paint_on_top()?,
+                                    ),
                                 },
                             })
                         }

@@ -58,15 +58,9 @@ fn integration() {
         pool_background.clone(),
     );
 
-    run_distribution(
-        &mut pool,
-        instance.enumerate_adapters(ANY),
-    );
+    run_distribution(&mut pool, instance.enumerate_adapters(ANY));
 
-    run_distribution_normal1d(
-        &mut pool,
-        instance.enumerate_adapters(ANY),
-    );
+    run_distribution_normal1d(&mut pool, instance.enumerate_adapters(ANY));
 
     run_transmute(
         &mut pool,
@@ -272,10 +266,7 @@ fn run_conversion(
     util::assert_reference(image_converted.into(), "convert_bt709.png.crc");
 }
 
-fn run_distribution(
-    pool: &mut Pool,
-    adapters: impl Iterator<Item = wgpu::Adapter>,
-) {
+fn run_distribution(pool: &mut Pool, adapters: impl Iterator<Item = wgpu::Adapter>) {
     let mut layout = image::DynamicImage::new_luma_a16(400, 400);
 
     let descriptor = Descriptor {
@@ -283,15 +274,15 @@ fn run_distribution(
         texel: buffer::Texel::with_srgb_image(&layout),
     };
 
-
     let mut commands = CommandBuffer::default();
     let generated = commands
-        .distribution_normal2d(descriptor, command::DistributionNormal2d::with_diagonal(0.2, 0.2))
+        .distribution_normal2d(
+            descriptor,
+            command::DistributionNormal2d::with_diagonal(0.2, 0.2),
+        )
         .unwrap();
 
-    let (output, _outformat) = commands
-        .output(generated)
-        .expect("Valid for output");
+    let (output, _outformat) = commands.output(generated).expect("Valid for output");
 
     let result = run_once_with_output(
         commands,
@@ -314,10 +305,7 @@ fn run_distribution(
     util::assert_reference_image(layout, "distribution_normal2d.png.crc");
 }
 
-fn run_distribution_normal1d(
-    pool: &mut Pool,
-    adapters: impl Iterator<Item = wgpu::Adapter>,
-) {
+fn run_distribution_normal1d(pool: &mut Pool, adapters: impl Iterator<Item = wgpu::Adapter>) {
     let mut layout = image::DynamicImage::new_luma_a16(400, 400);
 
     let descriptor = Descriptor {
@@ -327,12 +315,13 @@ fn run_distribution_normal1d(
 
     let mut commands = CommandBuffer::default();
     let generated = commands
-        .distribution_normal2d(descriptor, command::DistributionNormal2d::with_direction([0.04998, 0.0501]))
+        .distribution_normal2d(
+            descriptor,
+            command::DistributionNormal2d::with_direction([0.04998, 0.0501]),
+        )
         .unwrap();
 
-    let (output, _outformat) = commands
-        .output(generated)
-        .expect("Valid for output");
+    let (output, _outformat) = commands.output(generated).expect("Valid for output");
 
     let result = run_once_with_output(
         commands,
@@ -362,8 +351,7 @@ fn run_transmute(
 ) {
     let mut commands = CommandBuffer::default();
     let (width, height) = orig_descriptor.size();
-    let mut layout = image::DynamicImage::new_luma_a16(
-        width, height);
+    let mut layout = image::DynamicImage::new_luma_a16(width, height);
 
     let input = commands.input(orig_descriptor).unwrap();
 
@@ -392,7 +380,7 @@ fn run_transmute(
     }
 
     let bg_image = pool.entry(orig_key).unwrap();
-    assert_eq!(layout.as_bytes(), bg_image.as_bytes() .unwrap());
+    assert_eq!(layout.as_bytes(), bg_image.as_bytes().unwrap());
 
     util::assert_reference_image(layout, "transmute.png.crc");
 }
@@ -415,14 +403,17 @@ fn run_palette(
     let input = commands.input(orig_descriptor).unwrap();
     // Some arbitrary weird, red-green-color ramps.
     let ramp = commands
-        .bilinear(distribution_layout, command::Bilinear {
-            u_min: [0.0, 0.0, 0.0, 1.0],
-            v_min: [0.0, 0.0, 0.0, 1.0],
-            uv_min: [0.0, 0.0, 0.0, 1.0],
-            u_max: [0.7, 0.0, 0.0, 1.0],
-            v_max: [0.0, 0.7, 0.0, 1.0],
-            uv_max: [0.3, 0.3, 0.0, 1.0],
-        })
+        .bilinear(
+            distribution_layout,
+            command::Bilinear {
+                u_min: [0.0, 0.0, 0.0, 1.0],
+                v_min: [0.0, 0.0, 0.0, 1.0],
+                uv_min: [0.0, 0.0, 0.0, 1.0],
+                u_max: [0.7, 0.0, 0.0, 1.0],
+                v_max: [0.0, 0.7, 0.0, 1.0],
+                uv_max: [0.3, 0.3, 0.0, 1.0],
+            },
+        )
         .unwrap();
 
     let palette = command::Palette {

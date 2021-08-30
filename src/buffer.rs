@@ -1,6 +1,6 @@
 //! Defines layout and buffer of our images.
-use core::convert::TryFrom;
 use canvas::{layout::Layout, Canvas};
+use core::convert::TryFrom;
 
 /// The byte layout of a buffer.
 ///

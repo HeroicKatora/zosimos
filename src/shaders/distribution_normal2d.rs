@@ -1,8 +1,11 @@
-use std::borrow::Cow;
 use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey};
+use std::borrow::Cow;
 
 /// a linear transformation on rgb color.
-pub const SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/distribution_normal2d.frag.v"));
+pub const SHADER: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/spirv/distribution_normal2d.frag.v"
+));
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shader {
@@ -22,8 +25,16 @@ impl Shader {
         let d0 = if var0 == 0.0 { 0.0 } else { 1.0 / var0 };
         let d1 = if var1 == 0.0 { 0.0 } else { 1.0 / var1 };
 
-        let f0 = if var0 == 0.0 { 1.0 } else { 2.0 * 3.14159265 * var0 };
-        let f1 = if var1 == 0.0 { 1.0 } else { 2.0 * 3.14159265 * var1 };
+        let f0 = if var0 == 0.0 {
+            1.0
+        } else {
+            2.0 * 3.14159265 * var0
+        };
+        let f1 = if var1 == 0.0 {
+            1.0
+        } else {
+            2.0 * 3.14159265 * var1
+        };
 
         Shader {
             expectation: [0.0, 0.0],
@@ -51,7 +62,7 @@ impl Shader {
         // Alternate, four-step, single precision (due to Jean-Michel Muller)
         // w = x*x; u = fma(x, -x, w); v = fma(y, y, w); v - u
         let (xt, yt) = (f64::from(x), f64::from(y));
-        let length_sq = (xt*xt + yt*yt) as f32;
+        let length_sq = (xt * xt + yt * yt) as f32;
         assert!(length_sq.is_finite());
 
         // x*x / (x*x + y*y)²
@@ -80,8 +91,10 @@ impl Shader {
 
         // ([x y]^T  · [x y]) / (x² + y²)
         let row_major = [
-            herbie_symmetric(x, x), herbie_asymmetric(x, y),
-            herbie_asymmetric(y, x), herbie_symmetric(y, y),
+            herbie_symmetric(x, x),
+            herbie_asymmetric(x, y),
+            herbie_asymmetric(y, x),
+            herbie_symmetric(y, y),
         ];
 
         Shader {
@@ -104,17 +117,12 @@ impl FragmentShaderData for Shader {
     fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
         let Shader {
             expectation: exp,
-            covariance_inverse: Mat2 {
-                row_major: inv,
-            },
+            covariance_inverse: Mat2 { row_major: inv },
             pseudo_determinant: det,
         } = self;
 
         let rgb_data: [f32; 13] = [
-            exp[0], exp[1], 0.0, 0.0,
-            inv[0], inv[1], 0.0, 0.0,
-            inv[2], inv[3], 0.0, 0.0,
-            *det,
+            exp[0], exp[1], 0.0, 0.0, inv[0], inv[1], 0.0, 0.0, inv[2], inv[3], 0.0, 0.0, *det,
         ];
 
         Some(BufferInitContent::new(buffer, &rgb_data))
