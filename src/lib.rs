@@ -12,6 +12,7 @@
 
 pub mod buffer;
 pub mod command;
+mod encoder;
 pub mod pool;
 mod program;
 pub mod run;
