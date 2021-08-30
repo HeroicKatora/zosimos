@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use crate::buffer::RowMatrix;
 use crate::program::BufferInitContent;
 
+pub mod bilinear;
 pub mod stage;
 pub mod distribution_normal2d;
 pub mod palette;
@@ -45,6 +46,8 @@ pub(crate) enum FragmentShaderKey {
     DistributionNormal2d,
     /// Sample discrete colors from a palette.
     Palette,
+    /// A bilinear function of colors.
+    Bilinear,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -53,6 +56,7 @@ pub(crate) enum FragmentShader {
     LinearColorMatrix(LinearColorTransform),
     Normal2d(DistributionNormal2d),
     Palette(self::palette::Shader),
+    Bilinear(self::bilinear::Shader),
 }
 
 impl FragmentShader {
@@ -62,6 +66,7 @@ impl FragmentShader {
             FragmentShader::LinearColorMatrix(shader) => shader,
             FragmentShader::Normal2d(normal) => normal,
             FragmentShader::Palette(palette) => palette,
+            FragmentShader::Bilinear(bilinear) => bilinear,
         }
     }
 }

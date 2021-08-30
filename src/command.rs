@@ -8,6 +8,7 @@ use crate::program::{
 };
 use crate::shaders::{self, FragmentShader, PaintOnTopKind};
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
+pub use crate::shaders::bilinear::Shader as Bilinear;
 
 use std::collections::HashMap;
 
@@ -68,10 +69,11 @@ enum Op {
 
 #[derive(Clone, Debug)]
 pub(crate) enum ConstructOp {
-    // TODO: can optimize this repr for the common case.
-    Solid(Vec<u8>),
+    Bilinear(Bilinear),
     /// A 2d normal distribution.
     DistributionNormal(shaders::DistributionNormal2d),
+    // TODO: can optimize this repr for the common case.
+    Solid(Vec<u8>),
 }
 
 /// A high-level, device independent, translation of ops.
@@ -103,7 +105,7 @@ pub(crate) enum High {
     },
     /// Last phase marking a register as done.
     /// This is emitted after the Command defining the register has been translated.
-    Done(usize),
+    Done(Register),
     /// Copy binary data from a buffer to another.
     Copy {
         src: Register,
@@ -715,6 +717,23 @@ impl CommandBuffer {
         }))
     }
 
+    pub fn bilinear(
+        &mut self,
+        describe: Descriptor,
+        distribution: Bilinear,
+    ) -> Result<Register, CommandError> {
+        if !describe.is_consistent() {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(describe),
+            });
+        }
+
+        Ok(self.push(Op::Construct {
+            desc: describe,
+            op: ConstructOp::Bilinear(distribution),
+        }))
+    }
+
     /// Overlay an affine transformation of the image.
     pub fn affine(
         &mut self,
@@ -833,6 +852,14 @@ impl CommandBuffer {
                                 },
                             })
                         },
+                        ConstructOp::Bilinear(bilinear) => {
+                            high_ops.push(High::Construct {
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::Bilinear(bilinear.clone()),
+                                },
+                            })
+                        }
                         _ => return Err(CompileError::NotYetImplemented),
                     }
 
@@ -993,7 +1020,7 @@ impl CommandBuffer {
                 }
             }
 
-            high_ops.push(High::Done(idx));
+            high_ops.push(High::Done(Register(idx)));
         }
 
         Ok(Program {
