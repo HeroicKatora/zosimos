@@ -82,6 +82,12 @@ fn main() -> Result<(), BuildError> {
             entry: "main",
             name_overwrite: None,
         },
+        SimpleSource {
+            path: "src/shaders/bilinear.frag",
+            kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
+        },
     ];
 
     let mut compiler = Compiler::new().unwrap();

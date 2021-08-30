@@ -6,12 +6,20 @@ use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey};
 pub const SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/bilinear.frag.v"));
 
 /// The palette shader, computing texture coordinates from an input color.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Shader {
     pub u_min: [f32; 4],
     pub u_max: [f32; 4],
     pub v_min: [f32; 4],
     pub v_max: [f32; 4],
+    pub uv_min: [f32; 4],
+    pub uv_max: [f32; 4],
+}
+
+impl Shader {
+    pub fn mgrid(width: f32, height: f32) {
+        todo!()
+    }
 }
 
 impl FragmentShaderData for Shader {
@@ -24,9 +32,16 @@ impl FragmentShaderData for Shader {
     }
 
     fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
-        let mat4x2 = [self.u_min, self.u_max, self.v_min, self.v_max];
+        let mat = [
+            self.u_min,
+            self.u_max,
+            self.v_min,
+            self.v_max,
+            self.uv_min,
+            self.uv_max,
+        ];
 
-        Some(BufferInitContent::new(buffer, &mat4x2))
+        Some(BufferInitContent::new(buffer, &mat))
     }
 
     fn num_args(&self) -> u32 {
