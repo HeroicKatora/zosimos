@@ -11,5 +11,8 @@ layout (set = 2, binding = 0) uniform FragmentPushConstants {
 } u_platte;
 
 void main() {
-    f_color = (texture(sampler2D(lhs, texture_sampler), uv).rgba + texture(sampler2D(rhs, texture_sampler), uv).rgba) / 2.0;
+    vec4 basis = texture(sampler2D(rhs, texture_sampler), uv).rgba;
+    vec2 paletteuv = u_platte.channels * basis;
+
+    f_color = texture(sampler2D(lhs, texture_sampler), paletteuv).rgba;
 }

@@ -73,6 +73,12 @@ fn integration() {
         instance.enumerate_adapters(ANY),
         pool_background.clone(),
     );
+
+    run_palette(
+        &mut pool,
+        instance.enumerate_adapters(ANY),
+        pool_background.clone(),
+    );
 }
 
 fn run_blending(
@@ -319,7 +325,6 @@ fn run_distribution_normal1d(
         texel: buffer::Texel::with_srgb_image(&layout),
     };
 
-
     let mut commands = CommandBuffer::default();
     let generated = commands
         .distribution_normal2d(descriptor, command::DistributionNormal2d::with_direction([0.04998, 0.0501]))
@@ -390,6 +395,57 @@ fn run_transmute(
     assert_eq!(layout.as_bytes(), bg_image.as_bytes() .unwrap());
 
     util::assert_reference_image(layout, "transmute.png.crc");
+}
+
+fn run_palette(
+    pool: &mut Pool,
+    adapters: impl Iterator<Item = wgpu::Adapter>,
+    (orig_key, orig_descriptor): (PoolKey, Descriptor),
+) {
+    let distribution_layout = {
+        let layout = image::DynamicImage::new_rgba8(400, 400);
+        Descriptor {
+            layout: (&layout).into(),
+            texel: buffer::Texel::with_srgb_image(&layout),
+        }
+    };
+
+    let mut commands = CommandBuffer::default();
+
+    let input = commands.input(orig_descriptor).unwrap();
+    // Some arbitrary weird, red-green-color ramps.
+    let ramp = commands
+        .bilinear(distribution_layout, command::Bilinear {
+            u_min: [0.0, 0.0, 0.0, 1.0],
+            v_min: [0.0, 0.0, 0.0, 1.0],
+            uv_min: [0.0, 0.0, 0.0, 1.0],
+            u_max: [0.7, 0.0, 0.0, 1.0],
+            v_max: [0.0, 0.7, 0.0, 1.0],
+            uv_max: [0.3, 0.3, 0.0, 1.0],
+        })
+        .unwrap();
+
+    let palette = command::Palette {
+        width: Some(buffer::ColorChannel::R),
+        height: Some(buffer::ColorChannel::G),
+        width_base: 0,
+        height_base: 0,
+    };
+
+    let sampled = commands.palette(ramp, palette, input).unwrap();
+
+    let (output, _outformat) = commands.output(sampled).expect("Valid for output");
+
+    let result = run_once_with_output(
+        commands,
+        pool,
+        adapters,
+        vec![(input, orig_key)],
+        retire_with_one_image(output),
+    );
+
+    let image_sampled = pool.entry(result).unwrap();
+    util::assert_reference(image_sampled.into(), "palette.png.crc");
 }
 
 /* Utility methods  */

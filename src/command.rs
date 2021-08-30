@@ -633,7 +633,8 @@ impl CommandBuffer {
         let target_layout = BufferLayout::with_row_layout(buffer::RowLayoutDescription {
             width: idx_desc.layout.width(),
             height: idx_desc.layout.height(),
-            .. desc.layout.as_row_layout()
+            row_stride: (idx_desc.layout.width() * u32::from(desc.layout.bytes_per_texel)).into(),
+            texel_stride: desc.layout.bytes_per_texel.into(),
         }).ok_or_else(|| CommandError::OTHER)?;
 
         let op = Op::Binary {
@@ -717,6 +718,12 @@ impl CommandBuffer {
         }))
     }
 
+    /// Evaluate a bilinear function over a 2d image.
+    ///
+    /// For each color channel, the parameter contains intervals of values that define how its
+    /// value is determined along the width and height axis.
+    ///
+    /// This can be used similar to `numpy`'s `mgrid`.
     pub fn bilinear(
         &mut self,
         describe: Descriptor,
