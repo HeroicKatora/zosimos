@@ -11,6 +11,9 @@
 #ifndef DECODE_R8UI_AS_MAIN
 #define DECODE_R8UI_AS_MAIN decode_r8ui
 #endif
+#ifndef ENCODE_R8UI_AS_MAIN
+#define ENCODE_R8UI_AS_MAIN encode_r8ui
+#endif
 #ifndef DECODE_R32UI_AS_MAIN
 #define DECODE_R32UI_AS_MAIN decode_r32ui
 #endif
@@ -219,7 +222,7 @@ float transfer_oe_smpte240(float val) {
   if (val < 0.0228)
     return 4.0 * val;
   else
-    return 1.1115 * pow(val, 0.45);
+    return 1.1115 * pow(val, 0.45) - 0.1115;
 }
 
 // Used Reference: https://www.kernel.org/doc/html/v4.11/media/uapi/v4l/pixfmt-007.html#colorspace-smpte-240m-v4l2-colorspace-smpte240m
@@ -227,7 +230,7 @@ float transfer_eo_smpte240(float val) {
   if (val < 0.0913)
     return val / 4.0;
   else
-    return pow(val / 1.1115, 1.0 / 0.045);
+    return pow((val - 0.1115) / 1.1115, 1.0 / 0.45);
 }
 
 // Used Reference: https://www.kernel.org/doc/html/v4.11/media/uapi/v4l/pixfmt-007.html#
@@ -235,7 +238,7 @@ float transfer_eo_smpte240(float val) {
 float transfer_oe_srgb(float val) {
   if (val < -0.0031308)
     return -1.055 * pow(-val, 1.0 / 2.4) + 0.055;
-  else if (val <= 0.04045)
+  else if (val <= 0.0031308)
     return val * 12.92;
   else
     return 1.055 * pow(val, 1.0 / 2.4) - 0.055;
@@ -335,7 +338,15 @@ void DECODE_R8UI_AS_MAIN() {
   f_color = primaries;
 }
 
-void encode_r8ui() {
+void ENCODE_R8UI_AS_MAIN() {
+  vec4 primaries = texture(sampler2D(in_texture, texture_sampler), uv).rgba;
+
+  vec4 electrical = parts_transfer(primaries, get_transfer());
+  // FIXME: YUV transform and accurate YUV transform.
+  vec4 components = parts_denormalize(electrical, get_sample_parts());
+
+  uint num = mux_uint(components, get_sample_bits());
+  imageStore(oimage_r8ui, ivec2(gl_FragCoord), uvec4(num));
 }
 
 void DECODE_R32UI_AS_MAIN() {
@@ -356,7 +367,7 @@ void ENCODE_R32UI_AS_MAIN() {
   // FIXME: YUV transform and accurate YUV transform.
   vec4 components = parts_denormalize(electrical, get_sample_parts());
 
-  uint num = mux_uint(components, get_sample_bits());
+  uint num = mux_uint(clamp(components, 0.0, 1.0), get_sample_bits());
   imageStore(oimage_r32ui, ivec2(gl_FragCoord), uvec4(num));
 }
 
@@ -364,6 +375,8 @@ vec4 demux_uint(uint num, uint kind) {
   switch (kind) {
   case SAMPLE_BITS_Int8:
     return vec4(num) / 255.;
+  case SAMPLE_BITS_Int8x2:
+    return vec4(num & 0xff, 0.0, 0.0, (num >> 8) & 0xff) / 255.;
   // FIXME: rescale.
   case SAMPLE_BITS_Int332:
     return vec4(num & 0x3, (num >> 2) & 0xf, num >> 5, 1.0);
@@ -381,6 +394,9 @@ uint mux_uint(vec4 c, uint kind) {
   switch (kind) {
   case SAMPLE_BITS_Int8:
     return uint(c.x * 255.);
+  case SAMPLE_BITS_Int8x2:
+    return uint(c.x * 255.)
+      + (uint(c.w * 255.) << 8);
   case SAMPLE_BITS_Int8x3:
     return uint(c.x * 255.)
       + (uint(c.y * 255.) << 8)
@@ -390,8 +406,12 @@ uint mux_uint(vec4 c, uint kind) {
       + (uint(c.y * 255.) << 8)
       + (uint(c.z * 255.) << 16)
       + (uint(c.w * 255.) << 24);
+  case SAMPLE_BITS_Int16x2:
+    return uint(c.x * 65535.)
+      + (uint(c.w * 65535.) << 16);
   // FIXME: other bits.
   }
+  return 0xff0000ff;
 }
 
 vec4 parts_normalize(vec4 components, uint parts) {
@@ -407,7 +427,7 @@ vec4 parts_normalize(vec4 components, uint parts) {
   case SAMPLE_PARTS_Luma:
     return vec4(vec3(components.x), 1.0);
   case SAMPLE_PARTS_LumaA:
-    return vec4(vec3(components.x), 1.0);
+    return vec4(vec3(components.x), components.w);
   case SAMPLE_PARTS_Rgb:
   case SAMPLE_PARTS_Rgbx:
     return vec4(components.xyz, 1.0);
@@ -433,19 +453,19 @@ vec4 parts_denormalize(vec4 components, uint parts) {
   switch (parts) {
   case SAMPLE_PARTS_Rgba:
     return components.xyzw;
-  /*
   case SAMPLE_PARTS_A:
-    return vec4(0.0, 0.0, 0.0, components.x);
+    return vec4(components.w, 0.0, 0.0, 1.0);
   case SAMPLE_PARTS_R:
     return vec4(components.x, 0.0, 0.0, 1.0);
   case SAMPLE_PARTS_G:
-    return vec4(0.0, components.x, 0.0, 1.0);
+    return vec4(components.y, 0.0, 0.0, 1.0);
   case SAMPLE_PARTS_B:
-    return vec4(0.0, 0.0, components.x, 1.0);
+    return vec4(components.z, 0.0, 0.0, 1.0);
   case SAMPLE_PARTS_Luma:
     return vec4(vec3(components.x), 1.0);
   case SAMPLE_PARTS_LumaA:
-    return vec4(vec3(components.x), 1.0);
+    return vec4(vec3(components.x), components.w);
+  /*
   case SAMPLE_PARTS_Rgb:
   case SAMPLE_PARTS_Rgbx:
     return vec4(components.xyz, 1.0);

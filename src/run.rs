@@ -13,6 +13,7 @@ pub struct Execution {
     pub(crate) descriptors: Descriptors,
     pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
     pub(crate) buffers: Vec<ImageData>,
+    pub(crate) binary_data: Vec<u8>,
 }
 
 pub(crate) struct InitialState {
@@ -20,6 +21,7 @@ pub(crate) struct InitialState {
     pub(crate) device: Device,
     pub(crate) queue: Queue,
     pub(crate) buffers: Vec<ImageData>,
+    pub(crate) binary_data: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -105,6 +107,7 @@ impl Execution {
             descriptors: Descriptors::default(),
             buffers: init.buffers,
             command_encoder: None,
+            binary_data: init.binary_data,
         }
     }
 
@@ -170,7 +173,7 @@ impl Execution {
                 use wgpu::util::DeviceExt;
                 let desc = wgpu::util::BufferInitDescriptor {
                     label: None,
-                    contents: &desc.content,
+                    contents: desc.content.as_slice(&self.binary_data),
                     usage: desc.usage.to_wgpu(),
                 };
 

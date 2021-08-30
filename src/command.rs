@@ -1,9 +1,15 @@
-use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint};
+use crate::buffer::{
+    self, BufferLayout, ChannelPosition, Color, ColorChannel, Descriptor, RowMatrix, SampleParts,
+    Texel, Whitepoint,
+};
 use crate::pool::PoolImage;
 use crate::program::{
-    CompileError, Function, ImageBufferAssignment, ImageBufferPlan, PaintOnTopKind, Program,
-    QuadTarget, Texture,
+    CompileError, Function, ImageBufferAssignment, ImageBufferPlan, Program, QuadTarget, Texture,
 };
+pub use crate::shaders::bilinear::Shader as Bilinear;
+pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
+use crate::shaders::{self, FragmentShader, PaintOnTopKind};
+
 use std::collections::HashMap;
 
 /// A reference to one particular value.
@@ -63,6 +69,9 @@ enum Op {
 
 #[derive(Clone, Debug)]
 pub(crate) enum ConstructOp {
+    Bilinear(Bilinear),
+    /// A 2d normal distribution.
+    DistributionNormal(shaders::DistributionNormal2d),
     // TODO: can optimize this repr for the common case.
     Solid(Vec<u8>),
 }
@@ -87,16 +96,15 @@ pub(crate) enum High {
         /// The target texture.
         dst: Register,
     },
-    #[deprecated = "Should be mapped to of paint with a discarding load or another buffer initialization."]
-    Construct { dst: Texture, op: ConstructOp },
-    Paint {
-        texture: Texture,
-        dst: Target,
-        fn_: Function,
-    },
+    /// Add an additional texture operand to the next operation.
+    PushOperand(Texture),
+    /// Call a function on the currently prepared operands.
+    Construct { dst: Target, fn_: Function },
     /// Last phase marking a register as done.
     /// This is emitted after the Command defining the register has been translated.
-    Done(usize),
+    Done(Register),
+    /// Copy binary data from a buffer to another.
+    Copy { src: Register, dst: Register },
 }
 
 /// The target image texture of a paint operation (pipeline).
@@ -121,6 +129,9 @@ pub(crate) enum UnaryOp {
     /// This is a partial method for CIE XYZ-ish color spaces. Note that ICC requires adaptation to
     /// D50 for example as the reference color space.
     ChromaticAdaptation(ChromaticAdaptation),
+    /// Opt(T) = T[.texel=texel]
+    /// And the byte width of new texel must be consistent with the current byte width.
+    Transmute,
 }
 
 #[derive(Clone)]
@@ -134,6 +145,9 @@ pub(crate) enum BinaryOp {
     /// Op[T, U] = T
     /// where select(channel, T.color) = U.color
     Inject { channel: ColorChannel },
+    /// Sample from a palette based on the color value of another image.
+    /// Op[T, U] = T
+    Palette(shaders::PaletteShader),
 }
 
 /// A rectangle in `u32` space.
@@ -275,9 +289,14 @@ pub enum ChromaticAdaptationMethod {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     /// Which color channel will provide the texture coordinate along width axis.
-    pub width: ColorChannel,
+    pub width: Option<ColorChannel>,
     /// Which color channel will provide the texture coordinate along height axis.
-    pub height: ColorChannel,
+    pub height: Option<ColorChannel>,
+    /// The base coordinate for sampling along width.
+    pub width_base: i32,
+    /// The base coordinate for sampling along height.
+    pub height_base: i32,
+    // FIXME: wrapping?
 }
 
 #[derive(Debug)]
@@ -291,8 +310,18 @@ enum CommandErrorKind {
     ConflictingTypes(Descriptor, Descriptor),
     GenericTypeError,
     Other,
+    Unimplemented,
 }
 
+/// FIXME: missing functions
+/// - a way to represent colors as a function of wavelength, then evaluate with the standard
+/// observers.
+/// - implement simulation of color blindness (reuses matrix multiplication, related to observer)
+/// - generate color ramps
+/// - color interpolation along a cubic spline (how do we represent the parameters?)
+/// - hue shift, transforms on the a*b* circle, such as mobius transform (z-a)/(1-z·adj(a)) i.e or
+///   other holomorphic functions. Ways to construct mobius transfrom from three key points. That
+///   is particular relevant for color correction.
 impl CommandBuffer {
     /// Declare an input.
     ///
@@ -511,8 +540,33 @@ impl CommandBuffer {
     /// One important use of this method is to add or removed the color interpretation of an image.
     /// This can be necessary when it has been algorithmically created or when one wants to
     /// intentionally ignore such meaning.
-    pub fn transmute(&mut self, _: Register, _: Texel) -> Result<Register, CommandError> {
-        Err(CommandError::OTHER)
+    pub fn transmute(&mut self, src: Register, texel: Texel) -> Result<Register, CommandError> {
+        let desc = self.describe_reg(src)?;
+
+        let supposed_type = Descriptor {
+            layout: desc.layout.clone(),
+            texel,
+        };
+
+        if desc.texel.samples.bits.bytes() != supposed_type.texel.samples.bits.bytes() {
+            return Err(CommandError {
+                inner: CommandErrorKind::ConflictingTypes(desc.clone(), supposed_type),
+            });
+        }
+
+        if !supposed_type.is_consistent() {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(supposed_type),
+            });
+        }
+
+        let op = Op::Unary {
+            src,
+            op: UnaryOp::Transmute,
+            desc: supposed_type,
+        };
+
+        Ok(self.push(op))
     }
 
     /// Overwrite some channels with overlaid data.
@@ -547,11 +601,53 @@ impl CommandBuffer {
     /// Grab colors from a palette based on an underlying image of indices.
     pub fn palette(
         &mut self,
-        _below: Register,
-        _channel: Palette,
-        _above: Register,
+        palette: Register,
+        config: Palette,
+        indices: Register,
     ) -> Result<Register, CommandError> {
-        todo!()
+        let desc = self.describe_reg(palette)?;
+        let idx_desc = self.describe_reg(indices)?;
+
+        // FIXME: check that channels are actually in indices' color type.
+        let x_coord = if let Some(coord) = config.width {
+            let pos = ChannelPosition::new(coord).ok_or_else(|| CommandError::TYPE_ERR)?;
+            pos.into_vec4()
+        } else {
+            [0.0; 4]
+        };
+
+        let y_coord = if let Some(coord) = config.height {
+            let pos = ChannelPosition::new(coord).ok_or_else(|| CommandError::TYPE_ERR)?;
+            pos.into_vec4()
+        } else {
+            [0.0; 4]
+        };
+
+        // Compute the target layout (and that we can represent it).
+        let target_layout = BufferLayout::with_row_layout(buffer::RowLayoutDescription {
+            width: idx_desc.layout.width(),
+            height: idx_desc.layout.height(),
+            row_stride: (idx_desc.layout.width() * u32::from(desc.layout.bytes_per_texel)).into(),
+            texel_stride: desc.layout.bytes_per_texel.into(),
+        })
+        .ok_or_else(|| CommandError::OTHER)?;
+
+        let op = Op::Binary {
+            lhs: palette,
+            rhs: indices,
+            op: BinaryOp::Palette(shaders::PaletteShader {
+                x_coord,
+                y_coord,
+                base_x: config.width_base,
+                base_y: config.height_base,
+            }),
+            desc: Descriptor {
+                layout: target_layout,
+                texel: desc.texel.clone(),
+            },
+        };
+
+        Ok(self.push(op))
     }
 
     /// Overlay this image as part of a larger one, performing blending.
@@ -563,7 +659,7 @@ impl CommandBuffer {
         _blend: Blend,
     ) -> Result<Register, CommandError> {
         // TODO: What blending should we support
-        Err(CommandError::OTHER)
+        Err(CommandError::UNIMPLEMENTED)
     }
 
     /// A solid color image, from a descriptor and a single texel.
@@ -583,6 +679,60 @@ impl CommandBuffer {
         Ok(self.push(Op::Construct {
             desc: describe,
             op: ConstructOp::Solid(data.to_owned()),
+        }))
+    }
+
+    /// A 2d image with a normal distribution.
+    ///
+    /// The parameters are controlled through the `distribution` parameter while the `texel`
+    /// parameter controls the eventual binary encoding of the image. It must be compatible with a
+    /// single gray channel (but you can have electrical transfer functions, choose arbitrary bit
+    /// widths etc.).
+    pub fn distribution_normal2d(
+        &mut self,
+        describe: Descriptor,
+        distribution: shaders::DistributionNormal2d,
+    ) -> Result<Register, CommandError> {
+        if !describe.is_consistent() {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(describe),
+            });
+        }
+
+        if describe.texel.samples.parts != SampleParts::Luma
+            && describe.texel.samples.parts != SampleParts::LumaA
+        {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(describe),
+            });
+        }
+
+        Ok(self.push(Op::Construct {
+            desc: describe,
+            op: ConstructOp::DistributionNormal(distribution),
+        }))
+    }
+
+    /// Evaluate a bilinear function over a 2d image.
+    ///
+    /// For each color channel, the parameter contains intervals of values that define how its
+    /// value is determined along the width and height axis.
+    ///
+    /// This can be used similar to `numpy`'s `mgrid`.
+    pub fn bilinear(
+        &mut self,
+        describe: Descriptor,
+        distribution: Bilinear,
+    ) -> Result<Register, CommandError> {
+        if !describe.is_consistent() {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(describe),
+            });
+        }
+
+        Ok(self.push(Op::Construct {
+            desc: describe,
+            op: ConstructOp::Bilinear(distribution),
         }))
     }
 
@@ -608,7 +758,8 @@ impl CommandBuffer {
         match affine.sampling {
             AffineSample::Nearest => (),
             AffineSample::BiLinear => {
-                todo!("Check for a color which we can sample bi-linearly")
+                // "Check for a color which we can sample bi-linearly"
+                return Err(CommandError::UNIMPLEMENTED);
             }
         }
 
@@ -694,10 +845,24 @@ impl CommandBuffer {
                     });
                 }
                 Op::Construct { desc: _, op } => {
-                    high_ops.push(High::Construct {
-                        dst: texture,
-                        op: op.clone(),
-                    });
+                    match op {
+                        &ConstructOp::DistributionNormal(ref distribution) => {
+                            high_ops.push(High::Construct {
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::Normal2d(distribution.clone()),
+                                },
+                            })
+                        }
+                        ConstructOp::Bilinear(bilinear) => high_ops.push(High::Construct {
+                            dst: Target::Discard(texture),
+                            fn_: Function::PaintFullScreen {
+                                shader: FragmentShader::Bilinear(bilinear.clone()),
+                            },
+                        }),
+                        _ => return Err(CompileError::NotYetImplemented),
+                    }
+
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 Op::Unary { desc: _, src, op } => {
@@ -705,14 +870,15 @@ impl CommandBuffer {
                         &UnaryOp::Crop(region) => {
                             let target =
                                 Rectangle::with_width_height(region.width(), region.height());
-                            high_ops.push(High::Paint {
-                                texture: reg_to_texture[src],
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[src],
                                     selection: region,
                                     target: target.into(),
                                     viewport: target,
-                                    paint_on_top: PaintOnTopKind::Copy,
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
                                 },
                             });
                         }
@@ -728,11 +894,15 @@ impl CommandBuffer {
                             // eprintln!("{:?}", adapt);
                             // eprintln!("{:?}", matrix);
 
-                            high_ops.push(High::Paint {
-                                texture: reg_to_texture[src],
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::Transform {
-                                    matrix: matrix.into(),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::LinearColorMatrix(
+                                        shaders::LinearColorTransform {
+                                            matrix: matrix.into(),
+                                        },
+                                    ),
                                 },
                             });
                         }
@@ -746,19 +916,27 @@ impl CommandBuffer {
                             // light representation are used in a single paint call but this
                             // violates it on purpose.
 
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
                             // FIXME: using a copy here but this means we do this in unnecessarily
                             // many steps. We first decode to linear color, then draw, then code
                             // back to the non-linear electrical space.
                             // We could do this directly from one matrix to another or try using an
                             // ephemeral intermediate attachment?
-                            high_ops.push(High::Paint {
-                                texture: reg_to_texture[src],
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::Transform {
-                                    matrix: color.into_matrix(),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::LinearColorMatrix(
+                                        shaders::LinearColorTransform {
+                                            matrix: color.into_matrix(),
+                                        },
+                                    ),
                                 },
                             });
                         }
+                        UnaryOp::Transmute => high_ops.push(High::Copy {
+                            src: *src,
+                            dst: Register(idx),
+                        }),
                         _ => return Err(CompileError::NotYetImplemented),
                     }
 
@@ -777,48 +955,65 @@ impl CommandBuffer {
                         BinaryOp::Affine(affine) => {
                             let affine_matrix = RowMatrix::new(affine.transformation);
 
-                            high_ops.push(High::Paint {
+                            high_ops.push(High::PushOperand(reg_to_texture[lhs]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                texture: reg_to_texture[lhs],
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[lhs],
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
-                                    paint_on_top: PaintOnTopKind::Copy,
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
                                 },
                             });
 
-                            high_ops.push(High::Paint {
-                                texture: reg_to_texture[rhs],
+                            high_ops.push(High::PushOperand(reg_to_texture[rhs]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[rhs],
                                     selection: upper_region,
                                     target: QuadTarget::from(upper_region).affine(&affine_matrix),
                                     viewport: lower_region,
-                                    paint_on_top: affine.sampling.as_paint_on_top()?,
+                                    shader: FragmentShader::PaintOnTop(
+                                        affine.sampling.as_paint_on_top()?,
+                                    ),
                                 },
                             })
                         }
                         BinaryOp::Inscribe { placement } => {
-                            high_ops.push(High::Paint {
+                            high_ops.push(High::PushOperand(reg_to_texture[lhs]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                texture: reg_to_texture[lhs],
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[lhs],
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
-                                    paint_on_top: PaintOnTopKind::Copy,
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
                                 },
                             });
 
-                            high_ops.push(High::Paint {
+                            high_ops.push(High::PushOperand(reg_to_texture[rhs]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
-                                texture: reg_to_texture[rhs],
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[rhs],
                                     selection: upper_region,
                                     target: (*placement).into(),
                                     viewport: lower_region,
-                                    paint_on_top: PaintOnTopKind::Copy,
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
+                                },
+                            });
+                        }
+                        BinaryOp::Palette(shader) => {
+                            high_ops.push(High::PushOperand(reg_to_texture[lhs]));
+                            high_ops.push(High::PushOperand(reg_to_texture[rhs]));
+
+                            high_ops.push(High::Construct {
+                                dst: Target::Load(texture),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::Palette(shader.clone()),
                                 },
                             });
                         }
@@ -829,7 +1024,7 @@ impl CommandBuffer {
                 }
             }
 
-            high_ops.push(High::Done(idx));
+            high_ops.push(High::Done(Register(idx)));
         }
 
         Ok(Program {
@@ -1122,6 +1317,15 @@ impl CommandError {
 
     /// Specifies that a register reference was invalid.
     const BAD_REGISTER: Self = Self::OTHER;
+
+    /// This has not yet been implemented, sorry.
+    ///
+    /// Errors of this kind will be removed over the course of bringing the crate to a first stable
+    /// release, this this will be removed. The method, and importantly its signature, are already
+    /// added for the purpose of exposition and documenting the intention.
+    const UNIMPLEMENTED: Self = CommandError {
+        inner: CommandErrorKind::Unimplemented,
+    };
 
     pub fn is_type_err(&self) -> bool {
         matches!(

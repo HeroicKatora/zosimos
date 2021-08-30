@@ -1,14 +1,25 @@
 //! Defines layout and buffer of our images.
 use canvas::{layout::Layout, Canvas};
+use core::convert::TryFrom;
 
 /// The byte layout of a buffer.
 ///
-/// An inner invariant is that the layout fits in memory and in particular into a `usize`.
+/// An inner invariant is that the layout fits in memory, and in particular into a `usize`, while
+/// at the same time also fitting inside a `u64` of bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BufferLayout {
+    /// The number of texels along our width.
     pub(crate) width: u32,
+    /// The number of texels along our height.
     pub(crate) height: u32,
+    /// The number of bytes per texel.
+    /// We need to be able to infallibly convert to both `usize` and `u32`. Thus we have chosen
+    /// `u8` for now because no actual texel is that large. However, we could use some other type
+    /// to represent the intersection of our two target types (i.e. the `index-ext` crate has
+    /// `mem::Umem32` with those exact semantics).
     pub(crate) bytes_per_texel: u8,
+    /// The number of bytes per row.
+    /// This is a u32 for compatibility with `wgpu`.
     pub(crate) bytes_per_row: u32,
 }
 
@@ -17,11 +28,15 @@ pub struct BufferLayout {
 /// This is only concerned with byte-buffer compatibility and not type or color space semantics of
 /// texels. It assumes a row-major layout without space between texels of a row as that is the most
 /// efficient and common such layout.
+///
+/// For usage as an actual image buffer, to convert it to a `BufferLayout` by calling
+/// [`BufferLayout::with_row_layout`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RowLayoutDescription {
     pub width: u32,
     pub height: u32,
-    pub stride: u64,
+    pub texel_stride: u64,
+    pub row_stride: u64,
 }
 
 #[derive(Clone)]
@@ -152,6 +167,24 @@ pub enum ColorChannel {
     R,
     G,
     B,
+}
+
+/// Denotes the 'position' of a channel in the sample parts.
+///
+/// This is private for now because the constructor might be a bit confusing. In actuality, we are
+/// interested in the position of a channel in the _linear_ color representation. For example, all
+/// RGB-ish colors (including the variant `Bgra`) are mapped to a `vec4` in the order `rgba` in the
+/// shader execution. Thus, the 'position' of the `R` channel is _always_ `First` in these cases.
+///
+/// This can only make sense with internal knowledge about how we remap color representations into
+/// the texture during the Staging phase of loading a color image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum ChannelPosition {
+    First = 0,
+    Second = 1,
+    Third = 2,
+    Fourth = 3,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -679,8 +712,25 @@ impl ImageBuffer {
 }
 
 impl BufferLayout {
-    pub fn with_row_layout(_: RowLayoutDescription) -> Option<Self> {
-        todo!()
+    pub fn with_row_layout(rows: RowLayoutDescription) -> Option<Self> {
+        let bytes_per_texel = u8::try_from(rows.texel_stride).ok()?;
+        let bytes_per_row = u32::try_from(rows.row_stride).ok()?;
+
+        // Enforce that the layout makes sense and does not alias.
+        let _ = u32::from(bytes_per_texel)
+            .checked_mul(rows.width)
+            .filter(|&bwidth| bwidth <= bytes_per_row)?;
+
+        // Enforce our inner invariant.
+        let u64_len = u64::from(rows.height).checked_mul(rows.row_stride)?;
+        let _ = usize::try_from(u64_len).ok()?;
+
+        Some(BufferLayout {
+            width: rows.width,
+            height: rows.height,
+            bytes_per_texel,
+            bytes_per_row,
+        })
     }
 
     pub fn width(&self) -> u32 {
@@ -699,6 +749,15 @@ impl BufferLayout {
     pub fn byte_len(&self) -> usize {
         // No overflow due to inner invariant.
         (self.bytes_per_row as usize) * (self.height as usize)
+    }
+
+    pub fn as_row_layout(&self) -> RowLayoutDescription {
+        RowLayoutDescription {
+            width: self.width,
+            height: self.height,
+            texel_stride: u64::from(self.bytes_per_texel),
+            row_stride: u64::from(self.bytes_per_row),
+        }
     }
 }
 

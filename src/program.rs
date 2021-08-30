@@ -46,6 +46,10 @@ pub struct Program {
 /// A single command might be translated to multiple functions.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Function {
+    /// Execute a shader on an target rectangle.
+    ///
+    /// The UV coordinates and position is determined by vertex shader parameters computed from a
+    /// selection, a target location, and a viewport.
     /// VS: id
     ///   in: vec3 position
     ///   in: vec2 vertUv
@@ -55,8 +59,12 @@ pub(crate) enum Function {
     ///   in: vec2 uv
     ///   bind(1,0): texture
     ///   bind(1,1): sampler2D
+    ///   bind(2,0): shader specific data.
     ///   out: vec4 (color)
-    PaintOnTop {
+    PaintToSelection {
+        /// The texture which is used as source.
+        /// We require this to compute the specific quad coordinates.
+        texture: Texture,
         /// Source selection (relative to texture coordinates).
         selection: Rectangle,
         /// Target location in target texture.
@@ -65,8 +73,9 @@ pub(crate) enum Function {
         /// The target coordinates are relative to this and the fragment shader given by
         /// paint_on_top is only executed within that rectangle.
         viewport: Rectangle,
-        paint_on_top: PaintOnTopKind,
+        shader: shaders::FragmentShader,
     },
+    /// Execute a shader on full textures.
     /// VS: id
     ///   in: vec3 position
     ///   in: vec2 vertUv
@@ -76,9 +85,9 @@ pub(crate) enum Function {
     ///   in: vec2 uv
     ///   bind(1,0): texture
     ///   bind(1,1): sampler2D
-    ///   bind(2,0): transform matrix
+    ///   bind(2,0): shader specific data.
     ///   out: vec4 (color)
-    Transform { matrix: RowMatrix },
+    PaintFullScreen { shader: shaders::FragmentShader },
     /// VS: id
     /// FS:
     ///   bind(1, …) readonly inputs uimage2D
@@ -106,11 +115,6 @@ pub(crate) enum Function {
 pub enum QuadTarget {
     Rect(Rectangle),
     Absolute([[f32; 2]; 4]),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum PaintOnTopKind {
-    Copy,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -192,13 +196,17 @@ struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     /// each potential usage.
     stage_group_layout: HashMap<u32, usize>,
     known_samplers: HashMap<SamplerDescriptor, usize>,
-    fragment_shaders: HashMap<FragmentShader, usize>,
+    fragment_shaders: HashMap<shaders::FragmentShaderKey, usize>,
     vertex_shaders: HashMap<VertexShader, usize>,
     simple_quad_buffer: Option<DeviceBuffer>,
     /// The render pipeline state for staging a texture.
     staged_to_pipelines: HashMap<Texture, SimpleRenderPipeline>,
     /// The render pipeline state for undoing staging a texture.
     staged_from_pipelines: HashMap<Texture, SimpleRenderPipeline>,
+    /// The allocate binary data for runtime execution.
+    binary_data: Vec<u8>,
+    /// The texture operands collected for the next render preparation.
+    operands: Vec<Texture>,
 
     // Fields regarding the status of registers.
     /// Describes how registers where mapped to buffers.
@@ -290,15 +298,6 @@ struct BufferMap {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum VertexShader {
     Noop,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum FragmentShader {
-    PaintOnTop(PaintOnTopKind),
-    /// Linear color transformation.
-    LinearColorMatrix,
-    /// The conversion of texel format.
-    Convert,
 }
 
 #[derive(Debug)]
@@ -525,8 +524,18 @@ pub(crate) struct BufferDescriptor {
 /// For constructing a new buffer, of anonymous memory.
 #[derive(Debug)]
 pub(crate) struct BufferDescriptorInit {
-    pub content: Cow<'static, [u8]>,
+    pub content: BufferInitContent,
     pub usage: BufferUsage,
+}
+
+#[derive(Debug)]
+pub(crate) enum BufferInitContent {
+    Owned(Vec<u8>),
+    /// The buffer init data is from the program 'data segment'.
+    Defer {
+        start: usize,
+        end: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -696,7 +705,9 @@ enum PipelineTarget {
 }
 
 enum TextureBind {
-    Texture(Texture),
+    /// Use the currently pushed texture operands.
+    /// The arguments are taken from the back of the operand vector.
+    Textures(usize),
     PreComputedGroup {
         /// The index of the bind group we're binding to set `1`, the fragment set.
         group: usize,
@@ -709,6 +720,10 @@ enum BufferBind<'data> {
     /// Upload the data, then bind the buffer.
     Set {
         data: &'data [u8],
+    },
+    /// The data has already been planned beforehand.
+    Planned {
+        data: BufferInitContent,
     },
     None,
     // /// The data is already there, simply bind the buffer.
@@ -727,7 +742,7 @@ enum ShaderBind {
 struct SimpleRenderPipeline {
     pipeline: usize,
     buffer: DeviceBuffer,
-    group: usize,
+    group: Option<usize>,
     vertex_bind: Option<usize>,
     vertices: u32,
     fragment_bind: Option<usize>,
@@ -938,19 +953,17 @@ impl Launcher<'_> {
                     encoder.copy_staging_to_buffer(src)?;
                     encoder.copy_buffer_to_output(src, dst)?;
                 }
-                High::Construct { .. } => {
-                    todo!()
+                &High::PushOperand(texture) => {
+                    encoder.copy_staging_to_texture(texture)?;
+                    encoder.push_operand(texture)?;
                 }
-                High::Paint { texture, dst, fn_ } => {
+                High::Construct { dst, fn_ } => {
                     let dst_texture = match dst {
                         Target::Discard(texture) | Target::Load(texture) => *texture,
                     };
 
                     encoder.ensure_allocate_texture(dst_texture)?;
-                    encoder.copy_staging_to_texture(*texture)?;
-
                     let dst_view = encoder.texture_view(dst_texture)?;
-                    // eprintln!("tex{:?} +> tex{:?}", texture, dst_texture);
 
                     let ops = match dst {
                         Target::Discard(_) => {
@@ -971,12 +984,13 @@ impl Launcher<'_> {
                         ops,
                     };
 
-                    let render = encoder.prepare_render(*texture, fn_, dst_texture)?;
+                    let render = encoder.prepare_render(fn_, dst_texture)?;
 
                     // TODO: we need to remember the attachment format here.
                     // This is need to to automatically construct the shader pipeline.
                     encoder.push(Low::BeginCommands)?;
                     encoder.push(Low::BeginRenderPass(RenderPassDescriptor {
+                        // FIXME: allocation?
                         color_attachments: vec![attachment],
                         depth_stencil: None,
                     }))?;
@@ -989,7 +1003,29 @@ impl Launcher<'_> {
                     encoder.push(Low::RunTopCommand)?;
 
                     // Post paint, make sure we quantize everything.
-                    encoder.copy_texture_to_staging(*texture)?;
+                    encoder.copy_texture_to_staging(dst_texture)?;
+                }
+                High::Copy { src, dst } => {
+                    let &RegisterMap {
+                        buffer: source_buffer,
+                        ref buffer_layout,
+                        ..
+                    } = encoder.allocate_register(*src)?;
+                    let size = buffer_layout.u64_len();
+                    let target_buffer = encoder.allocate_register(*dst)?.buffer;
+
+                    encoder.copy_staging_to_buffer(*src)?;
+
+                    encoder.push(Low::BeginCommands)?;
+                    encoder.push(Low::CopyBufferToBuffer {
+                        source_buffer,
+                        size,
+                        target_buffer,
+                    })?;
+                    encoder.push(Low::EndCommands)?;
+                    encoder.push(Low::RunTopCommand)?;
+
+                    encoder.copy_buffer_to_staging(*dst)?;
                 }
             }
         }
@@ -997,11 +1033,19 @@ impl Launcher<'_> {
         let mut buffers = self.binds;
         encoder.extract_buffers(&mut buffers, &mut self.pool)?;
 
+        // Unbalanced operands shouldn't happen.
+        // This is part of validation layer but cheap and we always do it.
+        if !encoder.operands.is_empty() {
+            eprintln!("{:?}", encoder.operands.as_slice());
+            return Err(LaunchError::InternalCommandError(line!()));
+        }
+
         let init = run::InitialState {
             instructions: encoder.instructions,
             device,
             queue,
             buffers,
+            binary_data: encoder.binary_data,
         };
 
         Ok(run::Execution::new(init))
@@ -1230,13 +1274,22 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
+    fn push_operand(&mut self, texture: Texture) -> Result<(), LaunchError> {
+        self.operands.push(texture);
+        Ok(())
+    }
+
+    // We must trick the borrow checker here..
     fn allocate_register(&mut self, idx: Register) -> Result<&RegisterMap, LaunchError> {
         self.ensure_allocate_register(idx)?;
         // Trick, reborrow the thing..
         Ok(&self.register_map[&idx])
     }
 
-    // We must trick the borrow checker here..
+    /// Construct and allocate mappings for the register.
+    /// We can't return the finished mapping due to borrow checker issues (would need to borrow
+    /// from self but access it 'later' in the function; will be fixed with Polonius). Thus one
+    /// should prefer to call `allocate_register` instead.
     fn ensure_allocate_register(&mut self, idx: Register) -> Result<(), LaunchError> {
         let ImageBufferAssignment {
             buffer: reg_buffer,
@@ -1486,7 +1539,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     stage_kind: staging.stage_kind,
                 };
 
-                self.prepare_render(idx, &fn_, idx)?
+                self.prepare_render(&fn_, idx)?
             };
 
             let dst_view = self.texture_view(idx)?;
@@ -1530,7 +1583,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     stage_kind: staging.stage_kind,
                 };
 
-                self.prepare_render(idx, &fn_, idx)?
+                self.prepare_render(&fn_, idx)?
             };
 
             let dst_view = {
@@ -1694,35 +1747,36 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         })
     }
 
-    fn make_paint_group_layout(&mut self) -> usize {
+    fn make_paint_group_layout(&mut self, count: usize) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
         *self.paint_group_layout.get_or_insert_with(|| {
-            let descriptor = BindGroupLayoutDescriptor {
-                entries: vec![
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStage::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler {
-                            filtering: true,
-                            comparison: false,
-                        },
-                        count: None,
-                    },
-                ],
-            };
+            let mut entries = vec![wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStage::FRAGMENT,
+                ty: wgpu::BindingType::Sampler {
+                    filtering: true,
+                    comparison: false,
+                },
+                count: None,
+            }];
 
+            for i in 0..count {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 1 + i as u32,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                });
+            }
+
+            let descriptor = BindGroupLayoutDescriptor { entries };
             instructions.extend_one(Low::BindGroupLayout(descriptor));
+
             let descriptor_id = *bind_group_layouts;
             *bind_group_layouts += 1;
             descriptor_id
@@ -1808,12 +1862,18 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     fn make_paint_layout(&mut self, desc: &SimpleRenderPipelineDescriptor) -> usize {
         let quad_bind_group = self.make_quad_bind_group();
-        let paint_bind_group = match desc.fragment_texture {
-            TextureBind::Texture(_) => self.make_paint_group_layout(),
-            TextureBind::PreComputedGroup { layout, .. } => layout,
-        };
 
-        let mut bind_group_layouts = vec![quad_bind_group, paint_bind_group];
+        let mut bind_group_layouts = vec![quad_bind_group];
+
+        match desc.fragment_texture {
+            TextureBind::Textures(0) => {}
+            TextureBind::Textures(count) => {
+                bind_group_layouts.push(self.make_paint_group_layout(count))
+            }
+            TextureBind::PreComputedGroup { layout, .. } => {
+                bind_group_layouts.push(layout);
+            }
+        };
 
         if let BufferBind::None = desc.fragment_bind_data {
             let layouts = &mut self.pipeline_layouts;
@@ -1857,7 +1917,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     fn fragment_shader(
         &mut self,
-        kind: Option<FragmentShader>,
+        kind: Option<shaders::FragmentShaderKey>,
         source: Cow<'static, [u32]>,
     ) -> Result<usize, LaunchError> {
         if let Some(&shader) = kind.and_then(|k| self.fragment_shaders.get(&k)) {
@@ -1902,7 +1962,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             let descriptor = BufferDescriptorInit {
                 usage: BufferUsage::InVertices,
-                content: bytemuck::cast_slice(content).into(),
+                content: bytemuck::cast_slice(content).to_vec().into(),
             };
 
             instructions.extend_one(Low::BufferInit(descriptor));
@@ -1981,8 +2041,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             })
     }
 
-    fn make_bind_group_sampled_texture(&mut self, texture: Texture) -> Result<usize, LaunchError> {
-        let view = self.texture_view(texture)?;
+    fn make_bind_group_sampled_texture(&mut self, count: usize) -> Result<usize, LaunchError> {
+        let start_of_operands = match self.operands.len().checked_sub(count) {
+            None => return Err(LaunchError::InternalCommandError(line!())),
+            Some(i) => i,
+        };
 
         let sampler = self.make_sampler(SamplerDescriptor {
             address_mode: wgpu::AddressMode::default(),
@@ -1990,13 +2053,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             resize_filter: wgpu::FilterMode::Nearest,
         });
 
+        let mut entries = vec![BindingResource::Sampler(sampler)];
+        let textures: Vec<_> = self.operands.drain(start_of_operands..).collect();
+        for texture in textures {
+            let view = self.texture_view(texture)?;
+            entries.push(BindingResource::TextureView(view));
+        }
+
         let group = self.bind_groups;
         let descriptor = BindGroupDescriptor {
-            layout_idx: self.make_paint_group_layout(),
-            entries: vec![
-                BindingResource::TextureView(view),
-                BindingResource::Sampler(sampler),
-            ],
+            layout_idx: self.make_paint_group_layout(count),
+            entries: entries,
             sparse: vec![],
         };
 
@@ -2060,16 +2127,24 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     fn make_bound_buffer(
         &mut self,
-        bind: &BufferBind<'_>,
+        bind: BufferBind<'_>,
         layout_idx: usize,
     ) -> Result<Option<usize>, LaunchError> {
         let buffer = match bind {
             BufferBind::None => return Ok(None),
             BufferBind::Set { data } => {
                 let buffer = self.buffers;
+                let content = self.ingest_data(data);
                 self.push(Low::BufferInit(BufferDescriptorInit {
-                    // FIXME: avoid the allocation here?
-                    content: Cow::Owned(data.to_vec()),
+                    content: content,
+                    usage: BufferUsage::Uniform,
+                }))?;
+                DeviceBuffer(buffer)
+            }
+            BufferBind::Planned { data } => {
+                let buffer = self.buffers;
+                self.push(Low::BufferInit(BufferDescriptorInit {
+                    content: data,
                     usage: BufferUsage::Uniform,
                 }))?;
                 DeviceBuffer(buffer)
@@ -2109,23 +2184,24 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let buffer = self.simple_quad_buffer();
 
         let group = match texture {
-            TextureBind::Texture(texture) => {
-                let group = self.make_bind_group_sampled_texture(*texture)?;
+            TextureBind::Textures(0) => None,
+            &TextureBind::Textures(count) => {
+                let group = self.make_bind_group_sampled_texture(count)?;
                 // eprintln!("Using Texture {:?} as group {:?}", texture, group);
-                group
+                Some(group)
             }
             &TextureBind::PreComputedGroup { group, .. } => {
                 // eprintln!("Using Target Group {:?}", group);
-                group
+                Some(group)
             }
         };
 
         let vertex_layout = self.make_quad_bind_group();
-        let vertex_bind = self.make_bound_buffer(vertex_bind_data, vertex_layout)?;
+        let vertex_bind = self.make_bound_buffer(descriptor.vertex_bind_data, vertex_layout)?;
 
         // FIXME: this builds the layout even when it is not required.
         let vertex_layout = self.make_generic_fragment_bind_group();
-        let fragment_bind = self.make_bound_buffer(fragment_bind_data, vertex_layout)?;
+        let fragment_bind = self.make_bound_buffer(descriptor.fragment_bind_data, vertex_layout)?;
 
         Ok(SimpleRenderPipeline {
             pipeline,
@@ -2166,19 +2242,24 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         self.push(Low::SetPipeline(pipeline))?;
 
+        let mut group_idx = 0;
         if let Some(quad) = vertex_bind {
             self.push(Low::SetBindGroup {
                 group: quad,
-                index: 0,
+                index: group_idx,
                 offsets: Cow::Borrowed(&[]),
             })?;
+            group_idx += 1;
         }
 
-        self.push(Low::SetBindGroup {
-            group,
-            index: 1,
-            offsets: Cow::Borrowed(&[]),
-        })?;
+        if let Some(group) = group {
+            self.push(Low::SetBindGroup {
+                group,
+                index: group_idx,
+                offsets: Cow::Borrowed(&[]),
+            })?;
+            group_idx += 1;
+        }
 
         self.push(Low::SetVertexBuffer {
             buffer: buffer.0,
@@ -2188,7 +2269,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         if let Some(bind) = fragment_bind {
             self.push(Low::SetBindGroup {
                 group: bind,
-                index: 2,
+                index: group_idx,
                 offsets: Cow::Borrowed(&[]),
             })?;
         }
@@ -2201,28 +2282,26 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     #[rustfmt::skip]
     fn prepare_render(
         &mut self,
-        // The texture which we are using as the fragment source.
-        texture: Texture,
         // The function we are using.
         function: &Function,
         // The texture we are rendering to.
         target: Texture,
-    )
-        -> Result<SimpleRenderPipeline, LaunchError>
-    {
+    ) -> Result<SimpleRenderPipeline, LaunchError> {
         match function {
-            Function::PaintOnTop { selection, target: target_coords, viewport, paint_on_top } => {
+            Function::PaintToSelection { texture, selection, target: target_coords, viewport, shader } => {
                 let (tex_width, tex_height) = self.texture_map[&texture].format.size;
 
                 let vertex = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
-                let fragment = paint_on_top.fragment_shader();
-                let fragment = self.fragment_shader(
-                    Some(FragmentShader::PaintOnTop(paint_on_top.clone())),
-                    shader_include_to_spirv(fragment))?;
+                let shader = shader.shader();
+                let key = shader.key();
+                let spirv = shader.spirv_source();
 
+                let fragment = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
+
+                let buffer: [[f32; 2]; 16];
                 // FIXME: there seems to be two floats padding after each vec2.
                 let min_u = (selection.x as f32) / (tex_width.get() as f32);
                 let max_u = (selection.max_x as f32) / (tex_width.get() as f32);
@@ -2232,7 +2311,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let coords = target_coords.to_screenspace_coords(viewport);
 
                 // std140, always pad to 16 bytes.
-                let buffer: [[f32; 2]; 16] = [
+                buffer = [
                     [min_u, min_v], [0.0, 0.0],
                     [max_u, min_v], [0.0, 0.0],
                     [max_u, max_v], [0.0, 0.0],
@@ -2249,40 +2328,35 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
                     },
-                    fragment_texture: TextureBind::Texture(texture),
+                    fragment_texture: TextureBind::Textures(1),
                     fragment_bind_data: BufferBind::None,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
             },
-            Function::Transform { matrix } => {
+            Function::PaintFullScreen { shader } => {
                 let vertex = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
-                let fragment = self.fragment_shader(
-                    Some(FragmentShader::LinearColorMatrix),
-                    shader_include_to_spirv(shaders::FRAG_LINEAR))?;
+                let shader = shader.shader();
+                let key = shader.key();
+                let spirv = shader.spirv_source();
 
-                let matrix = matrix.into_inner();
+                let fragment = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
+                let fragment_bind_data = shader.binary_data(&mut self.binary_data)
+                    .map(|data| BufferBind::Planned { data })
+                    .unwrap_or(BufferBind::None);
 
-                // std140, always pad to 16 bytes.
-                // matrix is an array of its columns.
-                let rgb_matrix: [f32; 12] = [
-                   matrix[0], matrix[3], matrix[6], 0.0,
-                   matrix[1], matrix[4], matrix[7], 0.0,
-                   matrix[2], matrix[5], matrix[8], 0.0,
-                ];
+                let arguments = shader.num_args();
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
                     pipeline_target: PipelineTarget::Texture(target),
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                     },
-                    fragment_texture: TextureBind::Texture(texture),
-                    fragment_bind_data: BufferBind::Set {
-                        data: bytemuck::cast_slice(&rgb_matrix[..]),
-                    },
+                    fragment_texture: TextureBind::Textures(arguments as usize),
+                    fragment_bind_data,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
@@ -2293,7 +2367,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(FragmentShader::Convert),
+                    Some(shaders::FragmentShaderKey::Convert),
                     shader_include_to_spirv(stage_kind.decode_src()))?;
 
                 let buffer = parameter.serialize_std140();
@@ -2304,7 +2378,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 let group = self.make_opto_fragment_group(
                     stage_kind.decode_binding(),
-                    texture,
+                    target,
                     None,
                 )?;
 
@@ -2338,7 +2412,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(FragmentShader::Convert),
+                    Some(shaders::FragmentShaderKey::Convert),
                     shader_include_to_spirv(stage_kind.encode_src()))?;
 
                 let buffer = parameter.serialize_std140();
@@ -2349,8 +2423,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 let group = self.make_opto_fragment_group(
                     stage_kind.encode_binding(),
-                    texture,
-                    Some(texture),
+                    target,
+                    Some(target),
                 )?;
 
                 // eprintln!("{:?} {:?}", parameter, buffer);
@@ -2380,6 +2454,34 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 })
             }
         }
+    }
+
+    fn ingest_data(&mut self, data: &[impl bytemuck::Pod]) -> BufferInitContent {
+        BufferInitContent::new(&mut self.binary_data, data)
+    }
+}
+
+impl BufferInitContent {
+    /// Construct a reference to data by allocating it freshly within the buffer.
+    pub fn new(buf: &mut Vec<u8>, data: &[impl bytemuck::Pod]) -> Self {
+        let start = buf.len();
+        buf.extend_from_slice(bytemuck::cast_slice(data));
+        let end = buf.len();
+        BufferInitContent::Defer { start, end }
+    }
+
+    /// Get a reference to the binary data, given the allocator/buffer.
+    pub fn as_slice<'lt>(&'lt self, buffer: &'lt Vec<u8>) -> &'lt [u8] {
+        match self {
+            BufferInitContent::Owned(ref data) => &data,
+            &BufferInitContent::Defer { start, end } => &buffer[start..end],
+        }
+    }
+}
+
+impl From<Vec<u8>> for BufferInitContent {
+    fn from(vec: Vec<u8>) -> Self {
+        BufferInitContent::Owned(vec)
     }
 }
 
@@ -2429,19 +2531,21 @@ impl From<Rectangle> for QuadTarget {
     }
 }
 
+fn shader_include_to_spirv_static(src: Cow<'static, [u8]>) -> Cow<'static, [u32]> {
+    if let Cow::Borrowed(src) = src {
+        if let Ok(cast) = bytemuck::try_cast_slice(src) {
+            return Cow::Borrowed(cast);
+        }
+    }
+
+    shader_include_to_spirv(&src)
+}
+
 fn shader_include_to_spirv(src: &[u8]) -> Cow<'static, [u32]> {
     assert!(src.len() % 4 == 0);
     let mut target = vec![0u32; src.len() / 4];
     bytemuck::cast_slice_mut(&mut target).copy_from_slice(src);
     Cow::Owned(target)
-}
-
-impl PaintOnTopKind {
-    fn fragment_shader(&self) -> &[u8] {
-        match self {
-            PaintOnTopKind::Copy => shaders::FRAG_COPY,
-        }
-    }
 }
 
 impl BufferUsage {

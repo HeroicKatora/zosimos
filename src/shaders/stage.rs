@@ -13,7 +13,9 @@ pub(crate) struct XyzParameter {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum StageKind {
+    #[deprecated = "Not necessarily supported as a Storage texture."]
     R8ui = 0,
+    #[deprecated = "Not necessarily supported as a Storage texture."]
     R16ui = 1,
     R32ui = 2,
     Rgba16ui = 3,
@@ -74,14 +76,15 @@ impl StageKind {
         match self {
             Self::R8ui => include_bytes!(concat!(env!("OUT_DIR"), "/spirv/stage_d8ui.frag.v")),
             Self::R32ui => include_bytes!(concat!(env!("OUT_DIR"), "/spirv/stage_d32ui.frag.v")),
-            _ => todo!(),
+            _ => todo!("{:?}", self),
         }
     }
 
     pub(crate) fn encode_src(self) -> &'static [u8] {
         match self {
+            Self::R8ui => include_bytes!(concat!(env!("OUT_DIR"), "/spirv/stage_e8ui.frag.v")),
             Self::R32ui => include_bytes!(concat!(env!("OUT_DIR"), "/spirv/stage_e32ui.frag.v")),
-            _ => todo!(),
+            _ => todo!("{:?}", self),
         }
     }
 
