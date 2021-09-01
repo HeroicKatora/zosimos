@@ -58,8 +58,8 @@ layout (set = 1, binding = 4, rgba32ui) uniform restrict readonly uimage2D image
 
 /* Output images. Same as input but writeonly instead.
  */
-layout (set = 1, binding = 16, r8ui) uniform restrict writeonly uimage2D oimage_r8ui;
-layout (set = 1, binding = 17, r16ui) uniform restrict writeonly uimage2D oimage_r16ui;
+layout (set = 1, binding = 16, r32ui) uniform restrict writeonly uimage2D oimage_r8ui;
+layout (set = 1, binding = 17, r32ui) uniform restrict writeonly uimage2D oimage_r16ui;
 layout (set = 1, binding = 18, r32ui) uniform restrict writeonly uimage2D oimage_r32ui;
 layout (set = 1, binding = 19, rgba16ui) uniform restrict writeonly uimage2D oimage_rgba16ui;
 layout (set = 1, binding = 20, rgba32ui) uniform restrict writeonly uimage2D oimage_rgba32ui;
@@ -365,7 +365,7 @@ vec3 transfer_scene_display_bt2100hlg(vec3 rgb) {
 
 void DECODE_R8UI_AS_MAIN() {
   uint num = imageLoad(image_r8ui, decodeStageTexelCoord()).x;
-  uint work = (num >> (8*decodeSubtexelCoord())) & 0xff;
+  uint work = (num >> (24 - 8*decodeSubtexelCoord())) & 0xff;
   vec4 components = demux_uint(work, get_sample_bits());
 
   // FIXME: YUV transform and accurate YUV transform.
@@ -379,16 +379,17 @@ void ENCODE_R8UI_AS_MAIN() {
   ivec2 baseCoord = encodePixelCoord();
   uint num = 0;
   for (int i = 0; i < get_horizontal_workload(); i++) {
-    ivec2 pixelCoord = baseCoord + ivec2(0, i);
+    ivec2 pixelCoord = baseCoord + ivec2(i, 0);
     vec4 primaries = texelFetch(sampler2D(in_texture, texture_sampler), pixelCoord, 0);
 
     vec4 electrical = parts_transfer(primaries, get_transfer());
     // FIXME: YUV transform and accurate YUV transform.
     vec4 components = parts_denormalize(electrical, get_sample_parts());
 
-    uint texelNum = mux_uint(components, get_sample_bits());
-    num = (num << 8) | (texelNum & 0xff);
+    uint texelNum = mux_uint(clamp(components, 0.0, 1.0), get_sample_bits());
+    num |= (texelNum & 0xffff) << (8*i);
   }
+
   imageStore(oimage_r8ui, ivec2(gl_FragCoord), uvec4(num));
 }
 

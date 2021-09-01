@@ -1,4 +1,5 @@
 /// Detailed structs for the stage shader.
+use core::num::NonZeroU32;
 use crate::buffer::{SampleBits, SampleParts, Transfer};
 use wgpu::TextureFormat;
 
@@ -125,5 +126,21 @@ impl StageKind {
 
     pub(crate) fn encode_binding(self) -> u32 {
         (self as u32) + 16
+    }
+
+    pub(crate) fn horizontal_subfactor(self) -> u32 {
+        match self {
+            Self::R8uiX4 => 4,
+            Self::R16uiX2 => 2,
+            _ => 1,
+        }
+    }
+
+    pub(crate) fn stage_size(self, (w, h): (NonZeroU32, NonZeroU32))
+        -> (NonZeroU32, NonZeroU32)
+    {
+        let sub = self.horizontal_subfactor();
+        let w = w.get() / sub + u32::from(w.get() % sub > 0);
+        (NonZeroU32::new(w).unwrap(), h)
     }
 }

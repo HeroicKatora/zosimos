@@ -667,11 +667,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let regmap = self.allocate_register(idx)?.clone();
         let size = self.buffer_plan.texture[regmap.texture.0].size();
 
-        let target_texture = if let Some(staging) = regmap.staging {
-            staging
+        let (size, target_texture);
+        if let Some(staging) = regmap.staging {
+            target_texture = staging;
+            let (width, height) = regmap.staging_format.as_ref().unwrap().size;
+            size = (width.get(), height.get());
         } else {
             // .… or directly to the target buffer if we have no staging.
-            regmap.texture
+            target_texture = regmap.texture;
+            size = self.buffer_plan.get_info(idx)?.descriptor.size();
         };
 
         // eprintln!("!!! Copying {:?}: to {:?}", idx, target_texture);
@@ -791,12 +795,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// Copy from texture to the memory buffer.
     pub(crate) fn copy_staging_to_buffer(&mut self, idx: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
-        let size = self.buffer_plan.get_info(idx)?.descriptor.size();
 
-        let source_texture = if let Some(staging) = regmap.staging {
-            staging
+        let (size, source_texture);
+        if let Some(staging) = regmap.staging {
+            source_texture = staging;
+            let (width, height) = regmap.staging_format.as_ref().unwrap().size;
+            size = (width.get(), height.get());
         } else {
-            regmap.texture
+            source_texture = regmap.texture;
+            size = self.buffer_plan.get_info(idx)?.descriptor.size();
         };
 
         // eprintln!("!!! Copying {:?}: from {:?}", idx, source_texture);

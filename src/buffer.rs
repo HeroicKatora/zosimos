@@ -430,8 +430,6 @@ impl Texel {
     }
 }
 
-impl Samples {}
-
 impl SampleBits {
     /// Determine the number of bytes for texels containing these samples.
     pub fn bytes(self) -> usize {

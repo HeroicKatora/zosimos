@@ -460,7 +460,7 @@ impl ImageDescriptor {
 
     pub(crate) fn to_staging_texture(&self) -> Option<TextureDescriptor> {
         self.staging.map(|staging| TextureDescriptor {
-            size: self.size,
+            size: staging.stage_kind.stage_size(self.size),
             format: staging.stage_kind.texture_format(),
             usage: TextureUsage::Staging,
         })
