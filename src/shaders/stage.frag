@@ -50,8 +50,8 @@ layout (location = 0) out vec4 f_color;
 
 /* Not all those bindings will be bound!
  */
-layout (set = 1, binding = 0, r8ui) uniform restrict readonly uimage2D image_r8ui;
-layout (set = 1, binding = 1, r16ui) uniform restrict readonly uimage2D image_r16ui;
+layout (set = 1, binding = 0, r32ui) uniform restrict readonly uimage2D image_r8ui;
+layout (set = 1, binding = 1, r32ui) uniform restrict readonly uimage2D image_r16ui;
 layout (set = 1, binding = 2, r32ui) uniform restrict readonly uimage2D image_r32ui;
 layout (set = 1, binding = 3, rgba16ui) uniform restrict readonly uimage2D image_rgba16ui;
 layout (set = 1, binding = 4, rgba32ui) uniform restrict readonly uimage2D image_rgba32ui;
@@ -137,6 +137,42 @@ const uint SAMPLE_BITS_Float32x4 = 19;
 
 uint get_sample_bits() {
   return parameter.space.z;
+}
+
+/** How many texels each call is responsible for (horizontally).
+ */
+uint get_horizontal_workload() {
+  return max(parameter.space.a, 1);
+}
+
+/** The 'position' in the input texel to retrieve one of the actual texels of the input image.
+ *
+ * Since, on WebGPU, we are only allowed to Load/Store at 32-bit granularity,
+ * we must aggregate multiple texels of the underlying image binary format into
+ * one logical texel in the GL binding.
+ *
+ * During decoding, our gl_FragCoord points at the _pixel_ index of an output
+ * image. During encoding, the gl_FragCoord points at a _texel_ index in the
+ * granular, artificial stage texture format.
+ *
+ * This method derives the texel coord of the pixel within the stage texture.
+ */
+ivec2 decodeStageTexelCoord() {
+// FIXME: block texel?
+  return ivec2(gl_FragCoord) / ivec2(get_horizontal_workload(), 1);
+}
+
+/** Derives the coord of the image texel within the stage texture texel.
+ * See `decodeStageTexelCoord` for explanation.
+ */
+uint decodeSubtexelCoord() {
+  return ivec2(gl_FragCoord).x % get_horizontal_workload();
+}
+
+/** Derives the base pixel coord of the image stored to this stage texture texel.
+ */
+ivec2 encodePixelCoord() {
+  return ivec2(gl_FragCoord) * ivec2(get_horizontal_workload(), 1);
 }
 
 /** Forward declarations.
@@ -328,8 +364,9 @@ vec3 transfer_scene_display_bt2100hlg(vec3 rgb) {
  */
 
 void DECODE_R8UI_AS_MAIN() {
-  uint num = imageLoad(image_r8ui, ivec2(gl_FragCoord)).x;
-  vec4 components = demux_uint(num, get_sample_bits());
+  uint num = imageLoad(image_r8ui, decodeStageTexelCoord()).x;
+  uint work = (num >> (8*decodeSubtexelCoord())) & 0xff;
+  vec4 components = demux_uint(work, get_sample_bits());
 
   // FIXME: YUV transform and accurate YUV transform.
   vec4 electrical = parts_normalize(components, get_sample_parts());
@@ -339,13 +376,19 @@ void DECODE_R8UI_AS_MAIN() {
 }
 
 void ENCODE_R8UI_AS_MAIN() {
-  vec4 primaries = texture(sampler2D(in_texture, texture_sampler), uv).rgba;
+  ivec2 baseCoord = encodePixelCoord();
+  uint num = 0;
+  for (int i = 0; i < get_horizontal_workload(); i++) {
+    ivec2 pixelCoord = baseCoord + ivec2(0, i);
+    vec4 primaries = texelFetch(sampler2D(in_texture, texture_sampler), pixelCoord, 0);
 
-  vec4 electrical = parts_transfer(primaries, get_transfer());
-  // FIXME: YUV transform and accurate YUV transform.
-  vec4 components = parts_denormalize(electrical, get_sample_parts());
+    vec4 electrical = parts_transfer(primaries, get_transfer());
+    // FIXME: YUV transform and accurate YUV transform.
+    vec4 components = parts_denormalize(electrical, get_sample_parts());
 
-  uint num = mux_uint(components, get_sample_bits());
+    uint texelNum = mux_uint(components, get_sample_bits());
+    num = (num << 8) | (texelNum & 0xff);
+  }
   imageStore(oimage_r8ui, ivec2(gl_FragCoord), uvec4(num));
 }
 
