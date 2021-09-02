@@ -33,7 +33,8 @@ impl XyzParameter {
             self.transfer as u32,
             self.parts as u32,
             self.bits as u32,
-            self.horizontal_subfactor(),
+            // Upper bits are still reserved for texel block size.
+            self.horizontal_subfactor() & 0xff,
         ]
     }
 

@@ -14,6 +14,12 @@
 #ifndef ENCODE_R8UI_AS_MAIN
 #define ENCODE_R8UI_AS_MAIN encode_r8ui
 #endif
+#ifndef DECODE_R16UI_AS_MAIN
+#define DECODE_R16UI_AS_MAIN decode_r16ui
+#endif
+#ifndef ENCODE_R16UI_AS_MAIN
+#define ENCODE_R16UI_AS_MAIN encode_r16ui
+#endif
 #ifndef DECODE_R32UI_AS_MAIN
 #define DECODE_R32UI_AS_MAIN decode_r32ui
 #endif
@@ -142,7 +148,7 @@ uint get_sample_bits() {
 /** How many texels each call is responsible for (horizontally).
  */
 uint get_horizontal_workload() {
-  return max(parameter.space.a, 1);
+  return max(parameter.space.a, 1) & 0xff;
 }
 
 /** The 'position' in the input texel to retrieve one of the actual texels of the input image.
@@ -387,10 +393,40 @@ void ENCODE_R8UI_AS_MAIN() {
     vec4 components = parts_denormalize(electrical, get_sample_parts());
 
     uint texelNum = mux_uint(clamp(components, 0.0, 1.0), get_sample_bits());
-    num |= (texelNum & 0xffff) << (8*i);
+    num |= (texelNum & 0xff) << (8*i);
   }
 
   imageStore(oimage_r8ui, ivec2(gl_FragCoord), uvec4(num));
+}
+
+void DECODE_R16UI_AS_MAIN() {
+  uint num = imageLoad(image_r16ui, decodeStageTexelCoord()).x;
+  uint work = (num >> (16- 16*decodeSubtexelCoord())) & 0xffff;
+  vec4 components = demux_uint(work, get_sample_bits());
+
+  // FIXME: YUV transform and accurate YUV transform.
+  vec4 electrical = parts_normalize(components, get_sample_parts());
+  vec4 primaries = parts_untransfer(electrical, get_transfer());
+
+  f_color = primaries;
+}
+
+void ENCODE_R16UI_AS_MAIN() {
+  ivec2 baseCoord = encodePixelCoord();
+  uint num = 0;
+  for (int i = 0; i < get_horizontal_workload(); i++) {
+    ivec2 pixelCoord = baseCoord + ivec2(i, 0);
+    vec4 primaries = texelFetch(sampler2D(in_texture, texture_sampler), pixelCoord, 0);
+
+    vec4 electrical = parts_transfer(primaries, get_transfer());
+    // FIXME: YUV transform and accurate YUV transform.
+    vec4 components = parts_denormalize(electrical, get_sample_parts());
+
+    uint texelNum = mux_uint(clamp(components, 0.0, 1.0), get_sample_bits());
+    num |= (texelNum & 0xffff) << (16*i);
+  }
+
+  imageStore(oimage_r16ui, ivec2(gl_FragCoord), uvec4(num));
 }
 
 void DECODE_R32UI_AS_MAIN() {
