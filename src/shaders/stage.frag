@@ -141,6 +141,29 @@ const uint SAMPLE_BITS_Inti101010 = 17;
 const uint SAMPLE_BITS_Float16x4 = 18;
 const uint SAMPLE_BITS_Float32x4 = 19;
 
+/** Define the constants for division/multiplication for bits.
+ * This ensures we don't typo the exact constant.
+ */
+const float BITS2 = 3.;
+const uint MASK2 = 3;
+const float BITS3 = 7.;
+const uint MASK3 = 7;
+const float BITS4 = 15.;
+const uint MASK4 = 15;
+const float BITS5 = 31.;
+const uint MASK5 = 31;
+const float BITS6 = 63.;
+const uint MASK6 = 63;
+const float BITS8 = 255.;
+const uint MASK8 = 255;
+const float BITS10 = 1023.;
+const uint MASK10 = 1023;
+const float BITS16 = 65535.;
+const uint MASK16 = 65535;
+
+// Failure indicator (for debugging)
+const vec4 BIT_DECODE_FAIL = vec4(1.0, 0.0, 0.0, 1.0);
+
 uint get_sample_bits() {
   return parameter.space.z;
 }
@@ -451,49 +474,99 @@ void ENCODE_R32UI_AS_MAIN() {
   imageStore(oimage_r32ui, ivec2(gl_FragCoord), uvec4(num));
 }
 
+// The bit decoding used by 8bit, 16bit, 32bit staging.
+// Returns the parts in a canonical order:
+// - 1 part: (x, 0., 0., 1.)
+// - 2 parts: (x, 0., 0., y)
+// - 3 parts: (x, y, z, 1.)
+// - 4 parts: (x, y, z, a)
 vec4 demux_uint(uint num, uint kind) {
   switch (kind) {
   case SAMPLE_BITS_Int8:
-    return vec4(num) / 255.;
-  case SAMPLE_BITS_Int8x2:
-    return vec4(num & 0xff, 0.0, 0.0, (num >> 8) & 0xff) / 255.;
-  // FIXME: rescale.
+    return vec4(num) / BITS8;
   case SAMPLE_BITS_Int332:
-    return vec4(num & 0x3, (num >> 2) & 0xf, num >> 5, 1.0);
+    return vec4(num & MASK2, (num >> 2) & MASK3, num >> 5, 1.0) / vec4(BITS2, BITS3, BITS3, 1.0);
   case SAMPLE_BITS_Int233:
-    return vec4(num & 0xf, (num >> 3) & 0xf, num >> 6, 1.0);
+    return vec4(num & MASK3, (num >> 3) & MASK3, num >> 6, 1.0) / vec4(BITS3, BITS3, BITS2, 1.0);
+  case SAMPLE_BITS_Int16:
+    return vec4(num) / BITS16;
+  case SAMPLE_BITS_Int4x4:
+    return vec4(num & MASK4, (num >> 4) & MASK4, (num >> 8) & MASK4, num >> 12) / BITS4;
+  case SAMPLE_BITS_Inti444:
+    return vec4(num & MASK4, (num >> 4) & MASK4, (num >> 8) & MASK4, MASK4) / BITS4;
+  case SAMPLE_BITS_Int444i:
+    return vec4((num >> 4) & MASK4, (num >> 9) & MASK4, (num >> 12) & MASK4, MASK4) / BITS4;
+  case SAMPLE_BITS_Int565:
+    return vec4(num & MASK5, (num >> 5) & MASK6, num >> 11, 1.0) / vec4(BITS5, BITS6, BITS5, 1.0);
+  case SAMPLE_BITS_Int8x2:
+    return vec4(num & MASK8, 0., 0., (num >> 8) & MASK8) / BITS8;
   case SAMPLE_BITS_Int8x3:
-    return vec4(num & 0xff, (num >> 8) & 0xff, (num >> 16) & 0xff, 255.0) / 255.;
+    return vec4(num & 0xff, (num >> 8) & 0xff, (num >> 16) & 0xff, BITS8) / BITS8;
   case SAMPLE_BITS_Int8x4:
-    return vec4(num & 0xff, (num >> 8) & 0xff, (num >> 16) & 0xff, num >> 24) / 255.;
-  // FIXME: other bits.
+    return vec4(num & 0xff, (num >> 8) & 0xff, (num >> 16) & 0xff, num >> 24) / BITS8;
+  case SAMPLE_BITS_Int16x2:
+    return vec4(num & MASK16, (num >> 16) & MASK16, 0, BITS16) / BITS16;
+  case SAMPLE_BITS_Int16x3:
+  case SAMPLE_BITS_Int16x4:
+    // FAILURE case, above 32-bits.
+    return BIT_DECODE_FAIL;
+  case SAMPLE_BITS_Int1010102:
+    return vec4(num & MASK2, (num >> 2) & MASK10, (num >> 12) & MASK10, num >> 22)
+      / vec4(BITS2, BITS10, BITS10, BITS10);
+  case SAMPLE_BITS_Int2101010:
+    return vec4(num & MASK10, (num >> 10) & MASK10, (num >> 20) & MASK10, num >> 30)
+      / vec4(BITS10, BITS10, BITS10, BITS2);
+  case SAMPLE_BITS_Int101010i:
+    return vec4((num >> 2) & MASK10, (num >> 12) & MASK10, num >> 22, 1.0)
+      / vec4(BITS10, BITS10, BITS10, 1.0);
+  case SAMPLE_BITS_Inti101010:
+    return vec4(num & MASK10, (num >> 10) & MASK10, (num >> 20) & MASK10, 1.0)
+      / vec4(BITS10, BITS10, BITS10, 1.0);
+  case SAMPLE_BITS_Float16x4:
+  case SAMPLE_BITS_Float32x4:
+    // FAILURE case, above 32-bits.
+    return BIT_DECODE_FAIL;
   }
+  // Oops, we missed some cases.
+  return BIT_DECODE_FAIL;
 }
 
+// The bit encoding used by 8bit, 16bit, 32bit staging.
 uint mux_uint(vec4 c, uint kind) {
   switch (kind) {
   case SAMPLE_BITS_Int8:
-    return uint(c.x * 255.);
+    return uint(c.x * BITS8);
   case SAMPLE_BITS_Int8x2:
-    return uint(c.x * 255.)
-      + (uint(c.w * 255.) << 8);
+    return uint(c.x * BITS8)
+      + (uint(c.w * BITS8) << 8);
   case SAMPLE_BITS_Int8x3:
-    return uint(c.x * 255.)
-      + (uint(c.y * 255.) << 8)
-      + (uint(c.z * 255.) << 16);
+    return uint(c.x * BITS8)
+      + (uint(c.y * BITS8) << 8)
+      + (uint(c.z * BITS8) << 16);
   case SAMPLE_BITS_Int8x4:
-    return uint(c.x * 255.)
-      + (uint(c.y * 255.) << 8)
-      + (uint(c.z * 255.) << 16)
-      + (uint(c.w * 255.) << 24);
+    return uint(c.x * BITS8)
+      + (uint(c.y * BITS8) << 8)
+      + (uint(c.z * BITS8) << 16)
+      + (uint(c.w * BITS8) << 24);
   case SAMPLE_BITS_Int16x2:
-    return uint(c.x * 65535.)
-      + (uint(c.w * 65535.) << 16);
+    return uint(c.x * BITS16)
+      + (uint(c.w * BITS16) << 16);
   // FIXME: other bits.
   }
   return 0xff0000ff;
 }
 
+// Swap the parts into the canonical location for the color representation.
+// The order of channels in the inputs depends on the channel count, and only
+// on the input count, as normalized by the used demux_* method.
+//
+// - The alpha channel, if used, is always in a otherwise `1.0`.
+// - Unused channels are generally zero-filled.
+// - rgb parts will be assigned to `.rgb`.
+// - XYZ observer will be assigned to `rgb`.
+// - xyY triplet will be assigned to `bgr`.
+// - LMS cone responses will be assigned to `rgb`.
+// - La*b* will be assigned to `rgb`
 vec4 parts_normalize(vec4 components, uint parts) {
   switch (parts) {
   case SAMPLE_PARTS_A:
@@ -529,6 +602,7 @@ vec4 parts_normalize(vec4 components, uint parts) {
   }
 }
 
+// Invert parts_normalize.
 vec4 parts_denormalize(vec4 components, uint parts) {
   switch (parts) {
   case SAMPLE_PARTS_Rgba:

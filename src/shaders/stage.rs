@@ -94,6 +94,7 @@ impl StageKind {
     pub(crate) fn decode_src(self) -> &'static [u8] {
         match self {
             Self::R8uiX4 => include_bytes!(concat!(env!("OUT_DIR"), "/spirv/stage_d8ui.frag.v")),
+            Self::R16uiX2 => include_bytes!(concat!(env!("OUT_DIR"), "/spirv/stage_d16ui.frag.v")),
             Self::R32ui => include_bytes!(concat!(env!("OUT_DIR"), "/spirv/stage_d32ui.frag.v")),
             _ => todo!("{:?}", self),
         }
@@ -102,6 +103,7 @@ impl StageKind {
     pub(crate) fn encode_src(self) -> &'static [u8] {
         match self {
             Self::R8uiX4 => include_bytes!(concat!(env!("OUT_DIR"), "/spirv/stage_e8ui.frag.v")),
+            Self::R16uiX2 => include_bytes!(concat!(env!("OUT_DIR"), "/spirv/stage_e16ui.frag.v")),
             Self::R32ui => include_bytes!(concat!(env!("OUT_DIR"), "/spirv/stage_e32ui.frag.v")),
             _ => todo!("{:?}", self),
         }
