@@ -11,14 +11,14 @@ use crate::pool::{ImageData, Pool};
 use crate::program::{
     BindGroupDescriptor, BindGroupLayoutDescriptor, BindingResource, Buffer, BufferDescriptor,
     BufferDescriptorInit, BufferInitContent, BufferUsage, ColorAttachmentDescriptor, DeviceBuffer,
-    DeviceTexture, Function, FragmentState, ImageBufferAssignment, ImageBufferPlan,
+    DeviceTexture, FragmentState, Function, ImageBufferAssignment, ImageBufferPlan,
     ImageDescriptor, ImagePoolPlan, LaunchError, Low, PipelineLayoutDescriptor, PrimitiveState,
     RenderPassDescriptor, RenderPipelineDescriptor, SamplerDescriptor, ShaderDescriptor,
     StagingDescriptor, Texture, TextureDescriptor, TextureUsage, TextureViewDescriptor,
     VertexState,
 };
-use crate::util::ExtendOne;
 use crate::shaders;
+use crate::util::ExtendOne;
 
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
 #[derive(Default)]
@@ -219,7 +219,6 @@ enum ShaderBind {
         entry_point: &'static str,
     },
 }
-
 
 impl<I: ExtendOne<Low>> Encoder<I> {
     /// Tell the encoder which commands are natively supported.
@@ -824,7 +823,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     /// Copy the memory buffer to the output.
-    pub(crate) fn copy_buffer_to_output(&mut self, idx: Register, dst: Register) -> Result<(), LaunchError> {
+    pub(crate) fn copy_buffer_to_output(
+        &mut self,
+        idx: Register,
+        dst: Register,
+    ) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
         let target_image = self.ingest_image_data(dst)?;
 

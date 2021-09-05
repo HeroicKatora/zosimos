@@ -1,15 +1,11 @@
-use core::{
-    future::Future,
-    num::NonZeroU32,
-    ops::Range,
-};
+use core::{future::Future, num::NonZeroU32, ops::Range};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::buffer::{BufferLayout, Descriptor, RowMatrix};
-use crate::encoder::{Encoder, RegisterMap};
 use crate::command::{High, Rectangle, Register, Target};
+use crate::encoder::{Encoder, RegisterMap};
 use crate::pool::{ImageData, Pool, PoolKey};
 use crate::{run, shaders};
 
