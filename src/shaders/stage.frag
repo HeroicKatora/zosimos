@@ -26,6 +26,18 @@
 #ifndef ENCODE_R32UI_AS_MAIN
 #define ENCODE_R32UI_AS_MAIN encode_r32ui
 #endif
+#ifndef DECODE_RGBA16UI_AS_MAIN
+#define DECODE_RGBA16UI_AS_MAIN decode_rgba16ui
+#endif
+#ifndef ENCODE_RGBA16UI_AS_MAIN
+#define ENCODE_RGBA16UI_AS_MAIN encode_rgba16ui
+#endif
+#ifndef DECODE_RGBA32UI_AS_MAIN
+#define DECODE_RGBA32UI_AS_MAIN decode_rgba32ui
+#endif
+#ifndef ENCODE_RGBA32UI_AS_MAIN
+#define ENCODE_RGBA32UI_AS_MAIN encode_rgba32ui
+#endif
 /** This is a special shader to convert to/from color spaces and texture
  * formats that are not natively supported. This works by introducing a staging
  * texture that is in the correct byte representation of the supposed format
