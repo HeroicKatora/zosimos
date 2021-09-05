@@ -638,40 +638,39 @@ vec4 parts_normalize(vec4 components, uint parts) {
 }
 
 // Invert parts_normalize.
-vec4 parts_denormalize(vec4 components, uint parts) {
+// Moves the components to the location expected by the count of channels.
+vec4 parts_denormalize(vec4 c, uint parts) {
   switch (parts) {
   case SAMPLE_PARTS_Rgba:
-    return components.xyzw;
+    return c.xyzw;
   case SAMPLE_PARTS_A:
-    return vec4(components.w, 0.0, 0.0, 1.0);
+    return vec4(c.w, 0.0, 0.0, 1.0);
   case SAMPLE_PARTS_R:
-    return vec4(components.x, 0.0, 0.0, 1.0);
+    return vec4(c.x, 0.0, 0.0, 1.0);
   case SAMPLE_PARTS_G:
-    return vec4(components.y, 0.0, 0.0, 1.0);
+    return vec4(c.y, 0.0, 0.0, 1.0);
   case SAMPLE_PARTS_B:
-    return vec4(components.z, 0.0, 0.0, 1.0);
+    return vec4(c.z, 0.0, 0.0, 1.0);
   case SAMPLE_PARTS_Luma:
-    return vec4(vec3(components.x), 1.0);
+    return vec4(vec3(c.x), 1.0);
   case SAMPLE_PARTS_LumaA:
-    return vec4(vec3(components.x), components.w);
-  /*
+    return vec4(vec3(c.x), c.w);
   case SAMPLE_PARTS_Rgb:
   case SAMPLE_PARTS_Rgbx:
-    return vec4(components.xyz, 1.0);
+    return vec4(c.rgb, 1.0);
   case SAMPLE_PARTS_Bgr:
   case SAMPLE_PARTS_Bgrx:
-    return vec4(components.zyx, 1.0);
+    return vec4(c.bgr, 1.0);
   case SAMPLE_PARTS_Bgra:
-    return components.xyzw;
+    return c.bgra;
   case SAMPLE_PARTS_Argb:
-    return components.yzwx;
+    return c.argb;
   case SAMPLE_PARTS_Abgr:
-    return components.wzyx;
+    return c.abgr;
   case SAMPLE_PARTS_Xrgb:
-    return vec4(components.yzw, 1.0);
+    return vec4(1.0, c.rgb);
   case SAMPLE_PARTS_Xbgr:
-    return vec4(components.wzy, 1.0);
-  */
+    return vec4(1.0, c.bgr);
   }
 }
 
