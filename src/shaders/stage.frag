@@ -163,6 +163,7 @@ const uint MASK16 = 65535;
 
 // Failure indicator (for debugging)
 const vec4 BIT_DECODE_FAIL = vec4(1.0, 0.0, 0.0, 1.0);
+const uint BIT_ENCODE_FAIL = 0x55445544;
 
 uint get_sample_bits() {
   return parameter.space.z;
@@ -532,28 +533,62 @@ vec4 demux_uint(uint num, uint kind) {
 }
 
 // The bit encoding used by 8bit, 16bit, 32bit staging.
+// Reverses demux_uint.
+// Defines a bunch of macros to make this easier.
+// Each position takes a number of bits to skip (sn) and bits to quantize to (bn).
+// The inputs are expected in the canonical positions according to demux_uint
+// and will be put in the low-order bits of the output.
 uint mux_uint(vec4 c, uint kind) {
+#define STEALTH_MUX_UINT1(s0, b0) uint(c.x * BITS##b0)
+#define STEALTH_MUX_UINT2(s0, b0, s1, b1) ((uint(c.x * BITS##b0) << s0) + (uint(c.w * BITS##b1) << (s0+b0+s1)))
+#define STEALTH_MUX_UINT3(s0, b0, s1, b1, s2, b2) ((uint(c.x * BITS##b0) << s0) + (uint(c.y * BITS##b1) << (s0+b0+s1))+ (uint(c.z * BITS##b2) << (s0+b0+s1+b1+s2)))
+#define STEALTH_MUX_UINT4(s0, b0, s1, b1, s2, b2, s3, b3) ((uint(c.x * BITS##b0) << s0) + (uint(c.y * BITS##b1) << (s0+b0+s1))+ (uint(c.z * BITS##b2) << (s0+b0+s1+b1+s2))+ (uint(c.w * BITS##b3) << (s0+b0+s1+b1+s2+b2+s3)))
   switch (kind) {
   case SAMPLE_BITS_Int8:
-    return uint(c.x * BITS8);
+    return STEALTH_MUX_UINT1(0, 8);
+  case SAMPLE_BITS_Int332:
+    return STEALTH_MUX_UINT3(0, 2, 0, 3, 0, 3);
+  case SAMPLE_BITS_Int233:
+    return STEALTH_MUX_UINT3(0, 3, 0, 3, 0, 2);
+  case SAMPLE_BITS_Int16:
+    return STEALTH_MUX_UINT1(0, 16);
+  case SAMPLE_BITS_Int4x4:
+    return STEALTH_MUX_UINT4(0, 4, 0, 4, 0, 4, 0, 4);
+  case SAMPLE_BITS_Inti444:
+    return STEALTH_MUX_UINT3(0, 4, 0, 4, 0, 4);
+  case SAMPLE_BITS_Int444i:
+    return STEALTH_MUX_UINT3(4, 4, 0, 4, 0, 4);
+  case SAMPLE_BITS_Int565:
+    return STEALTH_MUX_UINT3(0, 5, 0, 6, 0, 5);
   case SAMPLE_BITS_Int8x2:
-    return uint(c.x * BITS8)
-      + (uint(c.w * BITS8) << 8);
+    return STEALTH_MUX_UINT2(0, 8, 0, 8);
   case SAMPLE_BITS_Int8x3:
-    return uint(c.x * BITS8)
-      + (uint(c.y * BITS8) << 8)
-      + (uint(c.z * BITS8) << 16);
+    return STEALTH_MUX_UINT3(0, 8, 0, 8, 0, 8);
   case SAMPLE_BITS_Int8x4:
-    return uint(c.x * BITS8)
-      + (uint(c.y * BITS8) << 8)
-      + (uint(c.z * BITS8) << 16)
-      + (uint(c.w * BITS8) << 24);
+    return STEALTH_MUX_UINT4(0, 8, 0, 8, 0, 8, 0, 8);
   case SAMPLE_BITS_Int16x2:
-    return uint(c.x * BITS16)
-      + (uint(c.w * BITS16) << 16);
+    return STEALTH_MUX_UINT2(0, 16, 0, 16);
+  case SAMPLE_BITS_Int16x3:
+  case SAMPLE_BITS_Int16x4:
+    return BIT_ENCODE_FAIL;
+  case SAMPLE_BITS_Int1010102:
+    return STEALTH_MUX_UINT4(0, 2, 0, 10, 0, 10, 0, 10);
+  case SAMPLE_BITS_Int2101010:
+    return STEALTH_MUX_UINT4(0, 10, 0, 10, 0, 10, 0, 2);
+  case SAMPLE_BITS_Int101010i:
+    return STEALTH_MUX_UINT3(2, 10, 0, 10, 0, 10);
+  case SAMPLE_BITS_Inti101010:
+    return STEALTH_MUX_UINT3(0, 10, 0, 10, 0, 10);
+  case SAMPLE_BITS_Float16x4:
+  case SAMPLE_BITS_Float32x4:
+    return BIT_ENCODE_FAIL;
   // FIXME: other bits.
   }
-  return 0xff0000ff;
+  return BIT_ENCODE_FAIL;
+#undef STEALTH_MUX_UINT1
+#undef STEALTH_MUX_UINT2
+#undef STEALTH_MUX_UINT3
+#undef STEALTH_MUX_UINT4
 }
 
 // Swap the parts into the canonical location for the color representation.
