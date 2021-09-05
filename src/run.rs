@@ -974,7 +974,11 @@ impl Retire<'_> {
 
         let descriptor = Descriptor {
             layout: data.layout().clone(),
-            texel: Texel::with_srgb_image(&image::DynamicImage::ImageRgba8(Default::default())),
+            // FIXME: use the actual output's descriptor ???!!
+            texel: match data.layout().bytes_per_texel {
+                1 => Texel::with_srgb_image(&image::DynamicImage::ImageLuma8(Default::default())),
+                _ => Texel::with_srgb_image(&image::DynamicImage::ImageRgba8(Default::default())),
+            },
         };
 
         let mut image = self.pool.declare(descriptor);

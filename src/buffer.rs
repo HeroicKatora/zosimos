@@ -246,6 +246,8 @@ pub enum Luminance {
     /// 10_000cd/m².
     /// Known as high-dynamic range.
     Hdr,
+    /// 160cd/m².
+    AdobeRgb,
 }
 
 /// The relative stimuli of the three corners of a triangular gamut.
@@ -429,8 +431,6 @@ impl Texel {
         })
     }
 }
-
-impl Samples {}
 
 impl SampleBits {
     /// Determine the number of bytes for texels containing these samples.

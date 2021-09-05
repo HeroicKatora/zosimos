@@ -121,7 +121,7 @@ impl Pool {
     /// # Panics
     /// This method will panic if the layout is inconsistent.
     pub fn declare(&mut self, desc: Descriptor) -> PoolImageMut<'_> {
-        assert!(desc.is_consistent());
+        assert!(desc.is_consistent(), "{:?}", desc);
         self.new_with_data(ImageData::LateBound(desc.layout), desc.texel)
     }
 
