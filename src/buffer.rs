@@ -458,6 +458,16 @@ impl SampleParts {
             Rgba | Bgra | Rgbx | Bgrx | Argb | Xrgb | Abgr | Xbgr => 4,
         }
     }
+
+    pub fn into_vec4(self) -> Option<[f32; 4]> {
+        Some(match self {
+            Self::A => [0.0, 0.0, 0.0, 1.0],
+            Self::R => [1.0, 0.0, 0.0, 0.0],
+            Self::G => [0.0, 1.0, 0.0, 0.0],
+            Self::B => [0.0, 0.0, 1.0, 0.0],
+            _ => return None,
+        })
+    }
 }
 
 impl Color {

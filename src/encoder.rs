@@ -665,7 +665,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// Copy from memory visible buffer to the texture.
     pub(crate) fn copy_buffer_to_staging(&mut self, idx: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
-        let size = self.buffer_plan.texture[regmap.texture.0].size();
 
         let (size, target_texture);
         if let Some(staging) = regmap.staging {

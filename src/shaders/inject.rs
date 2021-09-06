@@ -9,6 +9,8 @@ pub const SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/inject
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Shader {
     pub mix: [f32; 4],
+    /// How to determine the color to mix from the foreground (dot product).
+    pub color: [f32; 4],
 }
 
 impl FragmentShaderData for Shader {
@@ -21,7 +23,7 @@ impl FragmentShaderData for Shader {
     }
 
     fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
-        Some(BufferInitContent::new(buffer, &self.mix))
+        Some(BufferInitContent::new(buffer, &[self.mix, self.color]))
     }
 
     fn num_args(&self) -> u32 {

@@ -407,7 +407,7 @@ vec3 transfer_scene_display_bt2100hlg(vec3 rgb) {
 
 void DECODE_R8UI_AS_MAIN() {
   uint num = imageLoad(image_r8ui, decodeStageTexelCoord()).x;
-  uint work = (num >> (24 - 8*decodeSubtexelCoord())) & 0xff;
+  uint work = (num >> 8*decodeSubtexelCoord()) & 0xff;
   vec4 components = demux_uint(work, get_sample_bits());
 
   // FIXME: YUV transform and accurate YUV transform.
@@ -437,7 +437,7 @@ void ENCODE_R8UI_AS_MAIN() {
 
 void DECODE_R16UI_AS_MAIN() {
   uint num = imageLoad(image_r16ui, decodeStageTexelCoord()).x;
-  uint work = (num >> (16- 16*decodeSubtexelCoord())) & 0xffff;
+  uint work = (num >> 16*decodeSubtexelCoord()) & 0xffff;
   vec4 components = demux_uint(work, get_sample_bits());
 
   // FIXME: YUV transform and accurate YUV transform.

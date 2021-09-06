@@ -144,7 +144,7 @@ pub(crate) enum BinaryOp {
     /// Replace a channel T with U itself.
     /// Op[T, U] = T
     /// where select(channel, T.color) = U.color
-    Inject { channel: ChannelPosition },
+    Inject { channel: ChannelPosition, from_channels: SampleParts },
     /// Sample from a palette based on the color value of another image.
     /// Op[T, U] = T
     Palette(shaders::PaletteShader),
@@ -520,6 +520,16 @@ impl CommandBuffer {
             .channel_texel(channel)
             .ok_or_else(|| CommandError::OTHER)?;
 
+        let layout = buffer::RowLayoutDescription {
+            width: desc.layout.width(),
+            height: desc.layout.height(),
+            texel_stride: texel.samples.bits.bytes() as u64,
+            row_stride: (texel.samples.bits.bytes() as u64) * u64::from(desc.layout.width()),
+        };
+
+        let layout = buffer::BufferLayout::with_row_layout(layout)
+            .ok_or_else(|| CommandError::OTHER)?;
+
         // Check that we can actually extract that channel.
         // This could be unimplemented if the position of a particular channel is not yet a stable
         // detail. Also, we might introduce 'virtual' channels such as `Luminance` on an RGB image
@@ -532,7 +542,7 @@ impl CommandBuffer {
             src,
             op: UnaryOp::Extract { channel },
             desc: Descriptor {
-                layout: desc.layout.clone(),
+                layout,
                 texel,
             },
         };
@@ -607,7 +617,14 @@ impl CommandBuffer {
         }
 
         // Override the sample part interpretation.
+        let from_channels = desc_above.texel.samples.parts;
         desc_above.texel.samples.parts = expected_texel.samples.parts;
+
+        // FIXME: should we do parsing instead of validation?
+        // Some type like ChannelPosition but for multiple.
+        if from_channels.into_vec4().is_none() {
+            return Err(CommandError::OTHER);
+        }
 
         if expected_texel != desc_above.texel {
             let wanted = Descriptor {
@@ -627,7 +644,7 @@ impl CommandBuffer {
         let op = Op::Binary {
             lhs: below,
             rhs: above,
-            op: BinaryOp::Inject { channel },
+            op: BinaryOp::Inject { channel, from_channels },
             desc: desc_below.clone(),
         };
 
@@ -969,14 +986,17 @@ impl CommandBuffer {
                                 },
                             });
                         }
-                        UnaryOp::Extract { channel } => {
+                        UnaryOp::Extract { channel: _ } => {
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
 
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Function::PaintFullScreen {
-                                    // This will grab the right channel.
+                                    // This will grab the right channel, that is all of them.
                                     // The actual conversion is done in de-staging of the result.
+                                    // TODO: evaluate if this is the right way to do it. We could
+                                    // also perform a LinearColorMatrix shader here with close to
+                                    // the same amount of shader code but a precise result.
                                     shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
                                 },
                             })
@@ -985,7 +1005,6 @@ impl CommandBuffer {
                             src: *src,
                             dst: Register(idx),
                         }),
-                        _ => return Err(CompileError::NotYetImplemented),
                     }
 
                     reg_to_texture.insert(Register(idx), texture);
@@ -1029,7 +1048,7 @@ impl CommandBuffer {
                                 },
                             })
                         }
-                        BinaryOp::Inject { channel } => {
+                        BinaryOp::Inject { channel, from_channels } => {
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
 
@@ -1038,6 +1057,7 @@ impl CommandBuffer {
                                 fn_: Function::PaintFullScreen {
                                     shader: FragmentShader::Inject(shaders::inject::Shader {
                                         mix: channel.into_vec4(),
+                                        color: from_channels.into_vec4().unwrap(),
                                     })
                                 },
                             })
@@ -1078,7 +1098,6 @@ impl CommandBuffer {
                                 },
                             });
                         }
-                        _ => return Err(CompileError::NotYetImplemented),
                     }
 
                     reg_to_texture.insert(Register(idx), texture);
