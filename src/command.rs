@@ -144,7 +144,10 @@ pub(crate) enum BinaryOp {
     /// Replace a channel T with U itself.
     /// Op[T, U] = T
     /// where select(channel, T.color) = U.color
-    Inject { channel: ChannelPosition, from_channels: SampleParts },
+    Inject {
+        channel: ChannelPosition,
+        from_channels: SampleParts,
+    },
     /// Sample from a palette based on the color value of another image.
     /// Op[T, U] = T
     Palette(shaders::PaletteShader),
@@ -527,24 +530,20 @@ impl CommandBuffer {
             row_stride: (texel.samples.bits.bytes() as u64) * u64::from(desc.layout.width()),
         };
 
-        let layout = buffer::BufferLayout::with_row_layout(layout)
-            .ok_or_else(|| CommandError::OTHER)?;
+        let layout =
+            buffer::BufferLayout::with_row_layout(layout).ok_or_else(|| CommandError::OTHER)?;
 
         // Check that we can actually extract that channel.
         // This could be unimplemented if the position of a particular channel is not yet a stable
         // detail. Also, we might introduce 'virtual' channels such as `Luminance` on an RGB image
         // where such channels are computed by linear combination instead of a binary incidence
         // vector. Then there might be colors where this does not exist.
-        let channel = ChannelPosition::new(channel)
-            .ok_or_else(|| CommandError::OTHER)?;
+        let channel = ChannelPosition::new(channel).ok_or_else(|| CommandError::OTHER)?;
 
         let op = Op::Unary {
             src,
             op: UnaryOp::Extract { channel },
-            desc: Descriptor {
-                layout,
-                texel,
-            },
+            desc: Descriptor { layout, texel },
         };
 
         Ok(self.push(op))
@@ -605,10 +604,12 @@ impl CommandBuffer {
             .ok_or_else(|| CommandError::OTHER)?;
         let mut desc_above = self.describe_reg(above)?.clone();
 
-        if desc_above.texel.samples.parts.num_components() != expected_texel.samples.parts.num_components() {
+        if desc_above.texel.samples.parts.num_components()
+            != expected_texel.samples.parts.num_components()
+        {
             let wanted = Descriptor {
                 texel: expected_texel,
-                .. desc_below.clone()
+                ..desc_below.clone()
             };
 
             return Err(CommandError {
@@ -629,7 +630,7 @@ impl CommandBuffer {
         if expected_texel != desc_above.texel {
             let wanted = Descriptor {
                 texel: expected_texel,
-                .. desc_below.clone()
+                ..desc_below.clone()
             };
 
             return Err(CommandError {
@@ -638,13 +639,15 @@ impl CommandBuffer {
         }
 
         // Find where to insert, see `extract` for this step.
-        let channel = ChannelPosition::new(channel)
-            .ok_or_else(|| CommandError::OTHER)?;
+        let channel = ChannelPosition::new(channel).ok_or_else(|| CommandError::OTHER)?;
 
         let op = Op::Binary {
             lhs: below,
             rhs: above,
-            op: BinaryOp::Inject { channel, from_channels },
+            op: BinaryOp::Inject {
+                channel,
+                from_channels,
+            },
             desc: desc_below.clone(),
         };
 
@@ -1048,7 +1051,10 @@ impl CommandBuffer {
                                 },
                             })
                         }
-                        BinaryOp::Inject { channel, from_channels } => {
+                        BinaryOp::Inject {
+                            channel,
+                            from_channels,
+                        } => {
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
 
@@ -1058,7 +1064,7 @@ impl CommandBuffer {
                                     shader: FragmentShader::Inject(shaders::inject::Shader {
                                         mix: channel.into_vec4(),
                                         color: from_channels.into_vec4().unwrap(),
-                                    })
+                                    }),
                                 },
                             })
                         }

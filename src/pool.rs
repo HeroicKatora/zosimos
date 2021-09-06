@@ -177,24 +177,32 @@ impl PoolImage<'_> {
         // FIXME: all the other variants.
         // Should it be in buffer instead, just allocating bytes?
         Some(match self.image.texel.samples {
-            buffer::Samples { parts: buffer::SampleParts::Rgba, bits: buffer::SampleBits::Int8x4 } => {
+            buffer::Samples {
+                parts: buffer::SampleParts::Rgba,
+                bits: buffer::SampleBits::Int8x4,
+            } => {
                 let image = image::ImageBuffer::from_vec(layout.width, layout.height, data)
                     .expect("Should be fine lmao");
                 image::DynamicImage::ImageRgba8(image)
             }
-            buffer::Samples { parts: buffer::SampleParts::Rgb, bits: buffer::SampleBits::Int8x3 } => {
+            buffer::Samples {
+                parts: buffer::SampleParts::Rgb,
+                bits: buffer::SampleBits::Int8x3,
+            } => {
                 let image = image::ImageBuffer::from_vec(layout.width, layout.height, data)
                     .expect("Should be fine lmao");
                 image::DynamicImage::ImageRgb8(image)
             }
-            buffer::Samples { parts: buffer::SampleParts::Luma, bits: buffer::SampleBits::Int8 } => {
+            buffer::Samples {
+                parts: buffer::SampleParts::Luma,
+                bits: buffer::SampleBits::Int8,
+            } => {
                 let image = image::ImageBuffer::from_vec(layout.width, layout.height, data)
                     .expect("Should be fine lmao");
                 image::DynamicImage::ImageLuma8(image)
             }
             _ => return None,
         })
-
     }
 
     pub fn key(&self) -> PoolKey {

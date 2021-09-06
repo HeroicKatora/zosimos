@@ -499,7 +499,9 @@ fn run_swap(
     let channel_g = commands.extract(input, ColorChannel::G).unwrap();
 
     let intermediate = commands.inject(input, ColorChannel::G, channel_r).unwrap();
-    let swapped = commands.inject(intermediate, ColorChannel::R, channel_g).unwrap();
+    let swapped = commands
+        .inject(intermediate, ColorChannel::R, channel_g)
+        .unwrap();
 
     let (output, _outformat) = commands.output(swapped).expect("Valid for output");
 
