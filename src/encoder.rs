@@ -49,7 +49,8 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     /// Howe we mapped registers to images in the pool.
     pool_plan: ImagePoolPlan,
     /// The Bind Group layer Descriptor used in fragment shader, set=1.
-    paint_group_layout: Option<usize>,
+    /// This is keyed by the number of descriptors for that layout.
+    paint_group_layout: HashMap<usize, usize>,
     /// The Bind Group Descriptor used in vertex buffer, set=0.
     quad_group_layout: Option<usize>,
     /// The Bind Group Descriptor for set=2, used for parameters of fragment shader.
@@ -763,7 +764,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 let id = self.texture_views;
                 self.push(Low::TextureView(descriptor))?;
-                self.texture_views += 1;
                 id
             };
 
@@ -867,15 +867,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let texture = self
             .texture_map
             .get(&dst)
+            // The texture was never allocated. Has it been initialized?
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
             .device;
 
         let descriptor = TextureViewDescriptor { texture };
 
-        self.instructions.extend_one(Low::TextureView(descriptor));
         let id = self.texture_views;
-        self.texture_views += 1;
-
+        self.push(Low::TextureView(descriptor))?;
         // eprintln!("Texture {:?} (Device {:?}) in View {:?}", dst, texture, id);
 
         Ok(id)
@@ -932,7 +931,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn make_paint_group_layout(&mut self, count: usize) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
-        *self.paint_group_layout.get_or_insert_with(|| {
+        *self.paint_group_layout.entry(count).or_insert_with(|| {
             let mut entries = vec![wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStage::FRAGMENT,
@@ -1636,7 +1635,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     pub(crate) fn finalize(&mut self) -> Result<(), LaunchError> {
         if !self.operands.is_empty() {
-            eprintln!("{:?}", self.operands.as_slice());
+            // eprintln!("{:?}", self.operands.as_slice());
             return Err(LaunchError::InternalCommandError(line!()));
         }
 

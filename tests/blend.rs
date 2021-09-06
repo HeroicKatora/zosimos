@@ -75,6 +75,12 @@ fn integration() {
         instance.enumerate_adapters(ANY),
         pool_background.clone(),
     );
+
+    run_swap(
+        &mut pool,
+        instance.enumerate_adapters(ANY),
+        pool_background.clone(),
+    );
 }
 
 fn run_blending(
@@ -478,6 +484,35 @@ fn run_palette(
 
     let image_sampled = pool.entry(result).unwrap();
     util::assert_reference(image_sampled.into(), "palette.png.crc");
+}
+
+fn run_swap(
+    pool: &mut Pool,
+    adapters: impl Iterator<Item = wgpu::Adapter>,
+    (orig_key, orig_descriptor): (PoolKey, Descriptor),
+) {
+    use buffer::ColorChannel;
+    let mut commands = CommandBuffer::default();
+
+    let input = commands.input(orig_descriptor).unwrap();
+    let channel_r = commands.extract(input, ColorChannel::R).unwrap();
+    let channel_g = commands.extract(input, ColorChannel::G).unwrap();
+
+    let intermediate = commands.inject(input, ColorChannel::G, channel_r).unwrap();
+    let swapped = commands.inject(intermediate, ColorChannel::R, channel_g).unwrap();
+
+    let (output, _outformat) = commands.output(swapped).expect("Valid for output");
+
+    let result = run_once_with_output(
+        commands,
+        pool,
+        adapters,
+        vec![(input, orig_key)],
+        retire_with_one_image(output),
+    );
+
+    let image_swapped = pool.entry(result).unwrap();
+    util::assert_reference(image_swapped.into(), "swapped.png.crc");
 }
 
 /* Utility methods  */

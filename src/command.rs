@@ -124,7 +124,7 @@ pub(crate) enum UnaryOp {
     /// And color needs to be 'color compatible' with the prior T (see module).
     ColorConvert(ColorConversion),
     /// Op(T) = T[.color=select(channel, color)]
-    Extract { channel: ColorChannel },
+    Extract { channel: ChannelPosition },
     /// Op(T) = T[.whitepoint=target]
     /// This is a partial method for CIE XYZ-ish color spaces. Note that ICC requires adaptation to
     /// D50 for example as the reference color space.
@@ -144,7 +144,7 @@ pub(crate) enum BinaryOp {
     /// Replace a channel T with U itself.
     /// Op[T, U] = T
     /// where select(channel, T.color) = U.color
-    Inject { channel: ColorChannel },
+    Inject { channel: ChannelPosition },
     /// Sample from a palette based on the color value of another image.
     /// Op[T, U] = T
     Palette(shaders::PaletteShader),
@@ -519,6 +519,15 @@ impl CommandBuffer {
         let texel = desc
             .channel_texel(channel)
             .ok_or_else(|| CommandError::OTHER)?;
+
+        // Check that we can actually extract that channel.
+        // This could be unimplemented if the position of a particular channel is not yet a stable
+        // detail. Also, we might introduce 'virtual' channels such as `Luminance` on an RGB image
+        // where such channels are computed by linear combination instead of a binary incidence
+        // vector. Then there might be colors where this does not exist.
+        let channel = ChannelPosition::new(channel)
+            .ok_or_else(|| CommandError::OTHER)?;
+
         let op = Op::Unary {
             src,
             op: UnaryOp::Extract { channel },
@@ -570,6 +579,10 @@ impl CommandBuffer {
     }
 
     /// Overwrite some channels with overlaid data.
+    ///
+    /// This performs an implicit conversion of the overlaid data to the color channels which is
+    /// performed as if by transmutation. However, contrary to the transmutation we will _only_
+    /// allow the sample parts to be changed arbitrarily.
     pub fn inject(
         &mut self,
         below: Register,
@@ -580,13 +593,36 @@ impl CommandBuffer {
         let expected_texel = desc_below
             .channel_texel(channel)
             .ok_or_else(|| CommandError::OTHER)?;
-        let desc_above = self.describe_reg(above)?;
+        let mut desc_above = self.describe_reg(above)?.clone();
 
-        if expected_texel != desc_above.texel {
+        if desc_above.texel.samples.parts.num_components() != expected_texel.samples.parts.num_components() {
+            let wanted = Descriptor {
+                texel: expected_texel,
+                .. desc_below.clone()
+            };
+
             return Err(CommandError {
-                inner: CommandErrorKind::ConflictingTypes(desc_below.clone(), desc_above.clone()),
+                inner: CommandErrorKind::ConflictingTypes(wanted, desc_above),
             });
         }
+
+        // Override the sample part interpretation.
+        desc_above.texel.samples.parts = expected_texel.samples.parts;
+
+        if expected_texel != desc_above.texel {
+            let wanted = Descriptor {
+                texel: expected_texel,
+                .. desc_below.clone()
+            };
+
+            return Err(CommandError {
+                inner: CommandErrorKind::ConflictingTypes(wanted, desc_above),
+            });
+        }
+
+        // Find where to insert, see `extract` for this step.
+        let channel = ChannelPosition::new(channel)
+            .ok_or_else(|| CommandError::OTHER)?;
 
         let op = Op::Binary {
             lhs: below,
@@ -933,6 +969,18 @@ impl CommandBuffer {
                                 },
                             });
                         }
+                        UnaryOp::Extract { channel } => {
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
+
+                            high_ops.push(High::Construct {
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintFullScreen {
+                                    // This will grab the right channel.
+                                    // The actual conversion is done in de-staging of the result.
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
+                                },
+                            })
+                        }
                         UnaryOp::Transmute => high_ops.push(High::Copy {
                             src: *src,
                             dst: Register(idx),
@@ -978,6 +1026,19 @@ impl CommandBuffer {
                                     shader: FragmentShader::PaintOnTop(
                                         affine.sampling.as_paint_on_top()?,
                                     ),
+                                },
+                            })
+                        }
+                        BinaryOp::Inject { channel } => {
+                            high_ops.push(High::PushOperand(reg_to_texture[lhs]));
+                            high_ops.push(High::PushOperand(reg_to_texture[rhs]));
+
+                            high_ops.push(High::Construct {
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::Inject(shaders::inject::Shader {
+                                        mix: channel.into_vec4(),
+                                    })
                                 },
                             })
                         }

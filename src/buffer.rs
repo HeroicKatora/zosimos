@@ -448,6 +448,18 @@ impl SampleBits {
     }
 }
 
+impl SampleParts {
+    pub fn num_components(self) -> u8 {
+        use SampleParts::*;
+        match self {
+            A | R | G | B | Luma => 1,
+            LumaA => 2,
+            Rgb | Bgr | Yuv => 3,
+            Rgba | Bgra | Rgbx | Bgrx | Argb | Xrgb | Abgr | Xbgr => 4,
+        }
+    }
+}
+
 impl Color {
     pub const SRGB: Color = Color::Xyz {
         luminance: Luminance::Sdr,

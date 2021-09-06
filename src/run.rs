@@ -145,7 +145,7 @@ impl Execution {
                 let group = self
                     .descriptors
                     .bind_group_layout(desc, &mut entry_buffer)?;
-                // eprintln!("{:?}", group);
+                // eprintln!("Made {}: {:?}", self.descriptors.bind_group_layouts.len(), group);
                 let group = self.gpu.device.create_bind_group_layout(&group);
                 self.descriptors.bind_group_layouts.push(group);
                 Ok(SyncPoint::NO_SYNC)
@@ -153,6 +153,7 @@ impl Execution {
             Low::BindGroup(desc) => {
                 let mut entry_buffer = vec![];
                 let group = self.descriptors.bind_group(desc, &mut entry_buffer)?;
+                // eprintln!("{}: {:?}", desc.layout_idx, group);
                 let group = self.gpu.device.create_bind_group(&group);
                 self.descriptors.bind_groups.push(group);
                 Ok(SyncPoint::NO_SYNC)
@@ -654,6 +655,7 @@ impl Descriptors {
         desc: &program::BindingResource,
     ) -> Result<wgpu::BindingResource<'_>, StepError> {
         use program::BindingResource::{Buffer, Sampler, TextureView};
+        // eprintln!("{:?}", desc);
         match desc {
             &Buffer {
                 buffer_idx,
