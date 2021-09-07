@@ -337,14 +337,17 @@ impl Descriptor {
         self.texel.samples.bits.bytes() == usize::from(self.layout.bytes_per_texel)
     }
 
+    /// Calculate the total number of pixels in width of this layout.
     pub fn pixel_width(&self) -> u32 {
         self.layout.width * self.texel.block.width()
     }
 
+    /// Calculate the total number of pixels in height of this layout.
     pub fn pixel_height(&self) -> u32 {
         self.layout.height * self.texel.block.height()
     }
 
+    /// Calculate the number of texels in width and height dimension.
     pub fn size(&self) -> (u32, u32) {
         (self.layout.width, self.layout.height)
     }
@@ -352,54 +355,10 @@ impl Descriptor {
 
 impl Texel {
     pub fn with_srgb_image(img: &image::DynamicImage) -> Self {
-        use image::DynamicImage::*;
-        let samples = match img {
-            ImageLuma8(_) => Samples {
-                bits: SampleBits::Int8,
-                parts: SampleParts::Luma,
-            },
-            ImageLumaA8(_) => Samples {
-                bits: SampleBits::Int8x2,
-                parts: SampleParts::LumaA,
-            },
-            ImageLuma16(_) => Samples {
-                bits: SampleBits::Int16,
-                parts: SampleParts::Luma,
-            },
-            ImageLumaA16(_) => Samples {
-                bits: SampleBits::Int16x2,
-                parts: SampleParts::LumaA,
-            },
-            ImageRgb8(_) => Samples {
-                bits: SampleBits::Int8x3,
-                parts: SampleParts::Rgb,
-            },
-            ImageRgba8(_) => Samples {
-                bits: SampleBits::Int8x4,
-                parts: SampleParts::Rgba,
-            },
-            ImageBgr8(_) => Samples {
-                bits: SampleBits::Int8x3,
-                parts: SampleParts::Bgr,
-            },
-            ImageBgra8(_) => Samples {
-                bits: SampleBits::Int8x4,
-                parts: SampleParts::Bgra,
-            },
-            ImageRgb16(_) => Samples {
-                bits: SampleBits::Int16x3,
-                parts: SampleParts::Rgb,
-            },
-            ImageRgba16(_) => Samples {
-                bits: SampleBits::Int16x4,
-                parts: SampleParts::Rgba,
-            },
-        };
-
         Texel {
             block: Block::Pixel,
             color: Color::SRGB,
-            samples,
+            samples: Samples::from(img),
         }
     }
 
@@ -465,6 +424,80 @@ impl SampleParts {
             Self::R => [1.0, 0.0, 0.0, 0.0],
             Self::G => [0.0, 1.0, 0.0, 0.0],
             Self::B => [0.0, 0.0, 1.0, 0.0],
+            _ => return None,
+        })
+    }
+}
+
+impl Samples {
+    pub(crate) fn as_image_allocator(&self)
+        -> Option<fn(u32, u32, &[u8]) -> Option<image::DynamicImage>>
+    {
+        use SampleParts as P;
+        use SampleBits as B;
+
+        Some(match self {
+            Samples { parts: P::Luma, bits: B::Int8 } => |width, height, source| {
+                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
+                Some(image::DynamicImage::ImageLuma8(buffer))
+            },
+            Samples { parts: P::LumaA, bits: B::Int8x2 } => |width, height, source| {
+                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
+                Some(image::DynamicImage::ImageLumaA8(buffer))
+            },
+            Samples { parts: P::Rgb, bits: B::Int8x3 } => |width, height, source| {
+                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
+                Some(image::DynamicImage::ImageRgb8(buffer))
+            },
+            Samples { parts: P::Rgba, bits: B::Int8x4 } => |width, height, source| {
+                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
+                Some(image::DynamicImage::ImageRgba8(buffer))
+            },
+            Samples { parts: P::Bgr, bits: B::Int8x3 } => |width, height, source| {
+                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
+                Some(image::DynamicImage::ImageBgr8(buffer))
+            },
+            Samples { parts: P::Bgra, bits: B::Int8x4 } => |width, height, source| {
+                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
+                Some(image::DynamicImage::ImageBgra8(buffer))
+            },
+            // TODO: quite a lot of duplication below. Can we somehow reduce that?
+            Samples { parts: P::Luma, bits: B::Int16 } => |width, height, source| {
+                let source = &source[..(source.len() / 2) * 2];
+                let buffer = image::ImageBuffer::from_vec(width, height, {
+                    let mut data = vec![0u16; source.len() / 2];
+                    bytemuck::cast_slice_mut(&mut data).copy_from_slice(source);
+                    data
+                })?;
+                Some(image::DynamicImage::ImageLuma16(buffer))
+            },
+            Samples { parts: P::LumaA, bits: B::Int16x2 } => |width, height, source| {
+                let source = &source[..(source.len() / 2) * 2];
+                let buffer = image::ImageBuffer::from_vec(width, height, {
+                    let mut data = vec![0u16; source.len() / 2];
+                    bytemuck::cast_slice_mut(&mut data).copy_from_slice(source);
+                    data
+                })?;
+                Some(image::DynamicImage::ImageLumaA16(buffer))
+            },
+            Samples { parts: P::Rgb, bits: B::Int16x3 } => |width, height, source| {
+                let source = &source[..(source.len() / 2) * 2];
+                let buffer = image::ImageBuffer::from_vec(width, height, {
+                    let mut data = vec![0u16; source.len() / 2];
+                    bytemuck::cast_slice_mut(&mut data).copy_from_slice(source);
+                    data
+                })?;
+                Some(image::DynamicImage::ImageRgb16(buffer))
+            },
+            Samples { parts: P::Rgba, bits: B::Int16x4 } => |width, height, source| {
+                let source = &source[..(source.len() / 2) * 2];
+                let buffer = image::ImageBuffer::from_vec(width, height, {
+                    let mut data = vec![0u16; source.len() / 2];
+                    bytemuck::cast_slice_mut(&mut data).copy_from_slice(source);
+                    data
+                })?;
+                Some(image::DynamicImage::ImageRgba16(buffer))
+            },
             _ => return None,
         })
     }
@@ -786,6 +819,54 @@ impl BufferLayout {
 impl Layout for BufferLayout {
     fn byte_len(&self) -> usize {
         BufferLayout::byte_len(self)
+    }
+}
+
+impl From<&'_ image::DynamicImage> for Samples {
+    fn from(image: &image::DynamicImage) -> Self {
+        use image::DynamicImage::*;
+        match image {
+            ImageLuma8(_) => Samples {
+                bits: SampleBits::Int8,
+                parts: SampleParts::Luma,
+            },
+            ImageLumaA8(_) => Samples {
+                bits: SampleBits::Int8x2,
+                parts: SampleParts::LumaA,
+            },
+            ImageLuma16(_) => Samples {
+                bits: SampleBits::Int16,
+                parts: SampleParts::Luma,
+            },
+            ImageLumaA16(_) => Samples {
+                bits: SampleBits::Int16x2,
+                parts: SampleParts::LumaA,
+            },
+            ImageRgb8(_) => Samples {
+                bits: SampleBits::Int8x3,
+                parts: SampleParts::Rgb,
+            },
+            ImageRgba8(_) => Samples {
+                bits: SampleBits::Int8x4,
+                parts: SampleParts::Rgba,
+            },
+            ImageBgr8(_) => Samples {
+                bits: SampleBits::Int8x3,
+                parts: SampleParts::Bgr,
+            },
+            ImageBgra8(_) => Samples {
+                bits: SampleBits::Int8x4,
+                parts: SampleParts::Bgra,
+            },
+            ImageRgb16(_) => Samples {
+                bits: SampleBits::Int16x3,
+                parts: SampleParts::Rgb,
+            },
+            ImageRgba16(_) => Samples {
+                bits: SampleBits::Int16x4,
+                parts: SampleParts::Rgba,
+            },
+        }
     }
 }
 

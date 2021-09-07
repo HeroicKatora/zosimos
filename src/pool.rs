@@ -2,7 +2,7 @@ use core::fmt;
 use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
-use crate::buffer::{self, BufferLayout, Color, Descriptor, ImageBuffer, Texel};
+use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer, Texel};
 
 /// Holds a number of image buffers, their descriptors and meta data.
 ///
@@ -171,38 +171,12 @@ impl ImageData {
 
 impl PoolImage<'_> {
     pub fn to_image(&self) -> Option<image::DynamicImage> {
-        let data = self.as_bytes()?.to_vec();
+        let data = self.as_bytes()?;
         let layout = self.layout();
 
-        // FIXME: all the other variants.
-        // Should it be in buffer instead, just allocating bytes?
-        Some(match self.image.texel.samples {
-            buffer::Samples {
-                parts: buffer::SampleParts::Rgba,
-                bits: buffer::SampleBits::Int8x4,
-            } => {
-                let image = image::ImageBuffer::from_vec(layout.width, layout.height, data)
-                    .expect("Should be fine lmao");
-                image::DynamicImage::ImageRgba8(image)
-            }
-            buffer::Samples {
-                parts: buffer::SampleParts::Rgb,
-                bits: buffer::SampleBits::Int8x3,
-            } => {
-                let image = image::ImageBuffer::from_vec(layout.width, layout.height, data)
-                    .expect("Should be fine lmao");
-                image::DynamicImage::ImageRgb8(image)
-            }
-            buffer::Samples {
-                parts: buffer::SampleParts::Luma,
-                bits: buffer::SampleBits::Int8,
-            } => {
-                let image = image::ImageBuffer::from_vec(layout.width, layout.height, data)
-                    .expect("Should be fine lmao");
-                image::DynamicImage::ImageLuma8(image)
-            }
-            _ => return None,
-        })
+        let image = self.image.texel.samples.as_image_allocator()?;
+        let image = image(layout.width, layout.height, data)?;
+        Some(image)
     }
 
     pub fn key(&self) -> PoolKey {
