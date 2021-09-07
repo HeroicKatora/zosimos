@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use crate::buffer::{BufferLayout, Descriptor, RowMatrix};
 use crate::command::{High, Rectangle, Register, Target};
 use crate::encoder::{Encoder, RegisterMap};
-use crate::pool::{ImageData, Pool, PoolKey};
+use crate::pool::{Pool, PoolKey};
 use crate::{run, shaders};
 
 /// Planned out and intrinsically validated command buffer.
@@ -542,7 +542,7 @@ pub struct Launcher<'program> {
     pool: &'program mut Pool,
     /// The host image data for each texture (if any).
     /// Otherwise this a placeholder image.
-    binds: Vec<ImageData>,
+    binds: Vec<run::Image>,
     /// Assigns images from the internal pool to registers.
     /// They may be transferred from an input pool, and conversely we assign outputs. We can use
     /// the plan to put back all images into the pool when retiring the execution.
@@ -656,7 +656,7 @@ impl Program {
             .textures
             .texture
             .iter()
-            .map(|desciptor| ImageData::LateBound(desciptor.layout.clone()))
+            .map(run::Image::with_late_bound)
             .collect();
 
         Launcher {

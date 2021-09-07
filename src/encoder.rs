@@ -17,7 +17,7 @@ use crate::program::{
     StagingDescriptor, Texture, TextureDescriptor, TextureUsage, TextureViewDescriptor,
     VertexState,
 };
-use crate::shaders;
+use crate::{run, shaders};
 use crate::util::ExtendOne;
 
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
@@ -241,14 +241,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     pub(crate) fn extract_buffers(
         &self,
-        buffers: &mut Vec<ImageData>,
+        buffers: &mut Vec<run::Image>,
         pool: &mut Pool,
     ) -> Result<(), LaunchError> {
         for (&pool_key, &texture) in &self.pool_plan.buffer {
             let mut entry = pool
                 .entry(pool_key)
                 .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-            let buffer = &mut buffers[texture.0];
+            let buffer = &mut buffers[texture.0].data;
 
             // Decide how to retrieve this image from the pool.
             if buffer.as_bytes().is_none() {

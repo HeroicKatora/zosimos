@@ -12,7 +12,7 @@ pub struct Execution {
     pub(crate) gpu: Gpu,
     pub(crate) descriptors: Descriptors,
     pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
-    pub(crate) buffers: Vec<ImageData>,
+    pub(crate) buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
 }
 
@@ -20,8 +20,18 @@ pub(crate) struct InitialState {
     pub(crate) instructions: Vec<Low>,
     pub(crate) device: Device,
     pub(crate) queue: Queue,
-    pub(crate) buffers: Vec<ImageData>,
+    pub(crate) buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
+}
+
+/// An image owned by the execution state but compatible with extracting it.
+pub(crate) struct Image {
+    /// The binary data and its layout.
+    pub(crate) data: ImageData,
+    /// The texel interpretation of the data.
+    /// This is used mainly for IO where we reconstruct a free-standing image with all its
+    /// associated data when moving from an `Image`.
+    pub(crate) texel: Texel,
 }
 
 #[derive(Default)]
@@ -53,7 +63,7 @@ struct DevicePolled<'exe> {
 enum Cleanup {
     Buffers {
         buffers: Vec<wgpu::Buffer>,
-        image_data: Vec<ImageData>,
+        image_data: Vec<Image>,
     },
 }
 
@@ -95,6 +105,16 @@ pub struct BadInstruction {
 
 #[derive(Debug)]
 pub enum RetireError {}
+
+impl Image {
+    /// Create an image without binary data, promising to set it up later.
+    pub(crate) fn with_late_bound(descriptor: &Descriptor) -> Self {
+        Image {
+            data: ImageData::LateBound(descriptor.layout.clone()),
+            texel: descriptor.texel.clone(),
+        }
+    }
+}
 
 impl Execution {
     pub(crate) fn new(init: InitialState) -> Self {
@@ -352,6 +372,7 @@ impl Execution {
                     .buffers
                     .get(source_image.0)
                     .ok_or(StepError::InvalidInstruction(line!()))?;
+                let source = &source.data;
 
                 if source.as_bytes().is_none() {
                     return Err(StepError::InvalidInstruction(line!()));
@@ -393,7 +414,7 @@ impl Execution {
 
                 let box_me = async move {
                     {
-                        let image = &mut image_data[source_image.0];
+                        let image = &mut image_data[source_image.0].data;
                         let buffer = &buffers[target_buffer.0];
 
                         let slice = buffer.slice(..);
@@ -553,7 +574,7 @@ impl Execution {
                 let box_me = async move {
                     {
                         let buffer = &buffers[source_buffer.0];
-                        let image = &mut image_data[target_image.0];
+                        let image = &mut image_data[target_image.0].data;
 
                         let slice = buffer.slice(..);
                         slice.map_async(wgpu::MapMode::Read).await.map_err(
@@ -972,21 +993,19 @@ impl StepError {
 
 impl Retire<'_> {
     pub fn output(&mut self, _: Register) -> Result<PoolImage<'_>, RetireError> {
-        let data = self.execution.buffers.pop().unwrap();
+        // FIXME: don't take some random image, use the right one..
+        // Also: should we leave the actual image? This would allow restarting the pipeline.
+        let image = self.execution.buffers.pop().unwrap();
 
         let descriptor = Descriptor {
-            layout: data.layout().clone(),
-            // FIXME: use the actual output's descriptor ???!!
-            texel: match data.layout().bytes_per_texel {
-                1 => Texel::with_srgb_image(&image::DynamicImage::ImageLuma8(Default::default())),
-                _ => Texel::with_srgb_image(&image::DynamicImage::ImageRgba8(Default::default())),
-            },
+            layout: image.data.layout().clone(),
+            texel: image.texel.clone(),
         };
 
-        let mut image = self.pool.declare(descriptor);
-        image.replace(data);
+        let mut pool_image = self.pool.declare(descriptor);
+        pool_image.replace(image.data);
 
-        Ok(image.into())
+        Ok(pool_image.into())
     }
 
     pub fn output_key(&self, _: Register) -> Result<PoolKey, RetireError> {
