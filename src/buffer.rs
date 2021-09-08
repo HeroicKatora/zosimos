@@ -162,11 +162,37 @@ pub enum SampleBits {
 
 /// Describes a single channel from an image.
 /// Note that it must match the descriptor when used in `extract` and `inject`.
+///
+/// This can be thought of as an index into a vector of channels relating to a color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorChannel {
+    /// The weight of the red primary.
     R,
+    /// The weight of the green primary.
     G,
+    /// The weight of the blue primary.
     B,
+    /// A luminescence.
+    /// This can also mean 'scalar' for non-colors.
+    Luma,
+    /// An alpha/translucence component.
+    Alpha,
+    /// A brightness.
+    Y,
+    /// Blue-channel difference.
+    Cb,
+    /// Red-channel difference.
+    Cr,
+    /// Lightness. Not to be confused with luminescence as this is perceptual.
+    L,
+    /// The component a (green/red) of a LAB color.
+    LABa,
+    /// The component b (green/red) of a LAB color.
+    LABb,
+    /// Chroma of a LAB color, polar distance, `hypot(a, b)`.
+    C,
+    /// Hue of a LAB based color, polar angle, `atan2(b, a).
+    LABh,
 }
 
 /// Denotes the 'position' of a channel in the sample parts.
@@ -197,6 +223,17 @@ pub enum Color {
         whitepoint: Whitepoint,
         luminance: Luminance,
     },
+    /// The simple but perceptual space Oklab by Björn Ottoson.
+    ///
+    /// It's based on a combination of two linear transforms and one non-linear power-function
+    /// between them. Coefficients of these transforms are based on optimization against matching
+    /// pairs in the detailed CAM16 model, trying to predict the parameters in those pairs as
+    /// precisely as possible. For details see [the post's derivation][derivation].
+    ///
+    /// Reference: <https://bottosson.github.io/posts/oklab/>
+    ///
+    /// [derivation]: https://bottosson.github.io/posts/oklab/#how-oklab-was-derived
+    Oklab,
 }
 
 /// Transfer functions from encoded chromatic samples to physical quantity.
@@ -369,11 +406,19 @@ impl Texel {
         use SampleBits::*;
         use SampleParts::*;
         let parts = match self.samples.parts {
-            Rgb | Rgbx | Rgba | Bgrx | Bgra | Abgr | Argb | Xrgb | Xbgr => match channel {
+            Rgb | Rgbx | Bgrx | Xrgb | Xbgr => match channel {
                 ColorChannel::R => R,
                 ColorChannel::G => G,
                 ColorChannel::B => B,
-            },
+                _ => return None,
+            }
+            Rgba | Bgra | Abgr | Argb => match channel {
+                ColorChannel::R => R,
+                ColorChannel::G => G,
+                ColorChannel::B => B,
+                ColorChannel::Alpha => A,
+                _ => return None,
+            }
             _ => return None,
         };
         let bits = match self.samples.bits {
