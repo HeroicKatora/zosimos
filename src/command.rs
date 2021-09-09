@@ -206,11 +206,13 @@ pub enum AffineSample {
 
 /// The parameters of color conversion which we will use in the draw call.
 #[derive(Clone, Debug)]
-pub(crate) struct ColorConversion {
-    /// The matrix converting source to XYZ.
-    to_xyz_matrix: RowMatrix,
-    /// The matrix converting from XYZ to target.
-    from_xyz_matrix: RowMatrix,
+pub(crate) enum ColorConversion {
+    Xyz {
+        /// The matrix converting source to XYZ.
+        to_xyz_matrix: RowMatrix,
+        /// The matrix converting from XYZ to target.
+        from_xyz_matrix: RowMatrix,
+    },
 }
 
 /// Reference of matrices and more: http://brucelindbloom.com/index.html?Eqn_ChromAdapt.html
@@ -372,18 +374,18 @@ impl CommandBuffer {
         // cases, we will later add some temporary conversion.
         match (&desc_src.texel.color, &texel.color) {
             (
-                Color::Xyz {
+                Color::Rgb {
                     primary: primary_src,
                     whitepoint: wp_src,
                     ..
                 },
-                Color::Xyz {
+                Color::Rgb {
                     primary: primary_dst,
                     whitepoint: wp_dst,
                     ..
                 },
             ) if wp_src == wp_dst => {
-                conversion = ColorConversion {
+                conversion = ColorConversion::Xyz {
                     from_xyz_matrix: primary_src.to_xyz(*wp_src),
                     to_xyz_matrix: primary_dst.to_xyz(*wp_dst),
                 };
@@ -430,13 +432,13 @@ impl CommandBuffer {
         let (to_xyz_matrix, from_xyz_matrix);
 
         match desc_src.texel.color {
-            Color::Xyz {
+            Color::Rgb {
                 whitepoint,
                 primary,
                 transfer,
                 luminance,
             } => {
-                texel_color = Color::Xyz {
+                texel_color = Color::Rgb {
                     whitepoint: target,
                     primary,
                     transfer,
@@ -981,11 +983,7 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Function::PaintFullScreen {
-                                    shader: FragmentShader::LinearColorMatrix(
-                                        shaders::LinearColorTransform {
-                                            matrix: color.into_matrix(),
-                                        },
-                                    ),
+                                    shader: color.into_shader(),
                                 },
                             });
                         }
@@ -1138,9 +1136,17 @@ impl CommandBuffer {
 }
 
 impl ColorConversion {
-    pub(crate) fn into_matrix(&self) -> RowMatrix {
-        let from = self.from_xyz_matrix.inv().into();
-        self.to_xyz_matrix.multiply_right(from).into()
+    pub(crate) fn into_shader(&self) -> FragmentShader {
+        match self {
+            ColorConversion::Xyz { to_xyz_matrix, from_xyz_matrix } => {
+                let from = from_xyz_matrix.inv().into();
+                let matrix = to_xyz_matrix.multiply_right(from).into();
+
+                FragmentShader::LinearColorMatrix(
+                    shaders::LinearColorTransform { matrix }
+                )
+            }
+        }
     }
 }
 

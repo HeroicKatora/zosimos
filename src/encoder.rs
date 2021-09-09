@@ -389,7 +389,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                         parts: SampleParts::Rgba,
                     },
                 color:
-                    Color::Xyz {
+                    Color::Rgb {
                         // Match only that which is necessary to get the right numbers in the shader.
                         transfer: Transfer::Srgb,
                         ..
@@ -403,7 +403,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                         parts: SampleParts::Rgba,
                     },
                 color:
-                    Color::Xyz {
+                    Color::Rgb {
                         // Match only that which is necessary to get the right numbers in the shader.
                         transfer: Transfer::Linear,
                         ..
@@ -412,7 +412,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Texel {
                 block: Block::Pixel,
                 samples,
-                color: Color::Xyz { transfer, .. },
+                color: Color::Rgb { transfer, .. },
             } => {
                 let parameter = shaders::stage::XyzParameter {
                     transfer,

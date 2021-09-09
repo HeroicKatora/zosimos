@@ -213,17 +213,34 @@ pub(crate) enum ChannelPosition {
     Fourth = 3,
 }
 
+/// Identifies a color representation.
+///
+/// This names the model by which the numbers in the channels relate to a physical model. How
+/// exactly depends on the variant as presented below. Some of them can be customized further with
+/// parameters.
+///
+/// Notably, there are _NOT_ the numbers which we will use in image operations. Generally, we will
+/// use an associated _linear_ representation of those colors instead. The choice here depends on
+/// the color and is documented for each variants. It is chosen to provide models for faithful
+/// linear operations on these colors such as mixing etc.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Color {
-    /// A common model based on the CIE 1931 XYZ observer.
-    Xyz {
+    /// An rgb-ish, additive model based on the CIE 1931 XYZ observers.
+    ///
+    /// The _linear_ representation is the screen space linear RGB, which depends on primaries,
+    /// whitepoint and reference luminance. It is derived from the encoded form through the
+    /// transfer function.
+    Rgb {
         primary: Primaries,
         transfer: Transfer,
         whitepoint: Whitepoint,
         luminance: Luminance,
     },
     /// The simple but perceptual space Oklab by Björn Ottoson.
+    ///
+    /// The _linear_ representation of this color is Lab but its quantized components are may be
+    /// either Lab or LCh.
     ///
     /// It's based on a combination of two linear transforms and one non-linear power-function
     /// between them. Coefficients of these transforms are based on optimization against matching
@@ -549,14 +566,14 @@ impl Samples {
 }
 
 impl Color {
-    pub const SRGB: Color = Color::Xyz {
+    pub const SRGB: Color = Color::Rgb {
         luminance: Luminance::Sdr,
         primary: Primaries::Bt709,
         transfer: Transfer::Srgb,
         whitepoint: Whitepoint::D65,
     };
 
-    pub const BT709: Color = Color::Xyz {
+    pub const BT709: Color = Color::Rgb {
         luminance: Luminance::Sdr,
         primary: Primaries::Bt709,
         transfer: Transfer::Bt709,
@@ -573,7 +590,7 @@ impl Color {
     pub fn is_consistent(&self, parts: SampleParts) -> bool {
         use SampleParts::*;
         match (self, parts) {
-            (Color::Xyz { .. }, R | G | B | Rgb | Rgba | Rgbx) => true,
+            (Color::Rgb { .. }, R | G | B | Rgb | Rgba | Rgbx) => true,
             _ => false,
         }
     }
