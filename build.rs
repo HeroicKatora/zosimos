@@ -100,6 +100,18 @@ fn main() -> Result<(), BuildError> {
             entry: "main",
             name_overwrite: None,
         },
+        SimpleSource {
+            path: "src/shaders/oklab.frag",
+            kind: ShaderKind::Fragment,
+            entry: "oklab_encode",
+            name_overwrite: Some("oklab_encode"),
+        },
+        SimpleSource {
+            path: "src/shaders/oklab.frag",
+            kind: ShaderKind::Fragment,
+            entry: "oklab_decode",
+            name_overwrite: Some("oklab_decode"),
+        },
     ];
 
     let mut compiler = Compiler::new().unwrap();

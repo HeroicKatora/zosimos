@@ -118,6 +118,7 @@ impl Image {
 
 impl Execution {
     pub(crate) fn new(init: InitialState) -> Self {
+        init.device.start_capture();
         Execution {
             machine: Machine::new(init.instructions),
             gpu: Gpu {
@@ -630,6 +631,7 @@ impl Execution {
     /// Stop the execution, depositing all resources into the provided pool.
     #[must_use = "You won't get the ids of outputs."]
     pub fn retire_gracefully<'pool>(self, pool: &'pool mut Pool) -> Retire<'pool> {
+        self.gpu.device.stop_capture();
         Retire {
             execution: self,
             pool,

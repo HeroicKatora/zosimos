@@ -5,6 +5,7 @@ use std::borrow::Cow;
 pub mod bilinear;
 pub mod distribution_normal2d;
 pub mod inject;
+pub mod oklab;
 pub mod palette;
 pub mod stage;
 
@@ -49,6 +50,8 @@ pub(crate) enum FragmentShaderKey {
     Bilinear,
     /// A shader mixing two colors, logically injecting ones channel into the other.
     Inject,
+    /// A shader transforming between XYZ and Oklab color space.
+    OklabTransform(bool),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -59,6 +62,7 @@ pub(crate) enum FragmentShader {
     Palette(self::palette::Shader),
     Bilinear(self::bilinear::Shader),
     Inject(self::inject::Shader),
+    Oklab(self::oklab::Shader),
 }
 
 impl FragmentShader {
@@ -70,6 +74,7 @@ impl FragmentShader {
             FragmentShader::Palette(palette) => palette,
             FragmentShader::Bilinear(bilinear) => bilinear,
             FragmentShader::Inject(inject) => inject,
+            FragmentShader::Oklab(oklab) => oklab,
         }
     }
 }

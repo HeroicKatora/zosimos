@@ -213,6 +213,14 @@ pub(crate) enum ColorConversion {
         /// The matrix converting from XYZ to target.
         from_xyz_matrix: RowMatrix,
     },
+    XyzToOklab {
+        /// The matrix converting source to XYZ.
+        to_xyz_matrix: RowMatrix,
+    },
+    OklabToXyz {
+        /// The matrix converting from XYZ to target.
+        from_xyz_matrix: RowMatrix,
+    },
 }
 
 /// Reference of matrices and more: http://brucelindbloom.com/index.html?Eqn_ChromAdapt.html
@@ -388,6 +396,30 @@ impl CommandBuffer {
                 conversion = ColorConversion::Xyz {
                     from_xyz_matrix: primary_src.to_xyz(*wp_src),
                     to_xyz_matrix: primary_dst.to_xyz(*wp_dst),
+                };
+            }
+            (
+                Color::Rgb {
+                    primary,
+                    whitepoint: Whitepoint::D65,
+                    ..
+                },
+                Color::Oklab,
+            ) => {
+                conversion = ColorConversion::XyzToOklab {
+                    to_xyz_matrix: primary.to_xyz(Whitepoint::D65),
+                };
+            }
+            (
+                Color::Oklab,
+                Color::Rgb {
+                    primary,
+                    whitepoint: Whitepoint::D65,
+                    ..
+                },
+            ) => {
+                conversion = ColorConversion::OklabToXyz {
+                    from_xyz_matrix: primary.to_xyz(Whitepoint::D65),
                 };
             }
             _ => {
@@ -1144,6 +1176,17 @@ impl ColorConversion {
 
                 FragmentShader::LinearColorMatrix(
                     shaders::LinearColorTransform { matrix }
+                )
+            }
+            ColorConversion::XyzToOklab { to_xyz_matrix } => {
+                FragmentShader::Oklab(
+                    shaders::oklab::Shader::with_encode(*to_xyz_matrix),
+                )
+            }
+            ColorConversion::OklabToXyz { from_xyz_matrix } => {
+                let from_xyz_matrix = from_xyz_matrix.inv().into();
+                FragmentShader::Oklab(
+                    shaders::oklab::Shader::with_decode(from_xyz_matrix),
                 )
             }
         }
