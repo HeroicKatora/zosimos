@@ -1170,24 +1170,21 @@ impl CommandBuffer {
 impl ColorConversion {
     pub(crate) fn into_shader(&self) -> FragmentShader {
         match self {
-            ColorConversion::Xyz { to_xyz_matrix, from_xyz_matrix } => {
+            ColorConversion::Xyz {
+                to_xyz_matrix,
+                from_xyz_matrix,
+            } => {
                 let from = from_xyz_matrix.inv().into();
                 let matrix = to_xyz_matrix.multiply_right(from).into();
 
-                FragmentShader::LinearColorMatrix(
-                    shaders::LinearColorTransform { matrix }
-                )
+                FragmentShader::LinearColorMatrix(shaders::LinearColorTransform { matrix })
             }
             ColorConversion::XyzToOklab { to_xyz_matrix } => {
-                FragmentShader::Oklab(
-                    shaders::oklab::Shader::with_encode(*to_xyz_matrix),
-                )
+                FragmentShader::Oklab(shaders::oklab::Shader::with_encode(*to_xyz_matrix))
             }
             ColorConversion::OklabToXyz { from_xyz_matrix } => {
                 let from_xyz_matrix = from_xyz_matrix.inv().into();
-                FragmentShader::Oklab(
-                    shaders::oklab::Shader::with_decode(from_xyz_matrix),
-                )
+                FragmentShader::Oklab(shaders::oklab::Shader::with_decode(from_xyz_matrix))
             }
         }
     }

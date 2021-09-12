@@ -17,8 +17,8 @@ use crate::program::{
     StagingDescriptor, Texture, TextureDescriptor, TextureUsage, TextureViewDescriptor,
     VertexState,
 };
-use crate::{run, shaders};
 use crate::util::ExtendOne;
+use crate::{run, shaders};
 
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
 #[derive(Default)]
@@ -390,7 +390,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     },
                 color:
                     Color::Rgb {
-                        // Match only that which is necessary to get the right numbers in the shader.
                         transfer: Transfer::Srgb,
                         ..
                     },
@@ -404,7 +403,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     },
                 color:
                     Color::Rgb {
-                        // Match only that which is necessary to get the right numbers in the shader.
                         transfer: Transfer::Linear,
                         ..
                     },
@@ -413,6 +411,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 block: Block::Pixel,
                 samples,
                 color: Color::Rgb { transfer, .. },
+            }
+            | Texel {
+                block: Block::Pixel,
+                samples,
+                color: Color::Scalars { transfer, .. },
             } => {
                 let parameter = shaders::stage::XyzParameter {
                     transfer: transfer.into(),

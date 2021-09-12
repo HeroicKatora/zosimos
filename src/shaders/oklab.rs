@@ -4,8 +4,10 @@ use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey};
 use crate::buffer::RowMatrix;
 
 /// a linear transformation on rgb color.
-pub const SHADER_ENCODE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/oklab_encode.frag.v"));
-pub const SHADER_DECODE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/oklab_decode.frag.v"));
+pub const SHADER_ENCODE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/spirv/oklab_encode.frag.v"));
+pub const SHADER_DECODE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/spirv/oklab_decode.frag.v"));
 
 /// The palette shader, computing texture coordinates from an input color.
 #[derive(Clone, Debug, PartialEq)]
