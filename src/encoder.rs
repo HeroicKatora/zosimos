@@ -415,7 +415,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 color: Color::Rgb { transfer, .. },
             } => {
                 let parameter = shaders::stage::XyzParameter {
-                    transfer,
+                    transfer: transfer.into(),
                     parts: samples.parts,
                     bits: samples.bits,
                 };

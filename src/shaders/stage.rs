@@ -1,7 +1,16 @@
-use crate::buffer::{SampleBits, SampleParts, Transfer};
+use crate::buffer::{SampleBits, SampleParts, Transfer as RgbTransfer};
 /// Detailed structs for the stage shader.
 use core::num::NonZeroU32;
 use wgpu::TextureFormat;
+
+/// A potentially non-linear transform we apply to the linear values before we store them and
+/// before we load them. This is not necessarily a opto-electrical transfer function because we
+/// might do this even for non-RGB color spaces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Transfer {
+    Rgb(RgbTransfer),
+    Oklab,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct XyzParameter {
@@ -30,7 +39,7 @@ pub(crate) enum StageKind {
 impl XyzParameter {
     pub(crate) fn serialize_std140(&self) -> [u32; 4] {
         [
-            self.transfer as u32,
+            self.transfer.as_u32(),
             self.parts as u32,
             self.bits as u32,
             // Upper bits are still reserved for texel block size.
@@ -143,5 +152,20 @@ impl StageKind {
         let sub = self.horizontal_subfactor();
         let w = w.get() / sub + u32::from(w.get() % sub > 0);
         (NonZeroU32::new(w).unwrap(), h)
+    }
+}
+
+impl Transfer {
+    pub fn as_u32(self) -> u32 {
+        match self {
+            Transfer::Rgb(t) => t as u32,
+            Transfer::Oklab => 0x100,
+        }
+    }
+}
+
+impl From<RgbTransfer> for Transfer {
+    fn from(t: RgbTransfer) -> Self {
+        Transfer::Rgb(t)
     }
 }

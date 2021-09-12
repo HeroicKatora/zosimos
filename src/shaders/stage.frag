@@ -105,6 +105,7 @@ const uint TRANSFER_Smpte2084 = 8;
 const uint TRANSFER_Bt2100Pq = 9;
 const uint TRANSFER_Bt2100Hlg = 10;
 const uint TRANSFER_LinearScene = 11;
+const uint TRANSFER_Oklab = 0x100;
 
 uint get_transfer() {
   return parameter.space.x;
@@ -257,6 +258,9 @@ float transfer_display_scene_smpte2084(float val);
 float transfer_oe_smpte2084(float val);
 float transfer_oe_inv_smpte2084(float val);
 
+vec3 transfer_lab_to_lch(vec3);
+vec3 transfer_lch_to_lab(vec3);
+
 // Used Reference: BT.709-6, Section 1.2
 float transfer_oe_bt709(float val) {
   // TODO: is there a numerically better way?
@@ -391,6 +395,18 @@ float transfer_oe_inv_smpte2084(float val) {
 // TODO: https://github.com/colour-science/colour/blob/a196f9536c44e2101cde53446550d64303c0ab46/colour/models/rgb/transfer_functions/arib_std_b67.py#L108
 vec3 transfer_scene_display_bt2100hlg(vec3 rgb) {
   return vec3(0.0);
+}
+
+vec3 transfer_lab_to_lch(vec3 lab) {
+  // Angle but scaled to [0; 1]
+  float h = (atan(lab.y, lab.z) / 3.14159265 / 2.0) + 0.5;
+  float c = length(lab.xy);
+  return vec3(lab.x, c, h);
+}
+
+vec3 transfer_lch_to_lab(vec3 lch) {
+  float angle = 3.14159265 * 2.0 * (lch.z - 0.5);
+  return vec3(lch.x, lch.y*cos(angle), lch.y*sin(angle));
 }
 
 /** All decode methods work in several stages:
@@ -686,56 +702,60 @@ vec4 parts_denormalize(vec4 c, uint parts) {
   }
 }
 
-vec4 parts_transfer(vec4 optical, uint fnk) {
+vec4 parts_transfer(vec4 linear, uint fnk) {
 #define TRANSFER_WITH_XYZ(E, FN) vec4(FN(E.x), FN(E.y), FN(E.z), E.a)
   switch (fnk) {
   case TRANSFER_Bt709:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt709);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_bt709);
   case TRANSFER_Bt470M:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt470m);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_bt470m);
   case TRANSFER_Bt601:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt601);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_bt601);
   case TRANSFER_Smpte240:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_smpte240);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_smpte240);
   case TRANSFER_Linear:
-  return optical;
+  return linear;
   case TRANSFER_Srgb:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_srgb);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_srgb);
   case TRANSFER_Bt2020_10bit:
   case TRANSFER_Bt2020_12bit:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt2020_10b);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_bt2020_10b);
   case TRANSFER_Smpte2084:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_smpte2084);
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_smpte2084);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_smpte2084);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_smpte2084);
   case TRANSFER_Bt2100Hlg:
   // FIXME: unimplemented.
-  return optical;
+  return linear;
+  case TRANSFER_Oklab:
+  return vec4(transfer_lab_to_lch(linear.xyz), linear.a);
   }
 }
 
-vec4 parts_untransfer(vec4 electrical, uint fnk) {
+vec4 parts_untransfer(vec4 nonlin, uint fnk) {
 #define TRANSFER_WITH_XYZ(E, FN) vec4(FN(E.x), FN(E.y), FN(E.z), E.a)
   switch (fnk) {
   case TRANSFER_Bt709:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_bt709);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_bt709);
   case TRANSFER_Bt470M:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_bt470m);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_bt470m);
   case TRANSFER_Bt601:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_bt601);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_bt601);
   case TRANSFER_Smpte240:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_smpte240);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_smpte240);
   case TRANSFER_Linear:
-  return electrical;
+  return nonlin;
   case TRANSFER_Srgb:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_srgb);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_srgb);
   case TRANSFER_Bt2020_10bit:
   case TRANSFER_Bt2020_12bit:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_bt2020_10b);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_bt2020_10b);
   case TRANSFER_Smpte2084:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_smpte2084);
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_smpte2084);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_smpte2084);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_smpte2084);
   case TRANSFER_Bt2100Hlg:
   // FIXME: unimplemented.
-  return electrical;
+  return nonlin;
+  case TRANSFER_Oklab:
+  return vec4(transfer_lch_to_lab(nonlin.xyz), nonlin.a);
   }
 }
