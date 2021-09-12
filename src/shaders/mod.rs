@@ -4,6 +4,8 @@ use std::borrow::Cow;
 
 pub mod bilinear;
 pub mod distribution_normal2d;
+pub mod inject;
+pub mod oklab;
 pub mod palette;
 pub mod stage;
 
@@ -46,6 +48,10 @@ pub(crate) enum FragmentShaderKey {
     Palette,
     /// A bilinear function of colors.
     Bilinear,
+    /// A shader mixing two colors, logically injecting ones channel into the other.
+    Inject,
+    /// A shader transforming between XYZ and Oklab color space.
+    OklabTransform(bool),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -55,6 +61,8 @@ pub(crate) enum FragmentShader {
     Normal2d(DistributionNormal2d),
     Palette(self::palette::Shader),
     Bilinear(self::bilinear::Shader),
+    Inject(self::inject::Shader),
+    Oklab(self::oklab::Shader),
 }
 
 impl FragmentShader {
@@ -65,6 +73,8 @@ impl FragmentShader {
             FragmentShader::Normal2d(normal) => normal,
             FragmentShader::Palette(palette) => palette,
             FragmentShader::Bilinear(bilinear) => bilinear,
+            FragmentShader::Inject(inject) => inject,
+            FragmentShader::Oklab(oklab) => oklab,
         }
     }
 }
@@ -107,15 +117,7 @@ impl FragmentShaderData for LinearColorTransform {
     }
 
     fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
-        let matrix = self.matrix.into_inner();
-
-        // std140, always pad to 16 bytes.
-        // matrix is an array of its columns.
-        let rgb_matrix: [f32; 12] = [
-            matrix[0], matrix[3], matrix[6], 0.0, matrix[1], matrix[4], matrix[7], 0.0, matrix[2],
-            matrix[5], matrix[8], 0.0,
-        ];
-
+        let rgb_matrix: [f32; 12] = self.matrix.into_mat3x3_std140();
         Some(BufferInitContent::new(buffer, &rgb_matrix))
     }
 }

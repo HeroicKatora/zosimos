@@ -105,6 +105,7 @@ const uint TRANSFER_Smpte2084 = 8;
 const uint TRANSFER_Bt2100Pq = 9;
 const uint TRANSFER_Bt2100Hlg = 10;
 const uint TRANSFER_LinearScene = 11;
+const uint TRANSFER_Oklab = 0x100;
 
 uint get_transfer() {
   return parameter.space.x;
@@ -127,6 +128,8 @@ const uint SAMPLE_PARTS_Xrgb = 13;
 const uint SAMPLE_PARTS_Abgr = 14;
 const uint SAMPLE_PARTS_Xbgr = 15;
 const uint SAMPLE_PARTS_Yuv = 16;
+const uint SAMPLE_PARTS_LCh = 17;
+const uint SAMPLE_PARTS_LChA = 18;
 
 uint get_sample_parts() {
   return parameter.space.y;
@@ -256,6 +259,9 @@ float transfer_scene_display_smpte2084(float val);
 float transfer_display_scene_smpte2084(float val);
 float transfer_oe_smpte2084(float val);
 float transfer_oe_inv_smpte2084(float val);
+
+vec3 transfer_lab_to_lch(vec3);
+vec3 transfer_lch_to_lab(vec3);
 
 // Used Reference: BT.709-6, Section 1.2
 float transfer_oe_bt709(float val) {
@@ -393,6 +399,18 @@ vec3 transfer_scene_display_bt2100hlg(vec3 rgb) {
   return vec3(0.0);
 }
 
+vec3 transfer_lab_to_lch(vec3 lab) {
+  float c = length(lab.yz);
+  // Angle but scaled to [0; 1]
+  float h = (atan(lab.z, lab.y) / 3.14159265 / 2.0) + 0.5;
+  return vec3(lab.x, c, h);
+}
+
+vec3 transfer_lch_to_lab(vec3 lch) {
+  float angle = 3.14159265 * 2.0 * (lch.z - 0.5);
+  return vec3(lch.x, lch.y*cos(angle), lch.y*sin(angle));
+}
+
 /** All decode methods work in several stages:
  *
  * 1. Demux the bit-encoded components into a vector.
@@ -407,7 +425,7 @@ vec3 transfer_scene_display_bt2100hlg(vec3 rgb) {
 
 void DECODE_R8UI_AS_MAIN() {
   uint num = imageLoad(image_r8ui, decodeStageTexelCoord()).x;
-  uint work = (num >> (24 - 8*decodeSubtexelCoord())) & 0xff;
+  uint work = (num >> 8*decodeSubtexelCoord()) & 0xff;
   vec4 components = demux_uint(work, get_sample_bits());
 
   // FIXME: YUV transform and accurate YUV transform.
@@ -437,7 +455,7 @@ void ENCODE_R8UI_AS_MAIN() {
 
 void DECODE_R16UI_AS_MAIN() {
   uint num = imageLoad(image_r16ui, decodeStageTexelCoord()).x;
-  uint work = (num >> (16- 16*decodeSubtexelCoord())) & 0xffff;
+  uint work = (num >> 16*decodeSubtexelCoord()) & 0xffff;
   vec4 components = demux_uint(work, get_sample_bits());
 
   // FIXME: YUV transform and accurate YUV transform.
@@ -646,6 +664,10 @@ vec4 parts_normalize(vec4 components, uint parts) {
     return vec4(components.yzw, 1.0);
   case SAMPLE_PARTS_Xbgr:
     return vec4(components.wzy, 1.0);
+  case SAMPLE_PARTS_LCh:
+    return vec4(components.xyz, 1.0);
+  case SAMPLE_PARTS_LChA:
+    return components.xyzw;
   }
 }
 
@@ -683,59 +705,67 @@ vec4 parts_denormalize(vec4 c, uint parts) {
     return vec4(1.0, c.rgb);
   case SAMPLE_PARTS_Xbgr:
     return vec4(1.0, c.bgr);
+  case SAMPLE_PARTS_LCh:
+    return vec4(c.xyz, 1.0);
+  case SAMPLE_PARTS_LChA:
+    return c.xyzw;
   }
 }
 
-vec4 parts_transfer(vec4 optical, uint fnk) {
+vec4 parts_transfer(vec4 linear, uint fnk) {
 #define TRANSFER_WITH_XYZ(E, FN) vec4(FN(E.x), FN(E.y), FN(E.z), E.a)
   switch (fnk) {
   case TRANSFER_Bt709:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt709);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_bt709);
   case TRANSFER_Bt470M:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt470m);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_bt470m);
   case TRANSFER_Bt601:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt601);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_bt601);
   case TRANSFER_Smpte240:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_smpte240);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_smpte240);
   case TRANSFER_Linear:
-  return optical;
+  return linear;
   case TRANSFER_Srgb:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_srgb);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_srgb);
   case TRANSFER_Bt2020_10bit:
   case TRANSFER_Bt2020_12bit:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_bt2020_10b);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_bt2020_10b);
   case TRANSFER_Smpte2084:
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_smpte2084);
-  return TRANSFER_WITH_XYZ(optical, transfer_oe_smpte2084);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_smpte2084);
+  return TRANSFER_WITH_XYZ(linear, transfer_oe_smpte2084);
   case TRANSFER_Bt2100Hlg:
   // FIXME: unimplemented.
-  return optical;
+  return linear;
+  case TRANSFER_Oklab:
+  return vec4(transfer_lab_to_lch(linear.xyz), linear.a);
   }
 }
 
-vec4 parts_untransfer(vec4 electrical, uint fnk) {
+vec4 parts_untransfer(vec4 nonlin, uint fnk) {
 #define TRANSFER_WITH_XYZ(E, FN) vec4(FN(E.x), FN(E.y), FN(E.z), E.a)
   switch (fnk) {
   case TRANSFER_Bt709:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_bt709);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_bt709);
   case TRANSFER_Bt470M:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_bt470m);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_bt470m);
   case TRANSFER_Bt601:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_bt601);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_bt601);
   case TRANSFER_Smpte240:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_smpte240);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_smpte240);
   case TRANSFER_Linear:
-  return electrical;
+  return nonlin;
   case TRANSFER_Srgb:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_srgb);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_srgb);
   case TRANSFER_Bt2020_10bit:
   case TRANSFER_Bt2020_12bit:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_bt2020_10b);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_bt2020_10b);
   case TRANSFER_Smpte2084:
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_smpte2084);
-  return TRANSFER_WITH_XYZ(electrical, transfer_eo_smpte2084);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_smpte2084);
+  return TRANSFER_WITH_XYZ(nonlin, transfer_eo_smpte2084);
   case TRANSFER_Bt2100Hlg:
   // FIXME: unimplemented.
-  return electrical;
+  return nonlin;
+  case TRANSFER_Oklab:
+  return vec4(transfer_lch_to_lab(nonlin.xyz), nonlin.a);
   }
 }

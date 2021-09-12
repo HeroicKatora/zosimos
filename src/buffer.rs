@@ -91,6 +91,20 @@ pub struct Samples {
 }
 
 /// Describes which values are present in a texel.
+///
+/// This is some set of channels that describe the color point precisely, given a color space.
+/// Depending on the chosen color there may be multiple ways in which case this names which of the
+/// canonical encodings to use. For example, `CIELAB` may be represented as `Lab` (Lightness,
+/// red/green, blue/yellow) or `LCh` (Lightness, Chroma, Hue; the polar cooordinate form of the
+/// previous).
+///
+/// A underscore `_` identifies a channel that is encoded (in `SampleBits`) but can be completely
+/// disregarded. This is treated as padding. There is always an alternative form with an `A`
+/// (alpha) channel in its place to preserve it. This exists mainly for compatibility with some
+/// specific texel formats..
+///
+/// DEVNOTE: If you add any new formats here, do not forget to edit the conversion fragment shader
+/// (`stage.frag`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u16)]
@@ -104,18 +118,23 @@ pub enum SampleParts {
     Rgb,
     Bgr,
     Rgba,
-    Rgbx,
+    Rgb_,
     Bgra,
-    Bgrx,
+    Bgr_,
     Argb,
-    Xrgb,
+    _Rgb,
     Abgr,
-    Xbgr,
+    _Bgr,
     Yuv,
+    Lab,
+    LabA,
+    LCh,
+    LChA,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[allow(non_camel_case_types)]
 #[repr(u8)]
 pub enum SampleBits {
     /// A single 8-bit integer.
@@ -129,9 +148,9 @@ pub enum SampleBits {
     /// Four packed integer.
     Int4x4,
     /// Four packed integer, one component ignored.
-    Inti444,
+    Int_444,
     /// Four packed integer, one component ignored.
-    Int444i,
+    Int444_,
     /// Three packed integer.
     Int565,
     /// Two 8-bit integers.
@@ -151,9 +170,9 @@ pub enum SampleBits {
     /// Four packed integer.
     Int2101010,
     /// Three packed integer, one component ignored.
-    Int101010i,
+    Int101010_,
     /// Three packed integer, one component ignored.
-    Inti101010,
+    Int_101010,
     /// Four half-floats.
     Float16x4,
     /// Four floats.
@@ -162,11 +181,46 @@ pub enum SampleBits {
 
 /// Describes a single channel from an image.
 /// Note that it must match the descriptor when used in `extract` and `inject`.
+///
+/// This can be thought of as an index into a vector of channels relating to a color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorChannel {
+    /// The weight of the red primary.
     R,
+    /// The weight of the green primary.
     G,
+    /// The weight of the blue primary.
     B,
+    /// A luminescence.
+    /// Note that `YCbCr` will be composed of Luma and Cb, Cr. This avoids the gnarly overlap
+    /// between it and `Y` as the standard observer (even though this Y is often used to define the
+    /// Luma relative to standard illuminant).
+    Luma,
+    /// An alpha/translucence component.
+    Alpha,
+    /// Blue-channel difference.
+    Cb,
+    /// Red-channel difference.
+    Cr,
+    /// Lightness. Not to be confused with luminescence as this is perceptual.
+    L,
+    /// The component a (green/red) of a LAB color.
+    LABa,
+    /// The component b (green/red) of a LAB color.
+    LABb,
+    /// Chroma of a LAB color, polar distance, `hypot(a, b)`.
+    C,
+    /// Hue of a LAB based color, polar angle, `atan2(b, a).
+    LABh,
+    /// The first CIE standard observer.
+    X,
+    /// The second CIE standard observer.
+    Y,
+    /// The second CIE standard observer.
+    Z,
+    Scalar0,
+    Scalar1,
+    Scalar2,
 }
 
 /// Denotes the 'position' of a channel in the sample parts.
@@ -187,15 +241,59 @@ pub(crate) enum ChannelPosition {
     Fourth = 3,
 }
 
+/// Identifies a color representation.
+///
+/// This names the model by which the numbers in the channels relate to a physical model. How
+/// exactly depends on the variant as presented below. Some of them can be customized further with
+/// parameters.
+///
+/// Notably, there are _NOT_ the numbers which we will use in image operations. Generally, we will
+/// use an associated _linear_ representation of those colors instead. The choice here depends on
+/// the color and is documented for each variants. It is chosen to provide models for faithful
+/// linear operations on these colors such as mixing etc.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Color {
-    /// A common model based on the CIE 1931 XYZ observer.
-    Xyz {
+    /// An rgb-ish, additive model based on the CIE 1931 XYZ observers.
+    ///
+    /// The _linear_ representation is the screen space linear RGB, which depends on primaries,
+    /// whitepoint and reference luminance. It is derived from the encoded form through the
+    /// transfer function.
+    Rgb {
         primary: Primaries,
         transfer: Transfer,
         whitepoint: Whitepoint,
         luminance: Luminance,
+    },
+    /// The simple but perceptual space Oklab by Björn Ottoson.
+    ///
+    /// The _linear_ representation of this color is Lab but its quantized components are may be
+    /// either Lab or LCh.
+    ///
+    /// It's based on a combination of two linear transforms and one non-linear power-function
+    /// between them. Coefficients of these transforms are based on optimization against matching
+    /// pairs in the detailed CAM16 model, trying to predict the parameters in those pairs as
+    /// precisely as possible. For details see [the post's derivation][derivation].
+    ///
+    /// Reference: <https://bottosson.github.io/posts/oklab/>
+    ///
+    /// [derivation]: https://bottosson.github.io/posts/oklab/#how-oklab-was-derived
+    Oklab,
+    /// A group of scalar values, with no assigned relation to physical quantities.
+    ///
+    /// The purpose of this color is to simplify the process of creating color ramps and sampling
+    /// functions, which do not have any interpretation themselves but are just coefficients to be
+    /// used somewhere else.
+    ///
+    /// The only `SampleParts` that are allowed to be paired with this are `XYZ`.
+    ///
+    /// Additionally, you might use the images created with this color as an input or an
+    /// intermediate step of a `transmute` to create images with chosen values in the linear
+    /// representation without the need to manually calculate their texel encoding.
+    Scalars {
+        /// The transfer to use for points, as if they are RGB-ish colors.
+        /// You can simply use `Linear` if you do not want to encode and rgb texel.
+        transfer: Transfer,
     },
 }
 
@@ -320,6 +418,11 @@ impl Descriptor {
         },
     };
 
+    fn with_texel(texel: Texel, width: u32, height: u32) -> Option<Self> {
+        let layout = BufferLayout::with_texel(&texel, width, height)?;
+        Some(Descriptor { layout, texel })
+    }
+
     /// Get the texel describing a single channel.
     /// Returns None if the channel is not contained, or if it can not be extracted on its own.
     pub fn channel_texel(&self, channel: ColorChannel) -> Option<Texel> {
@@ -337,14 +440,17 @@ impl Descriptor {
         self.texel.samples.bits.bytes() == usize::from(self.layout.bytes_per_texel)
     }
 
+    /// Calculate the total number of pixels in width of this layout.
     pub fn pixel_width(&self) -> u32 {
         self.layout.width * self.texel.block.width()
     }
 
+    /// Calculate the total number of pixels in height of this layout.
     pub fn pixel_height(&self) -> u32 {
         self.layout.height * self.texel.block.height()
     }
 
+    /// Calculate the number of texels in width and height dimension.
     pub fn size(&self) -> (u32, u32) {
         (self.layout.width, self.layout.height)
     }
@@ -352,54 +458,10 @@ impl Descriptor {
 
 impl Texel {
     pub fn with_srgb_image(img: &image::DynamicImage) -> Self {
-        use image::DynamicImage::*;
-        let samples = match img {
-            ImageLuma8(_) => Samples {
-                bits: SampleBits::Int8,
-                parts: SampleParts::Luma,
-            },
-            ImageLumaA8(_) => Samples {
-                bits: SampleBits::Int8x2,
-                parts: SampleParts::LumaA,
-            },
-            ImageLuma16(_) => Samples {
-                bits: SampleBits::Int16,
-                parts: SampleParts::Luma,
-            },
-            ImageLumaA16(_) => Samples {
-                bits: SampleBits::Int16x2,
-                parts: SampleParts::LumaA,
-            },
-            ImageRgb8(_) => Samples {
-                bits: SampleBits::Int8x3,
-                parts: SampleParts::Rgb,
-            },
-            ImageRgba8(_) => Samples {
-                bits: SampleBits::Int8x4,
-                parts: SampleParts::Rgba,
-            },
-            ImageBgr8(_) => Samples {
-                bits: SampleBits::Int8x3,
-                parts: SampleParts::Bgr,
-            },
-            ImageBgra8(_) => Samples {
-                bits: SampleBits::Int8x4,
-                parts: SampleParts::Bgra,
-            },
-            ImageRgb16(_) => Samples {
-                bits: SampleBits::Int16x3,
-                parts: SampleParts::Rgb,
-            },
-            ImageRgba16(_) => Samples {
-                bits: SampleBits::Int16x4,
-                parts: SampleParts::Rgba,
-            },
-        };
-
         Texel {
             block: Block::Pixel,
             color: Color::SRGB,
-            samples,
+            samples: Samples::from(img),
         }
     }
 
@@ -410,10 +472,18 @@ impl Texel {
         use SampleBits::*;
         use SampleParts::*;
         let parts = match self.samples.parts {
-            Rgb | Rgbx | Rgba | Bgrx | Bgra | Abgr | Argb | Xrgb | Xbgr => match channel {
+            Rgb | Rgb_ | Bgr_ | _Rgb | _Bgr => match channel {
                 ColorChannel::R => R,
                 ColorChannel::G => G,
                 ColorChannel::B => B,
+                _ => return None,
+            },
+            Rgba | Bgra | Abgr | Argb => match channel {
+                ColorChannel::R => R,
+                ColorChannel::G => G,
+                ColorChannel::B => B,
+                ColorChannel::Alpha => A,
+                _ => return None,
             },
             _ => return None,
         };
@@ -438,9 +508,9 @@ impl SampleBits {
         use SampleBits::*;
         match self {
             Int8 | Int332 | Int233 => 1,
-            Int8x2 | Int16 | Int565 | Int4x4 | Int444i | Inti444 => 2,
+            Int8x2 | Int16 | Int565 | Int4x4 | Int444_ | Int_444 => 2,
             Int8x3 => 3,
-            Int8x4 | Int16x2 | Int1010102 | Int2101010 | Int101010i | Inti101010 => 4,
+            Int8x4 | Int16x2 | Int1010102 | Int2101010 | Int101010_ | Int_101010 => 4,
             Int16x3 => 6,
             Int16x4 | Float16x4 => 8,
             Float32x4 => 16,
@@ -448,15 +518,141 @@ impl SampleBits {
     }
 }
 
+impl SampleParts {
+    pub fn num_components(self) -> u8 {
+        use SampleParts::*;
+        match self {
+            A | R | G | B | Luma => 1,
+            LumaA => 2,
+            Rgb | Bgr | Yuv | LCh | Lab => 3,
+            Rgba | Bgra | Rgb_ | Bgr_ | Argb | _Rgb | Abgr | _Bgr | LChA | LabA => 4,
+        }
+    }
+
+    pub fn into_vec4(self) -> Option<[f32; 4]> {
+        Some(match self {
+            Self::A => [0.0, 0.0, 0.0, 1.0],
+            Self::R => [1.0, 0.0, 0.0, 0.0],
+            Self::G => [0.0, 1.0, 0.0, 0.0],
+            Self::B => [0.0, 0.0, 1.0, 0.0],
+            _ => return None,
+        })
+    }
+}
+
+impl Samples {
+    pub(crate) fn as_image_allocator(
+        &self,
+    ) -> Option<fn(u32, u32, &[u8]) -> Option<image::DynamicImage>> {
+        use SampleBits as B;
+        use SampleParts as P;
+
+        Some(match self {
+            Samples {
+                parts: P::Luma,
+                bits: B::Int8,
+            } => |width, height, source| {
+                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
+                Some(image::DynamicImage::ImageLuma8(buffer))
+            },
+            Samples {
+                parts: P::LumaA,
+                bits: B::Int8x2,
+            } => |width, height, source| {
+                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
+                Some(image::DynamicImage::ImageLumaA8(buffer))
+            },
+            Samples {
+                parts: P::Rgb,
+                bits: B::Int8x3,
+            } => |width, height, source| {
+                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
+                Some(image::DynamicImage::ImageRgb8(buffer))
+            },
+            Samples {
+                parts: P::Rgba,
+                bits: B::Int8x4,
+            } => |width, height, source| {
+                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
+                Some(image::DynamicImage::ImageRgba8(buffer))
+            },
+            Samples {
+                parts: P::Bgr,
+                bits: B::Int8x3,
+            } => |width, height, source| {
+                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
+                Some(image::DynamicImage::ImageBgr8(buffer))
+            },
+            Samples {
+                parts: P::Bgra,
+                bits: B::Int8x4,
+            } => |width, height, source| {
+                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
+                Some(image::DynamicImage::ImageBgra8(buffer))
+            },
+            // TODO: quite a lot of duplication below. Can we somehow reduce that?
+            Samples {
+                parts: P::Luma,
+                bits: B::Int16,
+            } => |width, height, source| {
+                let source = &source[..(source.len() / 2) * 2];
+                let buffer = image::ImageBuffer::from_vec(width, height, {
+                    let mut data = vec![0u16; source.len() / 2];
+                    bytemuck::cast_slice_mut(&mut data).copy_from_slice(source);
+                    data
+                })?;
+                Some(image::DynamicImage::ImageLuma16(buffer))
+            },
+            Samples {
+                parts: P::LumaA,
+                bits: B::Int16x2,
+            } => |width, height, source| {
+                let source = &source[..(source.len() / 2) * 2];
+                let buffer = image::ImageBuffer::from_vec(width, height, {
+                    let mut data = vec![0u16; source.len() / 2];
+                    bytemuck::cast_slice_mut(&mut data).copy_from_slice(source);
+                    data
+                })?;
+                Some(image::DynamicImage::ImageLumaA16(buffer))
+            },
+            Samples {
+                parts: P::Rgb,
+                bits: B::Int16x3,
+            } => |width, height, source| {
+                let source = &source[..(source.len() / 2) * 2];
+                let buffer = image::ImageBuffer::from_vec(width, height, {
+                    let mut data = vec![0u16; source.len() / 2];
+                    bytemuck::cast_slice_mut(&mut data).copy_from_slice(source);
+                    data
+                })?;
+                Some(image::DynamicImage::ImageRgb16(buffer))
+            },
+            Samples {
+                parts: P::Rgba,
+                bits: B::Int16x4,
+            } => |width, height, source| {
+                let source = &source[..(source.len() / 2) * 2];
+                let buffer = image::ImageBuffer::from_vec(width, height, {
+                    let mut data = vec![0u16; source.len() / 2];
+                    bytemuck::cast_slice_mut(&mut data).copy_from_slice(source);
+                    data
+                })?;
+                Some(image::DynamicImage::ImageRgba16(buffer))
+            },
+            _ => return None,
+        })
+    }
+}
+
 impl Color {
-    pub const SRGB: Color = Color::Xyz {
+    pub const SRGB: Color = Color::Rgb {
         luminance: Luminance::Sdr,
         primary: Primaries::Bt709,
         transfer: Transfer::Srgb,
         whitepoint: Whitepoint::D65,
     };
 
-    pub const BT709: Color = Color::Xyz {
+    pub const BT709: Color = Color::Rgb {
         luminance: Luminance::Sdr,
         primary: Primaries::Bt709,
         transfer: Transfer::Bt709,
@@ -473,7 +669,11 @@ impl Color {
     pub fn is_consistent(&self, parts: SampleParts) -> bool {
         use SampleParts::*;
         match (self, parts) {
-            (Color::Xyz { .. }, R | G | B | Rgb | Rgba | Rgbx) => true,
+            (Color::Rgb { .. }, R | G | B | Rgb | Rgba | Rgb_ | _Rgb | Bgr_ | _Bgr) => true,
+            (Color::Oklab, LCh | LChA) => true,
+            // With scalars pseudo color, everything goes.
+            // Essentially, the user assigns which meaning each channel has.
+            (Color::Scalars { .. }, _) => true,
             _ => false,
         }
     }
@@ -628,6 +828,19 @@ impl RowMatrix {
     pub(crate) fn into_inner(self) -> [f32; 9] {
         self.0
     }
+
+    #[rustfmt::skip]
+    pub(crate) fn into_mat3x3_std140(self) -> [f32; 12] {
+        // std140, always pad components to 16 bytes.
+        // matrix is an array of its columns.
+        let matrix = self.into_inner();
+
+        [
+            matrix[0], matrix[3], matrix[6], 0.0,
+            matrix[1], matrix[4], matrix[7], 0.0,
+            matrix[2], matrix[5], matrix[8], 0.0,
+        ]
+    }
 }
 
 #[rustfmt::skip]
@@ -712,6 +925,7 @@ impl ImageBuffer {
 }
 
 impl BufferLayout {
+    /// Create a buffer layout given the layout of a simple, strided matrix.
     pub fn with_row_layout(rows: RowLayoutDescription) -> Option<Self> {
         let bytes_per_texel = u8::try_from(rows.texel_stride).ok()?;
         let bytes_per_row = u32::try_from(rows.row_stride).ok()?;
@@ -733,24 +947,46 @@ impl BufferLayout {
         })
     }
 
+    /// Create a buffer layout from a texel and dimensions.
+    pub fn with_texel(texel: &Texel, width: u32, height: u32) -> Option<Self> {
+        let texel_stride = u64::try_from(texel.samples.bits.bytes()).ok()?;
+        Self::with_row_layout(RowLayoutDescription {
+            width,
+            height,
+            texel_stride,
+            // Note: with_row_layout will do an overflow check anyways.
+            row_stride: u64::from(width) * texel_stride,
+        })
+    }
+
+    /// Returns the width in texels.
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// Returns the height in texels.
     pub fn height(&self) -> u32 {
         self.height
     }
 
+    /// Returns the memory usage as a `u64`.
     pub fn u64_len(&self) -> u64 {
         // No overflow due to inner invariant.
         u64::from(self.bytes_per_row) * u64::from(self.height)
     }
 
+    /// Returns the memory usage as a `usize`.
     pub fn byte_len(&self) -> usize {
         // No overflow due to inner invariant.
         (self.bytes_per_row as usize) * (self.height as usize)
     }
 
+    /// Returns a matrix descriptor that can store all bytes.
+    ///
+    /// Note: for the moment, all layouts are row-wise matrices. This will be relaxed in the future
+    /// to also permit the construction from planar image layouts. In this case, the method will
+    /// return a descriptor that does _not_ equal this layout. Instead, an image buffer shaped like
+    /// the returned descriptor can be used to re-arrange all bytes into a simple matrix form.
     pub fn as_row_layout(&self) -> RowLayoutDescription {
         RowLayoutDescription {
             width: self.width,
@@ -764,6 +1000,54 @@ impl BufferLayout {
 impl Layout for BufferLayout {
     fn byte_len(&self) -> usize {
         BufferLayout::byte_len(self)
+    }
+}
+
+impl From<&'_ image::DynamicImage> for Samples {
+    fn from(image: &image::DynamicImage) -> Self {
+        use image::DynamicImage::*;
+        match image {
+            ImageLuma8(_) => Samples {
+                bits: SampleBits::Int8,
+                parts: SampleParts::Luma,
+            },
+            ImageLumaA8(_) => Samples {
+                bits: SampleBits::Int8x2,
+                parts: SampleParts::LumaA,
+            },
+            ImageLuma16(_) => Samples {
+                bits: SampleBits::Int16,
+                parts: SampleParts::Luma,
+            },
+            ImageLumaA16(_) => Samples {
+                bits: SampleBits::Int16x2,
+                parts: SampleParts::LumaA,
+            },
+            ImageRgb8(_) => Samples {
+                bits: SampleBits::Int8x3,
+                parts: SampleParts::Rgb,
+            },
+            ImageRgba8(_) => Samples {
+                bits: SampleBits::Int8x4,
+                parts: SampleParts::Rgba,
+            },
+            ImageBgr8(_) => Samples {
+                bits: SampleBits::Int8x3,
+                parts: SampleParts::Bgr,
+            },
+            ImageBgra8(_) => Samples {
+                bits: SampleBits::Int8x4,
+                parts: SampleParts::Bgra,
+            },
+            ImageRgb16(_) => Samples {
+                bits: SampleBits::Int16x3,
+                parts: SampleParts::Rgb,
+            },
+            ImageRgba16(_) => Samples {
+                bits: SampleBits::Int16x4,
+                parts: SampleParts::Rgba,
+            },
+        }
     }
 }
 
@@ -788,5 +1072,15 @@ impl From<&'_ image::DynamicImage> for ImageBuffer {
         let layout = BufferLayout::from(image);
         let inner = Canvas::with_bytes(layout, image.as_bytes());
         ImageBuffer { inner }
+    }
+}
+
+impl Descriptor {
+    /// Creates a descriptor for an sRGB encoded image, with the indicated color type.
+    pub fn with_srgb_image(image: &'_ image::DynamicImage) -> Descriptor {
+        Descriptor {
+            layout: BufferLayout::from(image),
+            texel: Texel::with_srgb_image(image),
+        }
     }
 }

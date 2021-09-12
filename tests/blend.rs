@@ -75,6 +75,14 @@ fn integration() {
         instance.enumerate_adapters(ANY),
         pool_background.clone(),
     );
+
+    run_swap(
+        &mut pool,
+        instance.enumerate_adapters(ANY),
+        pool_background.clone(),
+    );
+
+    run_oklab(&mut pool, instance.enumerate_adapters(ANY));
 }
 
 fn run_blending(
@@ -478,6 +486,103 @@ fn run_palette(
 
     let image_sampled = pool.entry(result).unwrap();
     util::assert_reference(image_sampled.into(), "palette.png.crc");
+}
+
+fn run_swap(
+    pool: &mut Pool,
+    adapters: impl Iterator<Item = wgpu::Adapter>,
+    (orig_key, orig_descriptor): (PoolKey, Descriptor),
+) {
+    use buffer::ColorChannel;
+    let mut commands = CommandBuffer::default();
+
+    let input = commands.input(orig_descriptor).unwrap();
+    let channel_r = commands.extract(input, ColorChannel::R).unwrap();
+    let channel_g = commands.extract(input, ColorChannel::G).unwrap();
+
+    let intermediate = commands.inject(input, ColorChannel::G, channel_r).unwrap();
+    let swapped = commands
+        .inject(intermediate, ColorChannel::R, channel_g)
+        .unwrap();
+
+    let (output, _outformat) = commands.output(swapped).expect("Valid for output");
+
+    let result = run_once_with_output(
+        commands,
+        pool,
+        adapters,
+        vec![(input, orig_key)],
+        retire_with_one_image(output),
+    );
+
+    let image_swapped = pool.entry(result).unwrap();
+    util::assert_reference(image_swapped.into(), "swapped.png.crc");
+}
+
+fn run_oklab(pool: &mut Pool, adapters: impl Iterator<Item = wgpu::Adapter>) {
+    let mut commands = CommandBuffer::default();
+
+    let output = image::DynamicImage::new_rgba8(400, 400);
+    let color_descriptor = buffer::Descriptor::with_srgb_image(&output);
+
+    let distribution_layout = buffer::Descriptor {
+        layout: color_descriptor.layout.clone(),
+        texel: buffer::Texel {
+            block: buffer::Block::Pixel,
+            samples: color_descriptor.texel.samples,
+            color: buffer::Color::Scalars {
+                transfer: buffer::Transfer::Linear,
+            },
+        },
+    };
+
+    let oklab_texel = buffer::Texel {
+        color: buffer::Color::Oklab,
+        block: distribution_layout.texel.block,
+        samples: buffer::Samples {
+            bits: distribution_layout.texel.samples.bits,
+            parts: buffer::SampleParts::LChA,
+        },
+    };
+
+    let sampling_grid = commands
+        .bilinear(
+            distribution_layout,
+            command::Bilinear {
+                // lightness, chromaticity, hue
+                // This is constant lightness (0.8),
+                // chromaticity from 0.0 to 1.0 and
+                // all hues.
+                // Note that many values may be clamped into sRGB.
+                u_min: [0.4, 0.0, 0.0, 1.0],
+                v_min: [0.4, 0.0, 0.0, 1.0],
+                u_max: [0.4, 0.0, 1.0, 1.0],
+                v_max: [0.4, 1.0, 0.0, 1.0],
+                uv_min: [0.0, 0.0, 0.0, 0.0],
+                uv_max: [0.0, 0.0, 0.0, 0.0],
+            },
+        )
+        .unwrap();
+
+    let lch = commands
+        .transmute(sampling_grid, oklab_texel)
+        .expect("Valid transmute");
+    let converted = commands
+        .color_convert(lch, color_descriptor.texel.clone())
+        .expect("Valid for conversion");
+
+    let (output, _) = commands.output(converted).expect("Valid for output");
+
+    let result = run_once_with_output(
+        commands,
+        pool,
+        adapters,
+        vec![],
+        retire_with_one_image(output),
+    );
+
+    let image_show = pool.entry(result).unwrap();
+    util::assert_reference(image_show.into(), "oklab.png.crc");
 }
 
 /* Utility methods  */

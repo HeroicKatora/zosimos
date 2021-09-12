@@ -124,7 +124,7 @@ pub(crate) enum UnaryOp {
     /// And color needs to be 'color compatible' with the prior T (see module).
     ColorConvert(ColorConversion),
     /// Op(T) = T[.color=select(channel, color)]
-    Extract { channel: ColorChannel },
+    Extract { channel: ChannelPosition },
     /// Op(T) = T[.whitepoint=target]
     /// This is a partial method for CIE XYZ-ish color spaces. Note that ICC requires adaptation to
     /// D50 for example as the reference color space.
@@ -144,7 +144,10 @@ pub(crate) enum BinaryOp {
     /// Replace a channel T with U itself.
     /// Op[T, U] = T
     /// where select(channel, T.color) = U.color
-    Inject { channel: ColorChannel },
+    Inject {
+        channel: ChannelPosition,
+        from_channels: SampleParts,
+    },
     /// Sample from a palette based on the color value of another image.
     /// Op[T, U] = T
     Palette(shaders::PaletteShader),
@@ -203,11 +206,21 @@ pub enum AffineSample {
 
 /// The parameters of color conversion which we will use in the draw call.
 #[derive(Clone, Debug)]
-pub(crate) struct ColorConversion {
-    /// The matrix converting source to XYZ.
-    to_xyz_matrix: RowMatrix,
-    /// The matrix converting from XYZ to target.
-    from_xyz_matrix: RowMatrix,
+pub(crate) enum ColorConversion {
+    Xyz {
+        /// The matrix converting source to XYZ.
+        to_xyz_matrix: RowMatrix,
+        /// The matrix converting from XYZ to target.
+        from_xyz_matrix: RowMatrix,
+    },
+    XyzToOklab {
+        /// The matrix converting source to XYZ.
+        to_xyz_matrix: RowMatrix,
+    },
+    OklabToXyz {
+        /// The matrix converting from XYZ to target.
+        from_xyz_matrix: RowMatrix,
+    },
 }
 
 /// Reference of matrices and more: http://brucelindbloom.com/index.html?Eqn_ChromAdapt.html
@@ -369,20 +382,44 @@ impl CommandBuffer {
         // cases, we will later add some temporary conversion.
         match (&desc_src.texel.color, &texel.color) {
             (
-                Color::Xyz {
+                Color::Rgb {
                     primary: primary_src,
                     whitepoint: wp_src,
                     ..
                 },
-                Color::Xyz {
+                Color::Rgb {
                     primary: primary_dst,
                     whitepoint: wp_dst,
                     ..
                 },
             ) if wp_src == wp_dst => {
-                conversion = ColorConversion {
+                conversion = ColorConversion::Xyz {
                     from_xyz_matrix: primary_src.to_xyz(*wp_src),
                     to_xyz_matrix: primary_dst.to_xyz(*wp_dst),
+                };
+            }
+            (
+                Color::Rgb {
+                    primary,
+                    whitepoint: Whitepoint::D65,
+                    ..
+                },
+                Color::Oklab,
+            ) => {
+                conversion = ColorConversion::XyzToOklab {
+                    to_xyz_matrix: primary.to_xyz(Whitepoint::D65),
+                };
+            }
+            (
+                Color::Oklab,
+                Color::Rgb {
+                    primary,
+                    whitepoint: Whitepoint::D65,
+                    ..
+                },
+            ) => {
+                conversion = ColorConversion::OklabToXyz {
+                    from_xyz_matrix: primary.to_xyz(Whitepoint::D65),
                 };
             }
             _ => {
@@ -427,13 +464,13 @@ impl CommandBuffer {
         let (to_xyz_matrix, from_xyz_matrix);
 
         match desc_src.texel.color {
-            Color::Xyz {
+            Color::Rgb {
                 whitepoint,
                 primary,
                 transfer,
                 luminance,
             } => {
-                texel_color = Color::Xyz {
+                texel_color = Color::Rgb {
                     whitepoint: target,
                     primary,
                     transfer,
@@ -519,13 +556,28 @@ impl CommandBuffer {
         let texel = desc
             .channel_texel(channel)
             .ok_or_else(|| CommandError::OTHER)?;
+
+        let layout = buffer::RowLayoutDescription {
+            width: desc.layout.width(),
+            height: desc.layout.height(),
+            texel_stride: texel.samples.bits.bytes() as u64,
+            row_stride: (texel.samples.bits.bytes() as u64) * u64::from(desc.layout.width()),
+        };
+
+        let layout =
+            buffer::BufferLayout::with_row_layout(layout).ok_or_else(|| CommandError::OTHER)?;
+
+        // Check that we can actually extract that channel.
+        // This could be unimplemented if the position of a particular channel is not yet a stable
+        // detail. Also, we might introduce 'virtual' channels such as `Luminance` on an RGB image
+        // where such channels are computed by linear combination instead of a binary incidence
+        // vector. Then there might be colors where this does not exist.
+        let channel = ChannelPosition::new(channel).ok_or_else(|| CommandError::OTHER)?;
+
         let op = Op::Unary {
             src,
             op: UnaryOp::Extract { channel },
-            desc: Descriptor {
-                layout: desc.layout.clone(),
-                texel,
-            },
+            desc: Descriptor { layout, texel },
         };
 
         Ok(self.push(op))
@@ -570,6 +622,10 @@ impl CommandBuffer {
     }
 
     /// Overwrite some channels with overlaid data.
+    ///
+    /// This performs an implicit conversion of the overlaid data to the color channels which is
+    /// performed as if by transmutation. However, contrary to the transmutation we will _only_
+    /// allow the sample parts to be changed arbitrarily.
     pub fn inject(
         &mut self,
         below: Register,
@@ -580,18 +636,52 @@ impl CommandBuffer {
         let expected_texel = desc_below
             .channel_texel(channel)
             .ok_or_else(|| CommandError::OTHER)?;
-        let desc_above = self.describe_reg(above)?;
+        let mut desc_above = self.describe_reg(above)?.clone();
 
-        if expected_texel != desc_above.texel {
+        if desc_above.texel.samples.parts.num_components()
+            != expected_texel.samples.parts.num_components()
+        {
+            let wanted = Descriptor {
+                texel: expected_texel,
+                ..desc_below.clone()
+            };
+
             return Err(CommandError {
-                inner: CommandErrorKind::ConflictingTypes(desc_below.clone(), desc_above.clone()),
+                inner: CommandErrorKind::ConflictingTypes(wanted, desc_above),
             });
         }
+
+        // Override the sample part interpretation.
+        let from_channels = desc_above.texel.samples.parts;
+        desc_above.texel.samples.parts = expected_texel.samples.parts;
+
+        // FIXME: should we do parsing instead of validation?
+        // Some type like ChannelPosition but for multiple.
+        if from_channels.into_vec4().is_none() {
+            return Err(CommandError::OTHER);
+        }
+
+        if expected_texel != desc_above.texel {
+            let wanted = Descriptor {
+                texel: expected_texel,
+                ..desc_below.clone()
+            };
+
+            return Err(CommandError {
+                inner: CommandErrorKind::ConflictingTypes(wanted, desc_above),
+            });
+        }
+
+        // Find where to insert, see `extract` for this step.
+        let channel = ChannelPosition::new(channel).ok_or_else(|| CommandError::OTHER)?;
 
         let op = Op::Binary {
             lhs: below,
             rhs: above,
-            op: BinaryOp::Inject { channel },
+            op: BinaryOp::Inject {
+                channel,
+                from_channels,
+            },
             desc: desc_below.clone(),
         };
 
@@ -925,19 +1015,29 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Function::PaintFullScreen {
-                                    shader: FragmentShader::LinearColorMatrix(
-                                        shaders::LinearColorTransform {
-                                            matrix: color.into_matrix(),
-                                        },
-                                    ),
+                                    shader: color.into_shader(),
                                 },
                             });
+                        }
+                        UnaryOp::Extract { channel: _ } => {
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
+
+                            high_ops.push(High::Construct {
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintFullScreen {
+                                    // This will grab the right channel, that is all of them.
+                                    // The actual conversion is done in de-staging of the result.
+                                    // TODO: evaluate if this is the right way to do it. We could
+                                    // also perform a LinearColorMatrix shader here with close to
+                                    // the same amount of shader code but a precise result.
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
+                                },
+                            })
                         }
                         UnaryOp::Transmute => high_ops.push(High::Copy {
                             src: *src,
                             dst: Register(idx),
                         }),
-                        _ => return Err(CompileError::NotYetImplemented),
                     }
 
                     reg_to_texture.insert(Register(idx), texture);
@@ -981,6 +1081,23 @@ impl CommandBuffer {
                                 },
                             })
                         }
+                        BinaryOp::Inject {
+                            channel,
+                            from_channels,
+                        } => {
+                            high_ops.push(High::PushOperand(reg_to_texture[lhs]));
+                            high_ops.push(High::PushOperand(reg_to_texture[rhs]));
+
+                            high_ops.push(High::Construct {
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::Inject(shaders::inject::Shader {
+                                        mix: channel.into_vec4(),
+                                        color: from_channels.into_vec4().unwrap(),
+                                    }),
+                                },
+                            })
+                        }
                         BinaryOp::Inscribe { placement } => {
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
                             high_ops.push(High::Construct {
@@ -1017,7 +1134,6 @@ impl CommandBuffer {
                                 },
                             });
                         }
-                        _ => return Err(CompileError::NotYetImplemented),
                     }
 
                     reg_to_texture.insert(Register(idx), texture);
@@ -1052,9 +1168,25 @@ impl CommandBuffer {
 }
 
 impl ColorConversion {
-    pub(crate) fn into_matrix(&self) -> RowMatrix {
-        let from = self.from_xyz_matrix.inv().into();
-        self.to_xyz_matrix.multiply_right(from).into()
+    pub(crate) fn into_shader(&self) -> FragmentShader {
+        match self {
+            ColorConversion::Xyz {
+                to_xyz_matrix,
+                from_xyz_matrix,
+            } => {
+                let from = from_xyz_matrix.inv().into();
+                let matrix = to_xyz_matrix.multiply_right(from).into();
+
+                FragmentShader::LinearColorMatrix(shaders::LinearColorTransform { matrix })
+            }
+            ColorConversion::XyzToOklab { to_xyz_matrix } => {
+                FragmentShader::Oklab(shaders::oklab::Shader::with_encode(*to_xyz_matrix))
+            }
+            ColorConversion::OklabToXyz { from_xyz_matrix } => {
+                let from_xyz_matrix = from_xyz_matrix.inv().into();
+                FragmentShader::Oklab(shaders::oklab::Shader::with_decode(from_xyz_matrix))
+            }
+        }
     }
 }
 

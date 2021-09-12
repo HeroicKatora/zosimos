@@ -171,12 +171,12 @@ impl ImageData {
 
 impl PoolImage<'_> {
     pub fn to_image(&self) -> Option<image::DynamicImage> {
-        let data = self.as_bytes()?.to_vec();
+        let data = self.as_bytes()?;
         let layout = self.layout();
-        // FIXME: don't assume RGBA8.
-        let image = image::ImageBuffer::from_vec(layout.width, layout.height, data)
-            .expect("Should be fine lmao");
-        Some(image::DynamicImage::ImageRgba8(image))
+
+        let image = self.image.texel.samples.as_image_allocator()?;
+        let image = image(layout.width, layout.height, data)?;
+        Some(image)
     }
 
     pub fn key(&self) -> PoolKey {

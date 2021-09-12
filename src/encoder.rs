@@ -17,8 +17,8 @@ use crate::program::{
     StagingDescriptor, Texture, TextureDescriptor, TextureUsage, TextureViewDescriptor,
     VertexState,
 };
-use crate::shaders;
 use crate::util::ExtendOne;
+use crate::{run, shaders};
 
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
 #[derive(Default)]
@@ -49,7 +49,8 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     /// Howe we mapped registers to images in the pool.
     pool_plan: ImagePoolPlan,
     /// The Bind Group layer Descriptor used in fragment shader, set=1.
-    paint_group_layout: Option<usize>,
+    /// This is keyed by the number of descriptors for that layout.
+    paint_group_layout: HashMap<usize, usize>,
     /// The Bind Group Descriptor used in vertex buffer, set=0.
     quad_group_layout: Option<usize>,
     /// The Bind Group Descriptor for set=2, used for parameters of fragment shader.
@@ -240,14 +241,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     pub(crate) fn extract_buffers(
         &self,
-        buffers: &mut Vec<ImageData>,
+        buffers: &mut Vec<run::Image>,
         pool: &mut Pool,
     ) -> Result<(), LaunchError> {
         for (&pool_key, &texture) in &self.pool_plan.buffer {
             let mut entry = pool
                 .entry(pool_key)
                 .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-            let buffer = &mut buffers[texture.0];
+            let buffer = &mut buffers[texture.0].data;
 
             // Decide how to retrieve this image from the pool.
             if buffer.as_bytes().is_none() {
@@ -388,8 +389,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                         parts: SampleParts::Rgba,
                     },
                 color:
-                    Color::Xyz {
-                        // Match only that which is necessary to get the right numbers in the shader.
+                    Color::Rgb {
                         transfer: Transfer::Srgb,
                         ..
                     },
@@ -402,8 +402,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                         parts: SampleParts::Rgba,
                     },
                 color:
-                    Color::Xyz {
-                        // Match only that which is necessary to get the right numbers in the shader.
+                    Color::Rgb {
                         transfer: Transfer::Linear,
                         ..
                     },
@@ -411,14 +410,48 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Texel {
                 block: Block::Pixel,
                 samples,
-                color: Color::Xyz { transfer, .. },
+                color: Color::Rgb { transfer, .. },
+            }
+            | Texel {
+                block: Block::Pixel,
+                samples,
+                color: Color::Scalars { transfer, .. },
             } => {
                 let parameter = shaders::stage::XyzParameter {
-                    transfer,
+                    transfer: transfer.into(),
                     parts: samples.parts,
                     bits: samples.bits,
                 };
 
+                let result = parameter.linear_format();
+                let stage_kind = parameter
+                    .stage_kind()
+                    // Unsupported format.
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                staging = Some(StagingDescriptor {
+                    stage_kind,
+                    parameter,
+                });
+
+                result
+            }
+            Texel {
+                block: Block::Pixel,
+                samples:
+                    Samples {
+                        bits,
+                        parts: SampleParts::LChA,
+                    },
+                color: Color::Oklab,
+            } => {
+                let parameter = shaders::stage::XyzParameter {
+                    transfer: shaders::stage::Transfer::Oklab,
+                    parts: SampleParts::LChA,
+                    bits,
+                };
+
+                // FIXME: duplicate code.
                 let result = parameter.linear_format();
                 let stage_kind = parameter
                     .stage_kind()
@@ -664,7 +697,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// Copy from memory visible buffer to the texture.
     pub(crate) fn copy_buffer_to_staging(&mut self, idx: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
-        let size = self.buffer_plan.texture[regmap.texture.0].size();
 
         let (size, target_texture);
         if let Some(staging) = regmap.staging {
@@ -763,7 +795,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 let id = self.texture_views;
                 self.push(Low::TextureView(descriptor))?;
-                self.texture_views += 1;
                 id
             };
 
@@ -867,15 +898,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let texture = self
             .texture_map
             .get(&dst)
+            // The texture was never allocated. Has it been initialized?
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
             .device;
 
         let descriptor = TextureViewDescriptor { texture };
 
-        self.instructions.extend_one(Low::TextureView(descriptor));
         let id = self.texture_views;
-        self.texture_views += 1;
-
+        self.push(Low::TextureView(descriptor))?;
         // eprintln!("Texture {:?} (Device {:?}) in View {:?}", dst, texture, id);
 
         Ok(id)
@@ -932,7 +962,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn make_paint_group_layout(&mut self, count: usize) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
-        *self.paint_group_layout.get_or_insert_with(|| {
+        *self.paint_group_layout.entry(count).or_insert_with(|| {
             let mut entries = vec![wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStage::FRAGMENT,
@@ -1636,7 +1666,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     pub(crate) fn finalize(&mut self) -> Result<(), LaunchError> {
         if !self.operands.is_empty() {
-            eprintln!("{:?}", self.operands.as_slice());
+            // eprintln!("{:?}", self.operands.as_slice());
             return Err(LaunchError::InternalCommandError(line!()));
         }
 
