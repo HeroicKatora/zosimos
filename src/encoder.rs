@@ -433,6 +433,35 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 result
             }
+            Texel {
+                block: Block::Pixel,
+                samples:
+                    Samples {
+                        bits,
+                        parts: SampleParts::LChA,
+                    },
+                color: Color::Oklab,
+            } => {
+                let parameter = shaders::stage::XyzParameter {
+                    transfer: shaders::stage::Transfer::Oklab,
+                    parts: SampleParts::LChA,
+                    bits,
+                };
+
+                // FIXME: duplicate code.
+                let result = parameter.linear_format();
+                let stage_kind = parameter
+                    .stage_kind()
+                    // Unsupported format.
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                staging = Some(StagingDescriptor {
+                    stage_kind,
+                    parameter,
+                });
+
+                result
+            }
             _ => return Err(LaunchError::InternalCommandError(line!())),
         };
 

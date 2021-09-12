@@ -128,6 +128,8 @@ const uint SAMPLE_PARTS_Xrgb = 13;
 const uint SAMPLE_PARTS_Abgr = 14;
 const uint SAMPLE_PARTS_Xbgr = 15;
 const uint SAMPLE_PARTS_Yuv = 16;
+const uint SAMPLE_PARTS_LCh = 17;
+const uint SAMPLE_PARTS_LChA = 18;
 
 uint get_sample_parts() {
   return parameter.space.y;
@@ -398,9 +400,9 @@ vec3 transfer_scene_display_bt2100hlg(vec3 rgb) {
 }
 
 vec3 transfer_lab_to_lch(vec3 lab) {
+  float c = length(lab.yz);
   // Angle but scaled to [0; 1]
-  float h = (atan(lab.y, lab.z) / 3.14159265 / 2.0) + 0.5;
-  float c = length(lab.xy);
+  float h = (atan(lab.z, lab.y) / 3.14159265 / 2.0) + 0.5;
   return vec3(lab.x, c, h);
 }
 
@@ -662,6 +664,10 @@ vec4 parts_normalize(vec4 components, uint parts) {
     return vec4(components.yzw, 1.0);
   case SAMPLE_PARTS_Xbgr:
     return vec4(components.wzy, 1.0);
+  case SAMPLE_PARTS_LCh:
+    return vec4(components.xyz, 1.0);
+  case SAMPLE_PARTS_LChA:
+    return components.xyzw;
   }
 }
 
@@ -699,6 +705,10 @@ vec4 parts_denormalize(vec4 c, uint parts) {
     return vec4(1.0, c.rgb);
   case SAMPLE_PARTS_Xbgr:
     return vec4(1.0, c.bgr);
+  case SAMPLE_PARTS_LCh:
+    return vec4(c.xyz, 1.0);
+  case SAMPLE_PARTS_LChA:
+    return c.xyzw;
   }
 }
 

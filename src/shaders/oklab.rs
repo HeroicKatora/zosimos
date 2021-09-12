@@ -52,7 +52,8 @@ impl FragmentShaderData for Shader {
 
     /// Encode the shader's data into the buffer, returning the descriptor to that.
     fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
-        let data = self.matrix.into_inner();
+        let data = self.matrix.into_mat3x3_std140();
+
         Some(BufferInitContent::new(buffer, &data))
     }
 

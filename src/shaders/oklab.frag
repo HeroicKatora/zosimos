@@ -9,6 +9,8 @@ layout (set = 2, binding = 0) uniform FragmentColor {
     mat3x3 xyz_transform;
 } u_fragmentColor;
 
+// The canonical Oklab matrices, but GLSL constructs matrices column-wise.
+// Therefore we will need to transpose before actual use.
 const mat3x3 M1 = mat3x3(
         +0.8189330101, +0.0329845436, +0.0482003018,
         +0.3618667424, +0.9293118715, +0.2643662691,
@@ -36,7 +38,8 @@ void OKLAB_ENCODE_AS_MAIN() {
 
     // The OKLab transformation.
     const vec3 lms = M1 * xyz;
-    const vec3 lms_star = pow(lms, vec3(1.0 / 3.0));
+    // We can't use pow outright for negative components.
+    const vec3 lms_star = pow(abs(lms), vec3(1.0 / 3.0)) * sign(lms);
     const vec3 Lab = M2 * lms_star;
 
     // Write this as our 'linear color' (preserve alpha).
@@ -51,10 +54,11 @@ void OKLAB_DECODE_AS_MAIN() {
 
     // The OKLab transformation.
     const vec3 lms_star = inverse(M2) * Lab;
-    const vec3 lms = pow(lms_star, vec3(3.0));
+    // Not using pow because that would be undefined for negative components.
+    const vec3 lms = lms_star * lms_star * lms_star;
     const vec3 xyz = inverse(M1) * lms;
 
     // Write this as our 'linear color' (preserve alpha).
     const vec3 rgb = u_fragmentColor.xyz_transform * xyz;
-    f_color = vec4(rgb, lab_a.a);
+    f_color = vec4(clamp(rgb, 0.0, 1.0), lab_a.a);
 }

@@ -112,6 +112,8 @@ pub enum SampleParts {
     Abgr,
     Xbgr,
     Yuv,
+    LCh,
+    LChA,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -475,8 +477,8 @@ impl SampleParts {
         match self {
             A | R | G | B | Luma => 1,
             LumaA => 2,
-            Rgb | Bgr | Yuv => 3,
-            Rgba | Bgra | Rgbx | Bgrx | Argb | Xrgb | Abgr | Xbgr => 4,
+            Rgb | Bgr | Yuv | LCh => 3,
+            Rgba | Bgra | Rgbx | Bgrx | Argb | Xrgb | Abgr | Xbgr | LChA => 4,
         }
     }
 
@@ -591,6 +593,7 @@ impl Color {
         use SampleParts::*;
         match (self, parts) {
             (Color::Rgb { .. }, R | G | B | Rgb | Rgba | Rgbx) => true,
+            (Color::Oklab, LCh | LChA) => true,
             _ => false,
         }
     }
@@ -744,6 +747,19 @@ impl RowMatrix {
 
     pub(crate) fn into_inner(self) -> [f32; 9] {
         self.0
+    }
+
+    #[rustfmt::skip]
+    pub(crate) fn into_mat3x3_std140(self) -> [f32; 12] {
+        // std140, always pad components to 16 bytes.
+        // matrix is an array of its columns.
+        let matrix = self.into_inner();
+
+        [
+            matrix[0], matrix[3], matrix[6], 0.0,
+            matrix[1], matrix[4], matrix[7], 0.0,
+            matrix[2], matrix[5], matrix[8], 0.0,
+        ]
     }
 }
 
@@ -953,5 +969,15 @@ impl From<&'_ image::DynamicImage> for ImageBuffer {
         let layout = BufferLayout::from(image);
         let inner = Canvas::with_bytes(layout, image.as_bytes());
         ImageBuffer { inner }
+    }
+}
+
+impl Descriptor {
+    /// Creates a descriptor for an sRGB encoded image, with the indicated color type.
+    pub fn with_srgb_image(image: &'_ image::DynamicImage) -> Descriptor {
+        Descriptor {
+            layout: BufferLayout::from(image),
+            texel: Texel::with_srgb_image(image),
+        }
     }
 }
