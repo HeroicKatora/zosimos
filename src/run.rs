@@ -1,12 +1,37 @@
 use core::{iter::once, num::NonZeroU32, pin::Pin};
+use std::collections::HashMap;
 
 use crate::buffer::{BufferLayout, Descriptor, Texel};
 use crate::command::Register;
 use crate::pool::{ImageData, Pool, PoolImage, PoolKey};
-use crate::program::{self, DeviceBuffer, DeviceTexture, Low};
+use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
 
 use wgpu::{Device, Queue};
 
+/// The code of a linear pipeline, lowered to a particular set of device capabilities.
+///
+/// This contains the program and a partial part of the inputs and the device to execute on. There
+/// are two main ways to instantiate this struct: By lowering a `Program` or by softly retiring an
+/// existing, running `Execution`. In the later case we might be able to salvage parts of the
+/// execution such that it may be re-used in a later run on the same device.
+pub struct Executable {
+    /// The list of instructions to perform.
+    pub(crate) instructions: Vec<Low>,
+    /// The host-side data which is used to initialize buffers.
+    pub(crate) binary_data: Vec<u8>,
+    /// The device, if it has already been supplied.
+    pub(crate) gpu: Option<Gpu>,
+    /// All device related state which we have preserved.
+    pub(crate) descriptors: Descriptors,
+    /// Input/Output buffers used for execution.
+    pub(crate) buffers: Vec<Image>,
+    /// The map from registers to the index in image data.
+    pub(crate) io_map: IoMap,
+    /// The capabilities required from devices to execute this.
+    pub(crate) capabilities: Capabilities,
+}
+
+/// A running `Executable`.
 pub struct Execution {
     pub(crate) machine: Machine,
     pub(crate) gpu: Gpu,
@@ -32,6 +57,14 @@ pub(crate) struct Image {
     /// This is used mainly for IO where we reconstruct a free-standing image with all its
     /// associated data when moving from an `Image`.
     pub(crate) texel: Texel,
+    /// The pool key corresponding to this image.
+    pub(crate) key: Option<PoolKey>,
+}
+
+#[derive(Default)]
+pub struct IoMap {
+    pub(crate) inputs: HashMap<Register, usize>,
+    pub(crate) outputs: HashMap<Register, usize>,
 }
 
 #[derive(Default)]
@@ -85,6 +118,16 @@ pub(crate) struct Machine {
 }
 
 #[derive(Debug)]
+pub struct LaunchError {
+    kind: LaunchErrorKind,
+}
+
+#[derive(Debug)]
+pub enum LaunchErrorKind {
+    FromLine(u32),
+}
+
+#[derive(Debug)]
 pub struct StepError {
     inner: StepErrorKind,
     instruction_pointer: usize,
@@ -112,7 +155,32 @@ impl Image {
         Image {
             data: ImageData::LateBound(descriptor.layout.clone()),
             texel: descriptor.texel.clone(),
+            // Not related to any pooled image.
+            key: None,
         }
+    }
+}
+
+impl Executable {
+    pub fn launch(self) -> Result<Execution, LaunchError> {
+        let gpu = self.gpu
+            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+        for (_, &input) in &self.io_map.inputs {
+            if matches!(self.buffers[input].data, ImageData::LateBound(_)) {
+                // FIXME: should be an 'unbound image' error.
+                return Err(LaunchError::InternalCommandError(line!()));
+            }
+        }
+
+        Ok(Execution {
+            machine: Machine::new(self.instructions),
+            gpu: gpu,
+            descriptors: self.descriptors,
+            command_encoder: None,
+            buffers: self.buffers,
+            binary_data: self.binary_data,
+        })
     }
 }
 
@@ -956,6 +1024,17 @@ impl Machine {
                     }))
                 }
             }
+        }
+    }
+}
+
+impl LaunchError {
+    #[allow(non_snake_case)]
+    // FIXME: find a better error representation but it's okay for now.
+    // #[deprecated = "This should be cleaned up"]
+    pub(crate) fn InternalCommandError(line: u32) -> Self {
+        LaunchError {
+            kind: LaunchErrorKind::FromLine(line),
         }
     }
 }

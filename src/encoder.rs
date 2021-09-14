@@ -10,8 +10,8 @@ use crate::command::Register;
 use crate::pool::{ImageData, Pool};
 use crate::program::{
     BindGroupDescriptor, BindGroupLayoutDescriptor, BindingResource, Buffer, BufferDescriptor,
-    BufferDescriptorInit, BufferInitContent, BufferUsage, ColorAttachmentDescriptor, DeviceBuffer,
-    DeviceTexture, FragmentState, Function, ImageBufferAssignment, ImageBufferPlan,
+    BufferDescriptorInit, BufferInitContent, BufferUsage, Capabilities, ColorAttachmentDescriptor,
+    DeviceBuffer, DeviceTexture, FragmentState, Function, ImageBufferAssignment, ImageBufferPlan,
     ImageDescriptor, ImagePoolPlan, LaunchError, Low, PipelineLayoutDescriptor, PrimitiveState,
     RenderPassDescriptor, RenderPipelineDescriptor, SamplerDescriptor, ShaderDescriptor,
     StagingDescriptor, Texture, TextureDescriptor, TextureUsage, TextureViewDescriptor,
@@ -225,10 +225,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// Tell the encoder which commands are natively supported.
     /// Some features require GPU support. At this point we decide if our request has succeeded and
     /// we might poly-fill it with a compute shader or something similar.
-    pub(crate) fn enable_capabilities(&mut self, device: &wgpu::Device) {
-        // currently no feature selection..
-        let _ = device.features();
-        let _ = device.limits();
+    pub(crate) fn enable_capabilities(&mut self, caps: &Capabilities) {
+        // FIXME: currently nothing uses features or limits.
+        // Which is wrong, we can use features to skip some staging. We might also have some
+        // slightly different shader features such as using push constants in some cases?
+        let _ = caps;
     }
 
     pub(crate) fn set_buffer_plan(&mut self, plan: &ImageBufferPlan) {

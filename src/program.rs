@@ -156,6 +156,13 @@ pub(crate) struct Buffer(pub(crate) usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Texture(pub(crate) usize);
 
+/// A map of features which we may use during encoding.
+#[derive(Clone, Debug)]
+pub struct Capabilities {
+    features: wgpu::Features,
+    limits: wgpu::Limits,
+}
+
 #[derive(Debug)]
 pub struct LaunchError {
     kind: LaunchErrorKind,
@@ -666,74 +673,40 @@ impl Program {
             pool_plan: ImagePoolPlan::default(),
         }
     }
-}
 
-impl Launcher<'_> {
-    /// Bind an image in the pool to an input register.
-    ///
-    /// Returns an error if the register does not specify an input, or when there is no image under
-    /// the key in the pool, or when the image in the pool does not match the declared format.
-    pub fn bind(mut self, Register(reg): Register, img: PoolKey) -> Result<Self, LaunchError> {
-        if self.pool.entry(img).is_none() {
-            return Err(LaunchError::InternalCommandError(line!()));
-        }
+    pub fn lower_to(&self, capabilities: Capabilities) -> Result<run::Executable, LaunchError> {
+        let empty_pool = ImagePoolPlan::default();
+        let mut encoder = self.lower_to_impl(&capabilities, &empty_pool)?;
+        encoder.finalize()?;
 
-        let Texture(texture) = match self.program.textures.by_register.get(reg) {
-            Some(assigned) => assigned.texture,
-            None => return Err(LaunchError::InternalCommandError(line!())),
-        };
+        // Convert all textures to buffers.
+        // FIXME: _All_ textures? No, some amount of textures might not be IO.
+        // Currently this is true but no in general.
+        let buffers = self
+            .textures
+            .texture
+            .iter()
+            .map(run::Image::with_late_bound)
+            .collect();
 
-        self.pool_plan.plan.insert(Register(reg), img);
-        self.pool_plan.buffer.insert(img, Texture(texture));
-
-        Ok(self)
+        Ok(run::Executable {
+            instructions: encoder.instructions,
+            binary_data: encoder.binary_data,
+            gpu: None,
+            descriptors: run::Descriptors::default(),
+            buffers,
+            capabilities,
+            io_map: run::IoMap::default(),
+        })
     }
 
-    /// Determine images to use for outputs.
-    ///
-    /// You do not need to call this prior to launching as it will be performed automatically.
-    /// However, you might get more detailed error information and in a future version might
-    /// pre-determine the keys that will be used.
-    pub fn bind_remaining_outputs(mut self) -> Result<Self, LaunchError> {
-        for high in &self.program.ops {
-            if let &High::Output { src: register, dst } = high {
-                let assigned = &self.program.textures.by_register[register.0];
-                let descriptor = &self.program.textures.texture[assigned.texture.0];
-                let key = self.pool_plan.choose_output(&mut *self.pool, descriptor);
-                self.pool_plan.plan.insert(dst, key);
-            }
-        }
-
-        Ok(self)
-    }
-
-    /// Really launch, potentially failing if configuration or inputs were missing etc.
-    pub fn launch(mut self, adapter: &wgpu::Adapter) -> Result<run::Execution, LaunchError> {
-        let request = adapter.request_device(&self.program.device_descriptor(), None);
-
-        // For all inputs check that they have now been supplied.
-        for high in &self.program.ops {
-            if let &High::Input(register, _) = high {
-                if self.pool_plan.get_texture(register).is_none() {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-            }
-        }
-
-        // Bind remaining outputs.
-        self = self.bind_remaining_outputs()?;
-
-        let (device, queue) = match block_on(request, None) {
-            Ok(tuple) => tuple,
-            Err(_) => return Err(LaunchError::InternalCommandError(line!())),
-        };
-
+    fn lower_to_impl(&self, capabilities: &Capabilities, pool_plan: &ImagePoolPlan) -> Result<Encoder, LaunchError> {
         let mut encoder = Encoder::default();
-        encoder.set_buffer_plan(&self.program.textures);
-        encoder.set_pool_plan(&self.pool_plan);
-        encoder.enable_capabilities(&device);
+        encoder.set_buffer_plan(&self.textures);
+        encoder.set_pool_plan(&pool_plan);
+        encoder.enable_capabilities(&capabilities);
 
-        for high in &self.program.ops {
+        for high in &self.ops {
             match high {
                 &High::Done(_) => {
                     // TODO: should deallocate textures that aren't live anymore.
@@ -831,6 +804,73 @@ impl Launcher<'_> {
             }
         }
 
+        Ok(encoder)
+    }
+}
+
+impl Launcher<'_> {
+    /// Bind an image in the pool to an input register.
+    ///
+    /// Returns an error if the register does not specify an input, or when there is no image under
+    /// the key in the pool, or when the image in the pool does not match the declared format.
+    pub fn bind(mut self, Register(reg): Register, img: PoolKey) -> Result<Self, LaunchError> {
+        if self.pool.entry(img).is_none() {
+            return Err(LaunchError::InternalCommandError(line!()));
+        }
+
+        let Texture(texture) = match self.program.textures.by_register.get(reg) {
+            Some(assigned) => assigned.texture,
+            None => return Err(LaunchError::InternalCommandError(line!())),
+        };
+
+        self.pool_plan.plan.insert(Register(reg), img);
+        self.pool_plan.buffer.insert(img, Texture(texture));
+
+        Ok(self)
+    }
+
+    /// Determine images to use for outputs.
+    ///
+    /// You do not need to call this prior to launching as it will be performed automatically.
+    /// However, you might get more detailed error information and in a future version might
+    /// pre-determine the keys that will be used.
+    pub fn bind_remaining_outputs(mut self) -> Result<Self, LaunchError> {
+        for high in &self.program.ops {
+            if let &High::Output { src: register, dst } = high {
+                let assigned = &self.program.textures.by_register[register.0];
+                let descriptor = &self.program.textures.texture[assigned.texture.0];
+                let key = self.pool_plan.choose_output(&mut *self.pool, descriptor);
+                self.pool_plan.plan.insert(dst, key);
+            }
+        }
+
+        Ok(self)
+    }
+
+    /// Really launch, potentially failing if configuration or inputs were missing etc.
+    pub fn launch(mut self, adapter: &wgpu::Adapter) -> Result<run::Execution, LaunchError> {
+        let request = adapter.request_device(&self.program.device_descriptor(), None);
+
+        // For all inputs check that they have now been supplied.
+        for high in &self.program.ops {
+            if let &High::Input(register, _) = high {
+                if self.pool_plan.get_texture(register).is_none() {
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+            }
+        }
+
+        // Bind remaining outputs.
+        self = self.bind_remaining_outputs()?;
+
+        let (device, queue) = match block_on(request, None) {
+            Ok(tuple) => tuple,
+            Err(_) => return Err(LaunchError::InternalCommandError(line!())),
+        };
+
+        let capabilities = Capabilities::from(&device);
+
+        let mut encoder = self.program.lower_to_impl(&capabilities, &self.pool_plan)?;
         let mut buffers = self.binds;
         encoder.extract_buffers(&mut buffers, &mut self.pool)?;
 
@@ -917,6 +957,15 @@ impl QuadTarget {
 impl From<Rectangle> for QuadTarget {
     fn from(target: Rectangle) -> Self {
         QuadTarget::Rect(target)
+    }
+}
+
+impl From<&'_ wgpu::Device> for Capabilities {
+    fn from(device: &'_ wgpu::Device) -> Self {
+        Capabilities {
+            features: device.features(),
+            limits: device.limits(),
+        }
     }
 }
 
