@@ -1,7 +1,7 @@
 use stealth_paint::buffer::{self, Descriptor, Whitepoint};
 use stealth_paint::command::{self, CommandBuffer, Rectangle, Register};
 use stealth_paint::pool::{Pool, PoolKey};
-use stealth_paint::run::Retire;
+use stealth_paint::{program::Program, run::Retire};
 
 #[path = "util.rs"]
 mod util;
@@ -17,6 +17,8 @@ fn integration() {
     const ANY: wgpu::BackendBit = wgpu::BackendBit::all();
     // FIXME: this drop SEGFAULTs for me...
     let instance = core::mem::ManuallyDrop::new(wgpu::Instance::new(ANY));
+    let adapter = Program::minimum_adapter(instance.enumerate_adapters(ANY))
+        .expect("to get an adapter");
 
     let background = image::open(BACKGROUND).expect("Background image opened");
     let foreground = image::open(FOREGROUND).expect("Background image opened");
@@ -31,6 +33,9 @@ fn integration() {
         let entry = pool.insert_srgb(&foreground);
         (entry.key(), entry.descriptor())
     };
+
+    pool.request_device(&adapter, wgpu::DeviceDescriptor::default())
+        .expect("to get a device");
 
     run_blending(
         &mut pool,

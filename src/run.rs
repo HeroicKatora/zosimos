@@ -162,6 +162,15 @@ impl Image {
 }
 
 impl Executable {
+    pub fn from_pool(&mut self, pool: &mut Pool) -> bool {
+        if let Some((_, device)) = pool.select_device(&self.capabilities) {
+            self.gpu = Some(device);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn launch(self) -> Result<Execution, LaunchError> {
         let gpu = self.gpu
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
@@ -1073,6 +1082,10 @@ impl StepError {
 }
 
 impl Retire<'_> {
+    /// Move the output image corresponding to `reg` into the pool.
+    ///
+    /// Return the image as viewed inside the pool. This is not arbitrary. See [`output_key`] for
+    /// more details (WIP).
     pub fn output(&mut self, _: Register) -> Result<PoolImage<'_>, RetireError> {
         // FIXME: don't take some random image, use the right one..
         // Also: should we leave the actual image? This would allow restarting the pipeline.
@@ -1089,8 +1102,41 @@ impl Retire<'_> {
         Ok(pool_image.into())
     }
 
+    /// Determine the pool key that will be preferred when calling `output`.
     pub fn output_key(&self, _: Register) -> Result<PoolKey, RetireError> {
         todo!()
+    }
+
+    /// Drop any temporary buffers that had been allocated during execution.
+    ///
+    /// This leaves only IO resources alive, potentially reducing the amount of allocated memory
+    /// space. In particular if you plan on calling [`finish`] where they would otherwise stay
+    /// allocated indefinitely (until the underlying pool itself dropped, that is).
+    pub fn prune(&mut self) {
+        // FIXME: not implemented.
+        // But also we don't put any image into the pool yet.
+    }
+
+    /// Collect all remaining items into the pool.
+    ///
+    /// Note that _every_ remaining buffer that can be reused will be put into the underlying pool.
+    /// Be careful not to cause leaky behavior, that is clean up any such temporary buffers when
+    /// they can no longer be used.
+    ///
+    /// You might wish to call [`prune`] to prevent such buffers from staying allocated in the pool
+    /// in the first place.
+    pub fn finish(self) {
+        self.pool.reinsert_device(self.execution.gpu);
+    }
+
+    /// Explicitly discard all remaining items.
+    ///
+    /// The effect of this is the same as merely dropping it however it is much more explicit. In
+    /// many cases you may want to call [`finish`] instead, ensuring that remaining resources that
+    /// _can_ be reused are kept alive and can be re-acquired in future runs.
+    pub fn finish_by_discarding(self) {
+        // Yes, we want to drop everything.
+        drop(self);
     }
 }
 

@@ -618,8 +618,35 @@ impl ImagePoolPlan {
 
 impl Program {
     /// Choose an applicable adapter from one of the presented ones.
-    pub fn choose_adapter(
-        &self,
+    pub fn choose_adapter(&self, from: impl Iterator<Item = wgpu::Adapter>)
+        -> Result<wgpu::Adapter, MismatchError>
+    {
+        Program::minimum_adapter(from)
+    }
+
+    /// Select an adapter that fulfills the minimum requirements for running programs.
+    ///
+    /// The library may be able to utilize any additional features on top but, following the design
+    /// of `wgpu`, these need to be explicitly enabled before lowering. [WIP]: there are no actual
+    /// uses of any additional features. So currently we require (a subset of WebGPU):
+    ///
+    /// * Generic support for `rgba8UnormSrgb`.
+    /// * Load/Store textures for `luma32uint`, `rgba16uint`.
+    /// * Load/Store for `rgba32uint` might allow additional texel support.
+    /// * `precise` (bit-reproducible) shaders are WIP in wgpu anyways.
+    ///
+    /// What could be available as options in the (near/far) future:
+    /// * No `PushConstants` but some shaders might benefit.
+    /// * [WIP] We don't do limit checks yet. But we really should because it's handled by panic.
+    /// * Timestamp Queries and Pipeline Statistics would be necessary for profiling (though only
+    ///     accurate on native). This would also be optional.
+    /// * `AddressModeClampToBorder` would be interesting because we'd need to emulate that right
+    ///     now. However, not sure how useful.
+    ///
+    /// However, given the current scheme any utilization of functions with arity >= 4 would
+    /// require additional opt-in as this hits the limit for number of sampled textures (that is,
+    /// the minimum required limit). Luckily, we do not have any such functions yet.
+    pub fn minimum_adapter(
         mut from: impl Iterator<Item = wgpu::Adapter>,
     ) -> Result<wgpu::Adapter, MismatchError> {
         #[allow(non_snake_case)]
