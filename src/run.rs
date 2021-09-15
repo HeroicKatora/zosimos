@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::buffer::{BufferLayout, Descriptor, Texel};
 use crate::command::Register;
-use crate::pool::{ImageData, Pool, PoolImage, PoolKey};
+use crate::pool::{ImageData, Pool, PoolImage, PoolImageMut, PoolKey};
 use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
 
 use wgpu::{Device, Queue};
@@ -118,7 +118,7 @@ pub(crate) struct Machine {
 }
 
 #[derive(Debug)]
-pub struct LaunchError {
+pub struct StartError {
     kind: LaunchErrorKind,
 }
 
@@ -171,15 +171,44 @@ impl Executable {
         }
     }
 
-    pub fn launch(self) -> Result<Execution, LaunchError> {
-        let gpu = self.gpu
-            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+    pub fn bind(&mut self, reg: Register, mut pool_img: PoolImageMut<'_>)
+        -> Result<(), StartError>
+    {
+        let &idx = self.io_map.inputs.get(&reg)
+            .ok_or_else(|| StartError::InternalCommandError(line!()))?;
 
+        let image = &mut self.buffers[idx];
+
+        let descriptor = pool_img.descriptor();
+        if descriptor.layout != *image.data.layout() {
+            return Err(StartError::InternalCommandError(line!()));
+        }
+
+        if descriptor.texel != image.texel {
+            // FIXME: not quite such an 'unknown' error.
+            return Err(StartError::InternalCommandError(line!()));
+        }
+
+        pool_img.trade(&mut image.data);
+        image.key = Some(pool_img.key());
+
+        Ok(())
+    }
+
+    pub fn launch(mut self) -> Result<Execution, StartError> {
+        let gpu = self.gpu
+            .ok_or_else(|| StartError::InternalCommandError(line!()))?;
+
+        eprintln!("{:?}", &self.io_map.inputs);
         for (_, &input) in &self.io_map.inputs {
             if matches!(self.buffers[input].data, ImageData::LateBound(_)) {
                 // FIXME: should be an 'unbound image' error.
-                return Err(LaunchError::InternalCommandError(line!()));
+                return Err(StartError::InternalCommandError(line!()));
             }
+        }
+
+        for (_, &output) in &self.io_map.outputs {
+            self.buffers[output].data.host_allocate();
         }
 
         Ok(Execution {
@@ -1037,12 +1066,12 @@ impl Machine {
     }
 }
 
-impl LaunchError {
+impl StartError {
     #[allow(non_snake_case)]
     // FIXME: find a better error representation but it's okay for now.
     // #[deprecated = "This should be cleaned up"]
     pub(crate) fn InternalCommandError(line: u32) -> Self {
-        LaunchError {
+        StartError {
             kind: LaunchErrorKind::FromLine(line),
         }
     }

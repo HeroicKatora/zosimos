@@ -7,7 +7,7 @@ use crate::buffer::{
     Block, BufferLayout, Color, SampleBits, SampleParts, Samples, Texel, Transfer,
 };
 use crate::command::Register;
-use crate::pool::{ImageData, Pool};
+use crate::pool::Pool;
 use crate::program::{
     BindGroupDescriptor, BindGroupLayoutDescriptor, BindingResource, Buffer, BufferDescriptor,
     BufferDescriptorInit, BufferInitContent, BufferUsage, Capabilities, ColorAttachmentDescriptor,
@@ -46,8 +46,17 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     // Additional fields to map our runtime state.
     /// How we map registers to device buffers.
     buffer_plan: ImageBufferPlan,
-    /// Howe we mapped registers to images in the pool.
+    /// If we should build a trace of input pool images to textures.
+    /// This isn't necessary for a running program but it can be relevant when one wants to restore
+    /// the pool to the state exactly before, even when the program is stopped. In those cases we
+    /// might still hold images in textures. This instructs us to trace where.
+    trace_pool_plan: bool,
+    /// How we mapped registers to images in the pool.
     pool_plan: ImagePoolPlan,
+    /// Declare where we put our input registers.
+    input_map: HashMap<Register, Texture>,
+    /// Declare where we intend to write our outputs.
+    output_map: HashMap<Register, Texture>,
     /// The Bind Group layer Descriptor used in fragment shader, set=1.
     /// This is keyed by the number of descriptors for that layout.
     paint_group_layout: HashMap<usize, usize>,
@@ -237,39 +246,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     pub(crate) fn set_pool_plan(&mut self, plan: &ImagePoolPlan) {
+        self.trace_pool_plan = true;
         self.pool_plan = plan.clone();
-    }
-
-    pub(crate) fn extract_buffers(
-        &self,
-        buffers: &mut Vec<run::Image>,
-        pool: &mut Pool,
-    ) -> Result<(), LaunchError> {
-        for (&pool_key, &texture) in &self.pool_plan.buffer {
-            let mut entry = pool
-                .entry(pool_key)
-                .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-            let buffer = &mut buffers[texture.0].data;
-
-            // Decide how to retrieve this image from the pool.
-            if buffer.as_bytes().is_none() {
-                // Just take the buffer if we are allowed to...
-                if entry.meta().no_read {
-                    entry.swap(buffer);
-                } else if let Some(copy) = entry.host_copy() {
-                    *buffer = ImageData::Host(copy);
-                } else {
-                    // Would need to copy from the GPU.
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-
-                if buffer.as_bytes().is_none() {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-            }
-        }
-
-        Ok(())
     }
 
     /// Validate and then add the command to the encoder.
@@ -648,9 +626,18 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     fn ingest_image_data(&mut self, idx: Register) -> Result<Texture, LaunchError> {
-        let source_key = self.pool_plan.get(idx)?;
         let texture = self.buffer_plan.get(idx)?.texture;
-        self.pool_plan.buffer.entry(source_key).or_insert(texture);
+
+        // FIXME: We are conflating `texture` and the index in the execution's vector of IO
+        // buffers. That is, we have an entry there even when the register/texture in question has
+        // no input or output behavior.
+        // That's a shame because, for example, we could leave images in the pool when they do not
+        // get used in the pipeline.
+        if self.trace_pool_plan {
+            let source_key = self.pool_plan.get(idx)?;
+            self.pool_plan.buffer.entry(source_key).or_insert(texture);
+        }
+
         Ok(texture)
     }
 
@@ -658,6 +645,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     pub(crate) fn copy_input_to_buffer(&mut self, idx: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
         let source_image = self.ingest_image_data(idx)?;
+        self.input_map.insert(idx, source_image);
 
         let descriptor = &self.buffer_plan.texture[regmap.texture.0];
         let size = descriptor.size();
@@ -862,6 +850,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     ) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
         let target_image = self.ingest_image_data(dst)?;
+        self.output_map.insert(dst, target_image);
 
         let size = self.buffer_plan.get_info(idx)?.descriptor.size();
         let sizeu64 = regmap.buffer_layout.u64_len();
@@ -1663,6 +1652,54 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// Ingest the data into the encoder's active buffer data.
     fn ingest_data(&mut self, data: &[impl bytemuck::Pod]) -> BufferInitContent {
         BufferInitContent::new(&mut self.binary_data, data)
+    }
+
+    pub(crate) fn io_map(&self) -> run::IoMap {
+        let mut io_map = run::IoMap::default();
+
+        for (&register, texture) in &self.input_map {
+            io_map.inputs.insert(register, texture.0);
+        }
+
+        for (&register, texture) in &self.output_map {
+            io_map.outputs.insert(register, texture.0);
+        }
+
+        io_map
+    }
+
+    /// Using the derived pool plan, extract all utilized buffers from the pool.
+    pub(crate) fn extract_buffers(
+        &self,
+        buffers: &mut Vec<run::Image>,
+        pool: &mut Pool,
+    ) -> Result<(), LaunchError> {
+        for (&pool_key, &texture) in &self.pool_plan.buffer {
+            let mut entry = pool
+                .entry(pool_key)
+                .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+            let buffer = &mut buffers[texture.0].data;
+
+            // Decide how to retrieve this image from the pool.
+            if buffer.as_bytes().is_none() {
+                // Just take the buffer if we are allowed to...
+                if !entry.trade(buffer) {
+                    // Would need to copy from the GPU.
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+
+                // FIXME: for now we enforce host-reachability.
+                // This isn't necessary if we know that we should only take GPU images belonging to
+                // a particular device that we start on. This only works because this method is
+                // only executed by `launch`, which knows the device as it chooses the device
+                // itself.
+                if buffer.as_bytes().is_none() {
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub(crate) fn finalize(&mut self) -> Result<(), LaunchError> {

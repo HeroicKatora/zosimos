@@ -702,9 +702,9 @@ impl Program {
     }
 
     pub fn lower_to(&self, capabilities: Capabilities) -> Result<run::Executable, LaunchError> {
-        let empty_pool = ImagePoolPlan::default();
-        let mut encoder = self.lower_to_impl(&capabilities, &empty_pool)?;
+        let mut encoder = self.lower_to_impl(&capabilities, None)?;
         encoder.finalize()?;
+        let io_map = encoder.io_map();
 
         // Convert all textures to buffers.
         // FIXME: _All_ textures? No, some amount of textures might not be IO.
@@ -723,15 +723,18 @@ impl Program {
             descriptors: run::Descriptors::default(),
             buffers,
             capabilities,
-            io_map: run::IoMap::default(),
+            io_map,
         })
     }
 
-    fn lower_to_impl(&self, capabilities: &Capabilities, pool_plan: &ImagePoolPlan) -> Result<Encoder, LaunchError> {
+    fn lower_to_impl(&self, capabilities: &Capabilities, pool_plan: Option<&ImagePoolPlan>) -> Result<Encoder, LaunchError> {
         let mut encoder = Encoder::default();
-        encoder.set_buffer_plan(&self.textures);
-        encoder.set_pool_plan(&pool_plan);
         encoder.enable_capabilities(&capabilities);
+
+        encoder.set_buffer_plan(&self.textures);
+        if let Some(pool_plan) = pool_plan {
+            encoder.set_pool_plan(pool_plan);
+        }
 
         for high in &self.ops {
             match high {
@@ -897,7 +900,7 @@ impl Launcher<'_> {
 
         let capabilities = Capabilities::from(&device);
 
-        let mut encoder = self.program.lower_to_impl(&capabilities, &self.pool_plan)?;
+        let mut encoder = self.program.lower_to_impl(&capabilities, Some(&self.pool_plan))?;
         let mut buffers = self.binds;
         encoder.extract_buffers(&mut buffers, &mut self.pool)?;
 
