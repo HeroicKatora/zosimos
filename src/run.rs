@@ -1,12 +1,37 @@
 use core::{iter::once, num::NonZeroU32, pin::Pin};
+use std::collections::HashMap;
 
 use crate::buffer::{BufferLayout, Descriptor, Texel};
 use crate::command::Register;
-use crate::pool::{ImageData, Pool, PoolImage, PoolKey};
-use crate::program::{self, DeviceBuffer, DeviceTexture, Low};
+use crate::pool::{ImageData, Pool, PoolImage, PoolImageMut, PoolKey};
+use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
 
 use wgpu::{Device, Queue};
 
+/// The code of a linear pipeline, lowered to a particular set of device capabilities.
+///
+/// This contains the program and a partial part of the inputs and the device to execute on. There
+/// are two main ways to instantiate this struct: By lowering a `Program` or by softly retiring an
+/// existing, running `Execution`. In the later case we might be able to salvage parts of the
+/// execution such that it may be re-used in a later run on the same device.
+pub struct Executable {
+    /// The list of instructions to perform.
+    pub(crate) instructions: Vec<Low>,
+    /// The host-side data which is used to initialize buffers.
+    pub(crate) binary_data: Vec<u8>,
+    /// The device, if it has already been supplied.
+    pub(crate) gpu: Option<Gpu>,
+    /// All device related state which we have preserved.
+    pub(crate) descriptors: Descriptors,
+    /// Input/Output buffers used for execution.
+    pub(crate) buffers: Vec<Image>,
+    /// The map from registers to the index in image data.
+    pub(crate) io_map: IoMap,
+    /// The capabilities required from devices to execute this.
+    pub(crate) capabilities: Capabilities,
+}
+
+/// A running `Executable`.
 pub struct Execution {
     pub(crate) machine: Machine,
     pub(crate) gpu: Gpu,
@@ -32,6 +57,14 @@ pub(crate) struct Image {
     /// This is used mainly for IO where we reconstruct a free-standing image with all its
     /// associated data when moving from an `Image`.
     pub(crate) texel: Texel,
+    /// The pool key corresponding to this image.
+    pub(crate) key: Option<PoolKey>,
+}
+
+#[derive(Default)]
+pub struct IoMap {
+    pub(crate) inputs: HashMap<Register, usize>,
+    pub(crate) outputs: HashMap<Register, usize>,
 }
 
 #[derive(Default)]
@@ -85,6 +118,16 @@ pub(crate) struct Machine {
 }
 
 #[derive(Debug)]
+pub struct StartError {
+    kind: LaunchErrorKind,
+}
+
+#[derive(Debug)]
+pub enum LaunchErrorKind {
+    FromLine(u32),
+}
+
+#[derive(Debug)]
 pub struct StepError {
     inner: StepErrorKind,
     instruction_pointer: usize,
@@ -112,7 +155,76 @@ impl Image {
         Image {
             data: ImageData::LateBound(descriptor.layout.clone()),
             texel: descriptor.texel.clone(),
+            // Not related to any pooled image.
+            key: None,
         }
+    }
+}
+
+impl Executable {
+    pub fn from_pool(&mut self, pool: &mut Pool) -> bool {
+        if let Some((_, device)) = pool.select_device(&self.capabilities) {
+            self.gpu = Some(device);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn bind(
+        &mut self,
+        reg: Register,
+        mut pool_img: PoolImageMut<'_>,
+    ) -> Result<(), StartError> {
+        let &idx = self
+            .io_map
+            .inputs
+            .get(&reg)
+            .ok_or_else(|| StartError::InternalCommandError(line!()))?;
+
+        let image = &mut self.buffers[idx];
+
+        let descriptor = pool_img.descriptor();
+        if descriptor.layout != *image.data.layout() {
+            return Err(StartError::InternalCommandError(line!()));
+        }
+
+        if descriptor.texel != image.texel {
+            // FIXME: not quite such an 'unknown' error.
+            return Err(StartError::InternalCommandError(line!()));
+        }
+
+        pool_img.trade(&mut image.data);
+        image.key = Some(pool_img.key());
+
+        Ok(())
+    }
+
+    pub fn launch(mut self) -> Result<Execution, StartError> {
+        let gpu = self
+            .gpu
+            .ok_or_else(|| StartError::InternalCommandError(line!()))?;
+
+        eprintln!("{:?}", &self.io_map.inputs);
+        for (_, &input) in &self.io_map.inputs {
+            if matches!(self.buffers[input].data, ImageData::LateBound(_)) {
+                // FIXME: should be an 'unbound image' error.
+                return Err(StartError::InternalCommandError(line!()));
+            }
+        }
+
+        for (_, &output) in &self.io_map.outputs {
+            self.buffers[output].data.host_allocate();
+        }
+
+        Ok(Execution {
+            machine: Machine::new(self.instructions),
+            gpu: gpu,
+            descriptors: self.descriptors,
+            command_encoder: None,
+            buffers: self.buffers,
+            binary_data: self.binary_data,
+        })
     }
 }
 
@@ -960,6 +1072,17 @@ impl Machine {
     }
 }
 
+impl StartError {
+    #[allow(non_snake_case)]
+    // FIXME: find a better error representation but it's okay for now.
+    // #[deprecated = "This should be cleaned up"]
+    pub(crate) fn InternalCommandError(line: u32) -> Self {
+        StartError {
+            kind: LaunchErrorKind::FromLine(line),
+        }
+    }
+}
+
 #[allow(non_snake_case)]
 #[allow(non_upper_case_globals)]
 impl StepError {
@@ -994,6 +1117,10 @@ impl StepError {
 }
 
 impl Retire<'_> {
+    /// Move the output image corresponding to `reg` into the pool.
+    ///
+    /// Return the image as viewed inside the pool. This is not arbitrary. See [`output_key`] for
+    /// more details (WIP).
     pub fn output(&mut self, _: Register) -> Result<PoolImage<'_>, RetireError> {
         // FIXME: don't take some random image, use the right one..
         // Also: should we leave the actual image? This would allow restarting the pipeline.
@@ -1010,8 +1137,41 @@ impl Retire<'_> {
         Ok(pool_image.into())
     }
 
+    /// Determine the pool key that will be preferred when calling `output`.
     pub fn output_key(&self, _: Register) -> Result<PoolKey, RetireError> {
         todo!()
+    }
+
+    /// Drop any temporary buffers that had been allocated during execution.
+    ///
+    /// This leaves only IO resources alive, potentially reducing the amount of allocated memory
+    /// space. In particular if you plan on calling [`finish`] where they would otherwise stay
+    /// allocated indefinitely (until the underlying pool itself dropped, that is).
+    pub fn prune(&mut self) {
+        // FIXME: not implemented.
+        // But also we don't put any image into the pool yet.
+    }
+
+    /// Collect all remaining items into the pool.
+    ///
+    /// Note that _every_ remaining buffer that can be reused will be put into the underlying pool.
+    /// Be careful not to cause leaky behavior, that is clean up any such temporary buffers when
+    /// they can no longer be used.
+    ///
+    /// You might wish to call [`prune`] to prevent such buffers from staying allocated in the pool
+    /// in the first place.
+    pub fn finish(self) {
+        self.pool.reinsert_device(self.execution.gpu);
+    }
+
+    /// Explicitly discard all remaining items.
+    ///
+    /// The effect of this is the same as merely dropping it however it is much more explicit. In
+    /// many cases you may want to call [`finish`] instead, ensuring that remaining resources that
+    /// _can_ be reused are kept alive and can be re-acquired in future runs.
+    pub fn finish_by_discarding(self) {
+        // Yes, we want to drop everything.
+        drop(self);
     }
 }
 

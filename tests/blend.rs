@@ -1,6 +1,15 @@
+//! This test file check the functionality, coverage tests basically.
+//!
+//! Since we want to be somewhat efficient we keep the same pool, instance, adapter, device around
+//! while trying to ensure that it returns to an equivalent state after each test.
+//!
+//! FIXME: This stops after a single test failure. It would be more useful to have our own harness
+//! here and do all of the tests, as separate as possible, recovering by recreating the whole state
+//! when a test has failed (because that could have corrupted shared state).
 use stealth_paint::buffer::{self, Descriptor, Whitepoint};
 use stealth_paint::command::{self, CommandBuffer, Rectangle, Register};
 use stealth_paint::pool::{Pool, PoolKey};
+use stealth_paint::program::{Capabilities, Program};
 use stealth_paint::run::Retire;
 
 #[path = "util.rs"]
@@ -17,6 +26,8 @@ fn integration() {
     const ANY: wgpu::BackendBit = wgpu::BackendBit::all();
     // FIXME: this drop SEGFAULTs for me...
     let instance = core::mem::ManuallyDrop::new(wgpu::Instance::new(ANY));
+    let adapter =
+        Program::minimum_adapter(instance.enumerate_adapters(ANY)).expect("to get an adapter");
 
     let background = image::open(BACKGROUND).expect("Background image opened");
     let foreground = image::open(FOREGROUND).expect("Background image opened");
@@ -32,62 +43,34 @@ fn integration() {
         (entry.key(), entry.descriptor())
     };
 
-    run_blending(
-        &mut pool,
-        instance.enumerate_adapters(ANY),
-        pool_foreground.clone(),
-        pool_background.clone(),
-    );
+    pool.request_device(&adapter, wgpu::DeviceDescriptor::default())
+        .expect("to get a device");
 
-    run_affine(
-        &mut pool,
-        instance.enumerate_adapters(ANY),
-        pool_foreground.clone(),
-        pool_background.clone(),
-    );
+    run_blending(&mut pool, pool_foreground.clone(), pool_background.clone());
 
-    run_adaptation(
-        &mut pool,
-        instance.enumerate_adapters(ANY),
-        pool_background.clone(),
-    );
+    run_affine(&mut pool, pool_foreground.clone(), pool_background.clone());
 
-    run_conversion(
-        &mut pool,
-        instance.enumerate_adapters(ANY),
-        pool_background.clone(),
-    );
+    run_adaptation(&mut pool, pool_background.clone());
 
-    run_distribution(&mut pool, instance.enumerate_adapters(ANY));
+    run_conversion(&mut pool, pool_background.clone());
 
-    run_distribution_normal1d(&mut pool, instance.enumerate_adapters(ANY));
+    run_distribution(&mut pool);
 
-    run_distribution_u8(&mut pool, instance.enumerate_adapters(ANY));
+    run_distribution_normal1d(&mut pool);
 
-    run_transmute(
-        &mut pool,
-        instance.enumerate_adapters(ANY),
-        pool_background.clone(),
-    );
+    run_distribution_u8(&mut pool);
 
-    run_palette(
-        &mut pool,
-        instance.enumerate_adapters(ANY),
-        pool_background.clone(),
-    );
+    run_transmute(&mut pool, pool_background.clone());
 
-    run_swap(
-        &mut pool,
-        instance.enumerate_adapters(ANY),
-        pool_background.clone(),
-    );
+    run_palette(&mut pool, pool_background.clone());
 
-    run_oklab(&mut pool, instance.enumerate_adapters(ANY));
+    run_swap(&mut pool, pool_background.clone());
+
+    run_oklab(&mut pool);
 }
 
 fn run_blending(
     pool: &mut Pool,
-    adapters: impl Iterator<Item = wgpu::Adapter>,
     (fg_key, foreground): (PoolKey, Descriptor),
     (bg_key, background): (PoolKey, Descriptor),
 ) {
@@ -114,33 +97,19 @@ fn run_blending(
 
     let (output, _outformat) = commands.output(result).expect("Valid for output");
 
-    let plan = commands.compile().expect("Could build command buffer");
-    let adapter = plan
-        .choose_adapter(adapters)
-        .expect("Did not find any adapter for executing the blend operation");
+    let result = run_once_with_output(
+        commands,
+        pool,
+        vec![(background, bg_key), (foreground, fg_key)],
+        retire_with_one_image(output),
+    );
 
-    let mut execution = plan
-        .launch(pool)
-        .bind(background, bg_key)
-        .unwrap()
-        .bind(foreground, fg_key)
-        .unwrap()
-        .launch(&adapter)
-        .expect("Launching failed");
-
-    while execution.is_running() {
-        let _wait_point = execution.step().expect("Shouldn't fail but");
-    }
-
-    let mut retire = execution.retire_gracefully(pool);
-
-    let image = retire.output(output).expect("A valid image output");
-    util::assert_reference(image, "composed.png.crc");
+    let image = pool.entry(result).unwrap();
+    util::assert_reference(image.into(), "composed.png.crc");
 }
 
 fn run_affine(
     pool: &mut Pool,
-    adapters: impl Iterator<Item = wgpu::Adapter>,
     (fg_key, foreground): (PoolKey, Descriptor),
     (bg_key, background): (PoolKey, Descriptor),
 ) {
@@ -174,35 +143,18 @@ fn run_affine(
 
     let (output_affine, _outformat) = commands.output(result_affine).expect("Valid for output");
 
-    let plan = commands.compile().expect("Could build command buffer");
-    let adapter = plan
-        .choose_adapter(adapters)
-        .expect("Did not find any adapter for executing the blend operation");
+    let result = run_once_with_output(
+        commands,
+        pool,
+        vec![(background, bg_key), (foreground, fg_key)],
+        retire_with_one_image(output_affine),
+    );
 
-    let mut execution = plan
-        .launch(pool)
-        .bind(background, bg_key)
-        .unwrap()
-        .bind(foreground, fg_key)
-        .unwrap()
-        .launch(&adapter)
-        .expect("Launching failed");
-
-    while execution.is_running() {
-        let _wait_point = execution.step().expect("Shouldn't fail but");
-    }
-
-    let mut retire = execution.retire_gracefully(pool);
-
-    let image_affine = retire.output(output_affine).expect("A valid image output");
-    util::assert_reference(image_affine, "affine.png.crc");
+    let image_affine = pool.entry(result).unwrap();
+    util::assert_reference(image_affine.into(), "affine.png.crc");
 }
 
-fn run_adaptation(
-    pool: &mut Pool,
-    adapters: impl Iterator<Item = wgpu::Adapter>,
-    (bg_key, background): (PoolKey, Descriptor),
-) {
+fn run_adaptation(pool: &mut Pool, (bg_key, background): (PoolKey, Descriptor)) {
     let mut commands = CommandBuffer::default();
 
     // Describe the pipeline:
@@ -221,33 +173,18 @@ fn run_adaptation(
 
     let (output_affine, _outformat) = commands.output(adapted).expect("Valid for output");
 
-    let plan = commands.compile().expect("Could build command buffer");
-    let adapter = plan
-        .choose_adapter(adapters)
-        .expect("Did not find any adapter for executing the blend operation");
+    let result = run_once_with_output(
+        commands,
+        pool,
+        vec![(background, bg_key)],
+        retire_with_one_image(output_affine),
+    );
 
-    let mut execution = plan
-        .launch(pool)
-        .bind(background, bg_key)
-        .unwrap()
-        .launch(&adapter)
-        .expect("Launching failed");
-
-    while execution.is_running() {
-        let _wait_point = execution.step().expect("Shouldn't fail but");
-    }
-
-    let mut retire = execution.retire_gracefully(pool);
-
-    let image_adapted = retire.output(output_affine).expect("A valid image output");
-    util::assert_reference(image_adapted, "adapted.png.crc");
+    let image_adapted = pool.entry(result).unwrap();
+    util::assert_reference(image_adapted.into(), "adapted.png.crc");
 }
 
-fn run_conversion(
-    pool: &mut Pool,
-    adapters: impl Iterator<Item = wgpu::Adapter>,
-    (orig_key, orig_descriptor): (PoolKey, Descriptor),
-) {
+fn run_conversion(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {
     // Pretend the input is BT709 instead of SRGB.
     let (bt_key, bt_descriptor) = {
         let mut bt = pool.allocate_like(orig_key);
@@ -267,7 +204,6 @@ fn run_conversion(
     let result = run_once_with_output(
         commands,
         pool,
-        adapters,
         vec![(input, bt_key)],
         retire_with_one_image(output),
     );
@@ -276,7 +212,7 @@ fn run_conversion(
     util::assert_reference(image_converted.into(), "convert_bt709.png.crc");
 }
 
-fn run_distribution(pool: &mut Pool, adapters: impl Iterator<Item = wgpu::Adapter>) {
+fn run_distribution(pool: &mut Pool) {
     let mut layout = image::DynamicImage::new_luma_a16(400, 400);
 
     let descriptor = Descriptor {
@@ -294,13 +230,7 @@ fn run_distribution(pool: &mut Pool, adapters: impl Iterator<Item = wgpu::Adapte
 
     let (output, _outformat) = commands.output(generated).expect("Valid for output");
 
-    let result = run_once_with_output(
-        commands,
-        pool,
-        adapters,
-        vec![],
-        retire_with_one_image(output),
-    );
+    let result = run_once_with_output(commands, pool, vec![], retire_with_one_image(output));
 
     let image_generated = pool.entry(result).unwrap();
 
@@ -315,7 +245,7 @@ fn run_distribution(pool: &mut Pool, adapters: impl Iterator<Item = wgpu::Adapte
     util::assert_reference_image(layout, "distribution_normal2d.png.crc");
 }
 
-fn run_distribution_normal1d(pool: &mut Pool, adapters: impl Iterator<Item = wgpu::Adapter>) {
+fn run_distribution_normal1d(pool: &mut Pool) {
     let mut layout = image::DynamicImage::new_luma_a16(400, 400);
 
     let descriptor = Descriptor {
@@ -333,13 +263,7 @@ fn run_distribution_normal1d(pool: &mut Pool, adapters: impl Iterator<Item = wgp
 
     let (output, _outformat) = commands.output(generated).expect("Valid for output");
 
-    let result = run_once_with_output(
-        commands,
-        pool,
-        adapters,
-        vec![],
-        retire_with_one_image(output),
-    );
+    let result = run_once_with_output(commands, pool, vec![], retire_with_one_image(output));
 
     let image_generated = pool.entry(result).unwrap();
 
@@ -354,7 +278,7 @@ fn run_distribution_normal1d(pool: &mut Pool, adapters: impl Iterator<Item = wgp
     util::assert_reference_image(layout, "distribution_normal1d.png.crc");
 }
 
-fn run_distribution_u8(pool: &mut Pool, adapters: impl Iterator<Item = wgpu::Adapter>) {
+fn run_distribution_u8(pool: &mut Pool) {
     let mut layout = image::DynamicImage::new_luma8(400, 400);
 
     let descriptor = Descriptor {
@@ -372,13 +296,7 @@ fn run_distribution_u8(pool: &mut Pool, adapters: impl Iterator<Item = wgpu::Ada
 
     let (output, _outformat) = commands.output(generated).expect("Valid for output");
 
-    let result = run_once_with_output(
-        commands,
-        pool,
-        adapters,
-        vec![],
-        retire_with_one_image(output),
-    );
+    let result = run_once_with_output(commands, pool, vec![], retire_with_one_image(output));
 
     let image_generated = pool.entry(result).unwrap();
 
@@ -393,11 +311,7 @@ fn run_distribution_u8(pool: &mut Pool, adapters: impl Iterator<Item = wgpu::Ada
     util::assert_reference_image(layout, "distribution_u8.png.crc");
 }
 
-fn run_transmute(
-    pool: &mut Pool,
-    adapters: impl Iterator<Item = wgpu::Adapter>,
-    (orig_key, orig_descriptor): (PoolKey, Descriptor),
-) {
+fn run_transmute(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {
     let mut commands = CommandBuffer::default();
     let (width, height) = orig_descriptor.size();
     let mut layout = image::DynamicImage::new_luma_a16(width, height);
@@ -413,7 +327,6 @@ fn run_transmute(
     let result = run_once_with_output(
         commands,
         pool,
-        adapters,
         vec![(input, orig_key)],
         retire_with_one_image(output),
     );
@@ -434,11 +347,7 @@ fn run_transmute(
     util::assert_reference_image(layout, "transmute.png.crc");
 }
 
-fn run_palette(
-    pool: &mut Pool,
-    adapters: impl Iterator<Item = wgpu::Adapter>,
-    (orig_key, orig_descriptor): (PoolKey, Descriptor),
-) {
+fn run_palette(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {
     let distribution_layout = {
         let layout = image::DynamicImage::new_rgba8(400, 400);
         Descriptor {
@@ -479,7 +388,6 @@ fn run_palette(
     let result = run_once_with_output(
         commands,
         pool,
-        adapters,
         vec![(input, orig_key)],
         retire_with_one_image(output),
     );
@@ -488,11 +396,7 @@ fn run_palette(
     util::assert_reference(image_sampled.into(), "palette.png.crc");
 }
 
-fn run_swap(
-    pool: &mut Pool,
-    adapters: impl Iterator<Item = wgpu::Adapter>,
-    (orig_key, orig_descriptor): (PoolKey, Descriptor),
-) {
+fn run_swap(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {
     use buffer::ColorChannel;
     let mut commands = CommandBuffer::default();
 
@@ -510,7 +414,6 @@ fn run_swap(
     let result = run_once_with_output(
         commands,
         pool,
-        adapters,
         vec![(input, orig_key)],
         retire_with_one_image(output),
     );
@@ -519,7 +422,7 @@ fn run_swap(
     util::assert_reference(image_swapped.into(), "swapped.png.crc");
 }
 
-fn run_oklab(pool: &mut Pool, adapters: impl Iterator<Item = wgpu::Adapter>) {
+fn run_oklab(pool: &mut Pool) {
     let mut commands = CommandBuffer::default();
 
     let output = image::DynamicImage::new_rgba8(400, 400);
@@ -573,13 +476,7 @@ fn run_oklab(pool: &mut Pool, adapters: impl Iterator<Item = wgpu::Adapter>) {
 
     let (output, _) = commands.output(converted).expect("Valid for output");
 
-    let result = run_once_with_output(
-        commands,
-        pool,
-        adapters,
-        vec![],
-        retire_with_one_image(output),
-    );
+    let result = run_once_with_output(commands, pool, vec![], retire_with_one_image(output));
 
     let image_show = pool.entry(result).unwrap();
     util::assert_reference(image_show.into(), "oklab.png.crc");
@@ -589,30 +486,37 @@ fn run_oklab(pool: &mut Pool, adapters: impl Iterator<Item = wgpu::Adapter>) {
 fn run_once_with_output<T>(
     commands: CommandBuffer,
     pool: &mut Pool,
-    adapters: impl Iterator<Item = wgpu::Adapter>,
     binds: impl IntoIterator<Item = (Register, PoolKey)>,
-    output: impl FnOnce(Retire) -> T,
+    output: impl FnOnce(&mut Retire) -> T,
 ) -> T {
     let plan = commands.compile().expect("Could build command buffer");
-    let adapter = plan
-        .choose_adapter(adapters)
-        .expect("Did not find any adapter for executing the blend operation");
+    let capabilities = Capabilities::from({
+        let mut devices = pool.iter_devices();
+        devices.next().expect("the pool to contain a device")
+    });
 
-    let mut launcher = plan.launch(pool);
+    let mut executable = plan
+        .lower_to(capabilities)
+        .expect("No extras beyond device required");
+    assert!(executable.from_pool(pool), "no device found in pool");
 
     for (target, key) in binds {
-        launcher = launcher.bind(target, key).unwrap();
+        let pool_img = pool.entry(key).unwrap();
+        executable.bind(target, pool_img).unwrap();
     }
 
-    let mut execution = launcher.launch(&adapter).expect("Launching failed");
+    let mut execution = executable.launch().expect("Launching failed");
 
     while execution.is_running() {
         let _wait_point = execution.step().expect("Shouldn't fail but");
     }
 
-    output(execution.retire_gracefully(pool))
+    let mut retire = execution.retire_gracefully(pool);
+    let result = output(&mut retire);
+    retire.finish();
+    result
 }
 
-fn retire_with_one_image(reg: Register) -> impl FnOnce(Retire) -> PoolKey {
-    move |mut retire: Retire| retire.output(reg).expect("Valid for output").key()
+fn retire_with_one_image(reg: Register) -> impl FnOnce(&mut Retire) -> PoolKey {
+    move |retire: &mut Retire| retire.output(reg).expect("Valid for output").key()
 }
