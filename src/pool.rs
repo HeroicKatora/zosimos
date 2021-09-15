@@ -111,7 +111,7 @@ impl Pool {
         Ok(GpuKey(gpu_key))
     }
 
-    pub fn iter_devices(&self) -> impl Iterator<Item=&'_ wgpu::Device> {
+    pub fn iter_devices(&self) -> impl Iterator<Item = &'_ wgpu::Device> {
         self.devices.iter().map(|kv| &kv.1.device)
     }
 
@@ -119,9 +119,7 @@ impl Pool {
         GpuKey(self.devices.insert(gpu))
     }
 
-    pub(crate) fn select_device(&mut self, caps: &program::Capabilities)
-        -> Option<(GpuKey, Gpu)>
-    {
+    pub(crate) fn select_device(&mut self, caps: &program::Capabilities) -> Option<(GpuKey, Gpu)> {
         let key = self.select_device_key(caps)?;
         let device = self.devices.remove(key).unwrap();
         Some((GpuKey(key), device))
@@ -130,7 +128,7 @@ impl Pool {
     fn select_device_key(&mut self, _: &program::Capabilities) -> Option<DefaultKey> {
         for (key, _) in &self.devices {
             // FIXME: check device against capabilities.
-            return Some(key)
+            return Some(key);
         }
         None
     }
@@ -234,7 +232,7 @@ impl ImageData {
         match self {
             ImageData::Host(canvas) => canvas.layout(),
             ImageData::Gpu { layout, .. } => layout,
-            ImageData::GpuTexture{ layout, .. } => layout,
+            ImageData::GpuTexture { layout, .. } => layout,
             ImageData::LateBound(layout) => layout,
         }
     }
@@ -411,7 +409,9 @@ impl fmt::Debug for ImageData {
         match self {
             ImageData::LateBound(layout) => write!(f, "ImageData::LayoutBound({:?})", layout),
             ImageData::Host(buffer) => write!(f, "ImageData::Host({:?})", buffer.layout()),
-            ImageData::GpuTexture { layout, .. } => write!(f, "ImageData::GpuTexture({:?})", layout),
+            ImageData::GpuTexture { layout, .. } => {
+                write!(f, "ImageData::GpuTexture({:?})", layout)
+            }
             ImageData::Gpu { layout, .. } => write!(f, "ImageData::GpuBuffer({:?})", layout),
         }
     }

@@ -618,9 +618,10 @@ impl ImagePoolPlan {
 
 impl Program {
     /// Choose an applicable adapter from one of the presented ones.
-    pub fn choose_adapter(&self, from: impl Iterator<Item = wgpu::Adapter>)
-        -> Result<wgpu::Adapter, MismatchError>
-    {
+    pub fn choose_adapter(
+        &self,
+        from: impl Iterator<Item = wgpu::Adapter>,
+    ) -> Result<wgpu::Adapter, MismatchError> {
         Program::minimum_adapter(from)
     }
 
@@ -727,7 +728,11 @@ impl Program {
         })
     }
 
-    fn lower_to_impl(&self, capabilities: &Capabilities, pool_plan: Option<&ImagePoolPlan>) -> Result<Encoder, LaunchError> {
+    fn lower_to_impl(
+        &self,
+        capabilities: &Capabilities,
+        pool_plan: Option<&ImagePoolPlan>,
+    ) -> Result<Encoder, LaunchError> {
         let mut encoder = Encoder::default();
         encoder.enable_capabilities(&capabilities);
 
@@ -900,7 +905,9 @@ impl Launcher<'_> {
 
         let capabilities = Capabilities::from(&device);
 
-        let mut encoder = self.program.lower_to_impl(&capabilities, Some(&self.pool_plan))?;
+        let mut encoder = self
+            .program
+            .lower_to_impl(&capabilities, Some(&self.pool_plan))?;
         let mut buffers = self.binds;
         encoder.extract_buffers(&mut buffers, &mut self.pool)?;
 

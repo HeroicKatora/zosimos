@@ -171,10 +171,15 @@ impl Executable {
         }
     }
 
-    pub fn bind(&mut self, reg: Register, mut pool_img: PoolImageMut<'_>)
-        -> Result<(), StartError>
-    {
-        let &idx = self.io_map.inputs.get(&reg)
+    pub fn bind(
+        &mut self,
+        reg: Register,
+        mut pool_img: PoolImageMut<'_>,
+    ) -> Result<(), StartError> {
+        let &idx = self
+            .io_map
+            .inputs
+            .get(&reg)
             .ok_or_else(|| StartError::InternalCommandError(line!()))?;
 
         let image = &mut self.buffers[idx];
@@ -196,7 +201,8 @@ impl Executable {
     }
 
     pub fn launch(mut self) -> Result<Execution, StartError> {
-        let gpu = self.gpu
+        let gpu = self
+            .gpu
             .ok_or_else(|| StartError::InternalCommandError(line!()))?;
 
         eprintln!("{:?}", &self.io_map.inputs);

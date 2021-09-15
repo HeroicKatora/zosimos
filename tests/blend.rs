@@ -26,8 +26,8 @@ fn integration() {
     const ANY: wgpu::BackendBit = wgpu::BackendBit::all();
     // FIXME: this drop SEGFAULTs for me...
     let instance = core::mem::ManuallyDrop::new(wgpu::Instance::new(ANY));
-    let adapter = Program::minimum_adapter(instance.enumerate_adapters(ANY))
-        .expect("to get an adapter");
+    let adapter =
+        Program::minimum_adapter(instance.enumerate_adapters(ANY)).expect("to get an adapter");
 
     let background = image::open(BACKGROUND).expect("Background image opened");
     let foreground = image::open(FOREGROUND).expect("Background image opened");
@@ -46,27 +46,13 @@ fn integration() {
     pool.request_device(&adapter, wgpu::DeviceDescriptor::default())
         .expect("to get a device");
 
-    run_blending(
-        &mut pool,
-        pool_foreground.clone(),
-        pool_background.clone(),
-    );
+    run_blending(&mut pool, pool_foreground.clone(), pool_background.clone());
 
-    run_affine(
-        &mut pool,
-        pool_foreground.clone(),
-        pool_background.clone(),
-    );
+    run_affine(&mut pool, pool_foreground.clone(), pool_background.clone());
 
-    run_adaptation(
-        &mut pool,
-        pool_background.clone(),
-    );
+    run_adaptation(&mut pool, pool_background.clone());
 
-    run_conversion(
-        &mut pool,
-        pool_background.clone(),
-    );
+    run_conversion(&mut pool, pool_background.clone());
 
     run_distribution(&mut pool);
 
@@ -74,20 +60,11 @@ fn integration() {
 
     run_distribution_u8(&mut pool);
 
-    run_transmute(
-        &mut pool,
-        pool_background.clone(),
-    );
+    run_transmute(&mut pool, pool_background.clone());
 
-    run_palette(
-        &mut pool,
-        pool_background.clone(),
-    );
+    run_palette(&mut pool, pool_background.clone());
 
-    run_swap(
-        &mut pool,
-        pool_background.clone(),
-    );
+    run_swap(&mut pool, pool_background.clone());
 
     run_oklab(&mut pool);
 }
@@ -123,11 +100,8 @@ fn run_blending(
     let result = run_once_with_output(
         commands,
         pool,
-        vec![
-            (background, bg_key),
-            (foreground, fg_key),
-        ],
-        retire_with_one_image(output)
+        vec![(background, bg_key), (foreground, fg_key)],
+        retire_with_one_image(output),
     );
 
     let image = pool.entry(result).unwrap();
@@ -172,21 +146,15 @@ fn run_affine(
     let result = run_once_with_output(
         commands,
         pool,
-        vec![
-            (background, bg_key),
-            (foreground, fg_key),
-        ],
-        retire_with_one_image(output_affine)
+        vec![(background, bg_key), (foreground, fg_key)],
+        retire_with_one_image(output_affine),
     );
 
     let image_affine = pool.entry(result).unwrap();
     util::assert_reference(image_affine.into(), "affine.png.crc");
 }
 
-fn run_adaptation(
-    pool: &mut Pool,
-    (bg_key, background): (PoolKey, Descriptor),
-) {
+fn run_adaptation(pool: &mut Pool, (bg_key, background): (PoolKey, Descriptor)) {
     let mut commands = CommandBuffer::default();
 
     // Describe the pipeline:
@@ -209,17 +177,14 @@ fn run_adaptation(
         commands,
         pool,
         vec![(background, bg_key)],
-        retire_with_one_image(output_affine)
+        retire_with_one_image(output_affine),
     );
 
     let image_adapted = pool.entry(result).unwrap();
     util::assert_reference(image_adapted.into(), "adapted.png.crc");
 }
 
-fn run_conversion(
-    pool: &mut Pool,
-    (orig_key, orig_descriptor): (PoolKey, Descriptor),
-) {
+fn run_conversion(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {
     // Pretend the input is BT709 instead of SRGB.
     let (bt_key, bt_descriptor) = {
         let mut bt = pool.allocate_like(orig_key);
@@ -265,12 +230,7 @@ fn run_distribution(pool: &mut Pool) {
 
     let (output, _outformat) = commands.output(generated).expect("Valid for output");
 
-    let result = run_once_with_output(
-        commands,
-        pool,
-        vec![],
-        retire_with_one_image(output),
-    );
+    let result = run_once_with_output(commands, pool, vec![], retire_with_one_image(output));
 
     let image_generated = pool.entry(result).unwrap();
 
@@ -303,12 +263,7 @@ fn run_distribution_normal1d(pool: &mut Pool) {
 
     let (output, _outformat) = commands.output(generated).expect("Valid for output");
 
-    let result = run_once_with_output(
-        commands,
-        pool,
-        vec![],
-        retire_with_one_image(output),
-    );
+    let result = run_once_with_output(commands, pool, vec![], retire_with_one_image(output));
 
     let image_generated = pool.entry(result).unwrap();
 
@@ -341,12 +296,7 @@ fn run_distribution_u8(pool: &mut Pool) {
 
     let (output, _outformat) = commands.output(generated).expect("Valid for output");
 
-    let result = run_once_with_output(
-        commands,
-        pool,
-        vec![],
-        retire_with_one_image(output),
-    );
+    let result = run_once_with_output(commands, pool, vec![], retire_with_one_image(output));
 
     let image_generated = pool.entry(result).unwrap();
 
@@ -361,10 +311,7 @@ fn run_distribution_u8(pool: &mut Pool) {
     util::assert_reference_image(layout, "distribution_u8.png.crc");
 }
 
-fn run_transmute(
-    pool: &mut Pool,
-    (orig_key, orig_descriptor): (PoolKey, Descriptor),
-) {
+fn run_transmute(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {
     let mut commands = CommandBuffer::default();
     let (width, height) = orig_descriptor.size();
     let mut layout = image::DynamicImage::new_luma_a16(width, height);
@@ -400,10 +347,7 @@ fn run_transmute(
     util::assert_reference_image(layout, "transmute.png.crc");
 }
 
-fn run_palette(
-    pool: &mut Pool,
-    (orig_key, orig_descriptor): (PoolKey, Descriptor),
-) {
+fn run_palette(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {
     let distribution_layout = {
         let layout = image::DynamicImage::new_rgba8(400, 400);
         Descriptor {
@@ -452,10 +396,7 @@ fn run_palette(
     util::assert_reference(image_sampled.into(), "palette.png.crc");
 }
 
-fn run_swap(
-    pool: &mut Pool,
-    (orig_key, orig_descriptor): (PoolKey, Descriptor),
-) {
+fn run_swap(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {
     use buffer::ColorChannel;
     let mut commands = CommandBuffer::default();
 
@@ -535,12 +476,7 @@ fn run_oklab(pool: &mut Pool) {
 
     let (output, _) = commands.output(converted).expect("Valid for output");
 
-    let result = run_once_with_output(
-        commands,
-        pool,
-        vec![],
-        retire_with_one_image(output),
-    );
+    let result = run_once_with_output(commands, pool, vec![], retire_with_one_image(output));
 
     let image_show = pool.entry(result).unwrap();
     util::assert_reference(image_show.into(), "oklab.png.crc");
@@ -559,7 +495,9 @@ fn run_once_with_output<T>(
         devices.next().expect("the pool to contain a device")
     });
 
-    let mut executable = plan.lower_to(capabilities).expect("No extras beyond device required");
+    let mut executable = plan
+        .lower_to(capabilities)
+        .expect("No extras beyond device required");
     assert!(executable.from_pool(pool), "no device found in pool");
 
     for (target, key) in binds {
