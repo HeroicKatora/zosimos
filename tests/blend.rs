@@ -48,21 +48,18 @@ fn integration() {
 
     run_blending(
         &mut pool,
-        instance.enumerate_adapters(ANY),
         pool_foreground.clone(),
         pool_background.clone(),
     );
 
     run_affine(
         &mut pool,
-        instance.enumerate_adapters(ANY),
         pool_foreground.clone(),
         pool_background.clone(),
     );
 
     run_adaptation(
         &mut pool,
-        instance.enumerate_adapters(ANY),
         pool_background.clone(),
     );
 
@@ -97,7 +94,6 @@ fn integration() {
 
 fn run_blending(
     pool: &mut Pool,
-    adapters: impl Iterator<Item = wgpu::Adapter>,
     (fg_key, foreground): (PoolKey, Descriptor),
     (bg_key, background): (PoolKey, Descriptor),
 ) {
@@ -124,36 +120,22 @@ fn run_blending(
 
     let (output, _outformat) = commands.output(result).expect("Valid for output");
 
-    let plan = commands
-        .compile()
-        .expect("Could build command buffer");
+    let result = run_once_with_output(
+        commands,
+        pool,
+        vec![
+            (background, bg_key),
+            (foreground, fg_key),
+        ],
+        retire_with_one_image(output)
+    );
 
-    let adapter = plan
-        .choose_adapter(adapters)
-        .expect("Did not find any adapter for executing the blend operation");
-
-    let mut execution = plan
-        .launch(pool)
-        .bind(background, bg_key)
-        .unwrap()
-        .bind(foreground, fg_key)
-        .unwrap()
-        .launch(&adapter)
-        .expect("Launching failed");
-
-    while execution.is_running() {
-        let _wait_point = execution.step().expect("Shouldn't fail but");
-    }
-
-    let mut retire = execution.retire_gracefully(pool);
-
-    let image = retire.output(output).expect("A valid image output");
-    util::assert_reference(image, "composed.png.crc");
+    let image = pool.entry(result).unwrap();
+    util::assert_reference(image.into(), "composed.png.crc");
 }
 
 fn run_affine(
     pool: &mut Pool,
-    adapters: impl Iterator<Item = wgpu::Adapter>,
     (fg_key, foreground): (PoolKey, Descriptor),
     (bg_key, background): (PoolKey, Descriptor),
 ) {
@@ -187,33 +169,22 @@ fn run_affine(
 
     let (output_affine, _outformat) = commands.output(result_affine).expect("Valid for output");
 
-    let plan = commands.compile().expect("Could build command buffer");
-    let adapter = plan
-        .choose_adapter(adapters)
-        .expect("Did not find any adapter for executing the blend operation");
+    let result = run_once_with_output(
+        commands,
+        pool,
+        vec![
+            (background, bg_key),
+            (foreground, fg_key),
+        ],
+        retire_with_one_image(output_affine)
+    );
 
-    let mut execution = plan
-        .launch(pool)
-        .bind(background, bg_key)
-        .unwrap()
-        .bind(foreground, fg_key)
-        .unwrap()
-        .launch(&adapter)
-        .expect("Launching failed");
-
-    while execution.is_running() {
-        let _wait_point = execution.step().expect("Shouldn't fail but");
-    }
-
-    let mut retire = execution.retire_gracefully(pool);
-
-    let image_affine = retire.output(output_affine).expect("A valid image output");
-    util::assert_reference(image_affine, "affine.png.crc");
+    let image_affine = pool.entry(result).unwrap();
+    util::assert_reference(image_affine.into(), "affine.png.crc");
 }
 
 fn run_adaptation(
     pool: &mut Pool,
-    adapters: impl Iterator<Item = wgpu::Adapter>,
     (bg_key, background): (PoolKey, Descriptor),
 ) {
     let mut commands = CommandBuffer::default();
@@ -234,26 +205,15 @@ fn run_adaptation(
 
     let (output_affine, _outformat) = commands.output(adapted).expect("Valid for output");
 
-    let plan = commands.compile().expect("Could build command buffer");
-    let adapter = plan
-        .choose_adapter(adapters)
-        .expect("Did not find any adapter for executing the blend operation");
+    let result = run_once_with_output(
+        commands,
+        pool,
+        vec![(background, bg_key)],
+        retire_with_one_image(output_affine)
+    );
 
-    let mut execution = plan
-        .launch(pool)
-        .bind(background, bg_key)
-        .unwrap()
-        .launch(&adapter)
-        .expect("Launching failed");
-
-    while execution.is_running() {
-        let _wait_point = execution.step().expect("Shouldn't fail but");
-    }
-
-    let mut retire = execution.retire_gracefully(pool);
-
-    let image_adapted = retire.output(output_affine).expect("A valid image output");
-    util::assert_reference(image_adapted, "adapted.png.crc");
+    let image_adapted = pool.entry(result).unwrap();
+    util::assert_reference(image_adapted.into(), "adapted.png.crc");
 }
 
 fn run_conversion(
