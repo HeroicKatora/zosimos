@@ -17,8 +17,15 @@ pub struct Shader {
 }
 
 impl Shader {
-    pub fn mgrid(width: f32, height: f32) {
-        todo!()
+    pub fn mgrid(width: f32, height: f32) -> Self {
+        Shader {
+            u_min: [0.0; 4],
+            u_max: [width, 0.0, 0.0, 0.0],
+            v_min: [0.0; 4],
+            v_max: [0.0, height, 0.0, 0.0],
+            uv_min: [0.0; 4],
+            uv_max: [0.0; 4],
+        }
     }
 }
 
