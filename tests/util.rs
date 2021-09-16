@@ -1,7 +1,14 @@
+// This is almost certainly not all used in all tests.
+#![allow(dead_code)]
 use image::GenericImageView;
 use std::hash::Hasher;
 use std::path::Path;
+
+use stealth_paint::command::{CommandBuffer, Register};
 use stealth_paint::pool::PoolImage;
+use stealth_paint::pool::{Pool, PoolKey};
+use stealth_paint::program::Capabilities;
+use stealth_paint::run::{Executable, Retire};
 
 const CRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/reference");
 const DEBUG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/debug");
@@ -52,4 +59,51 @@ pub fn assert_reference_image(image: image::DynamicImage, key: &str) {
             debug_path.display(),
         );
     }
+}
+
+pub fn run_once_with_output<T>(
+    commands: CommandBuffer,
+    pool: &mut Pool,
+    binds: impl IntoIterator<Item = (Register, PoolKey)>,
+    output: impl FnOnce(&mut Retire) -> T,
+) -> T {
+    let plan = commands.compile().expect("Could build command buffer");
+    let capabilities = Capabilities::from({
+        let mut devices = pool.iter_devices();
+        devices.next().expect("the pool to contain a device")
+    });
+
+    let executable = plan
+        .lower_to(capabilities)
+        .expect("No extras beyond device required");
+
+    run_executable_with_output(&executable, pool, binds, output)
+}
+
+pub fn run_executable_with_output<T>(
+    executable: &Executable,
+    pool: &mut Pool,
+    binds: impl IntoIterator<Item = (Register, PoolKey)>,
+    output: impl FnOnce(&mut Retire) -> T,
+) -> T {
+    let mut environment = executable.from_pool(pool).expect("no device found in pool");
+
+    for (target, key) in binds {
+        environment.bind(target, key).unwrap();
+    }
+
+    let mut execution = executable.launch(environment).expect("Launching failed");
+
+    while execution.is_running() {
+        let _wait_point = execution.step().expect("Shouldn't fail but");
+    }
+
+    let mut retire = execution.retire_gracefully(pool);
+    let result = output(&mut retire);
+    retire.finish();
+    result
+}
+
+pub fn retire_with_one_image(reg: Register) -> impl FnOnce(&mut Retire) -> PoolKey {
+    move |retire: &mut Retire| retire.output(reg).expect("Valid for output").key()
 }
