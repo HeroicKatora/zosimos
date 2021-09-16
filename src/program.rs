@@ -718,7 +718,7 @@ impl Program {
             .collect();
 
         Ok(run::Executable {
-            instructions: encoder.instructions,
+            instructions: encoder.instructions.into(),
             binary_data: encoder.binary_data,
             gpu: None,
             descriptors: run::Descriptors::default(),
@@ -916,7 +916,7 @@ impl Launcher<'_> {
         encoder.finalize()?;
 
         let init = run::InitialState {
-            instructions: encoder.instructions,
+            instructions: encoder.instructions.into(),
             device,
             queue,
             buffers,

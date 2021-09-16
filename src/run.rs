@@ -1,5 +1,6 @@
 use core::{iter::once, num::NonZeroU32, pin::Pin};
-use std::collections::HashMap;
+use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
 
 use crate::buffer::{BufferLayout, Descriptor, Texel};
 use crate::command::Register;
@@ -10,13 +11,18 @@ use wgpu::{Device, Queue};
 
 /// The code of a linear pipeline, lowered to a particular set of device capabilities.
 ///
+/// The struct is created by calling [`lower_to`] on [`Program`].
+///
+/// [`lower_to`]: crate::program::Program::lower_to()
+/// [`Program`]: crate::program::Program
+///
 /// This contains the program and a partial part of the inputs and the device to execute on. There
 /// are two main ways to instantiate this struct: By lowering a `Program` or by softly retiring an
 /// existing, running `Execution`. In the later case we might be able to salvage parts of the
 /// execution such that it may be re-used in a later run on the same device.
 pub struct Executable {
     /// The list of instructions to perform.
-    pub(crate) instructions: Vec<Low>,
+    pub(crate) instructions: Arc<[Low]>,
     /// The host-side data which is used to initialize buffers.
     pub(crate) binary_data: Vec<u8>,
     /// The device, if it has already been supplied.
@@ -31,6 +37,22 @@ pub struct Executable {
     pub(crate) capabilities: Capabilities,
 }
 
+/// Configures devices and input/output buffers for an executable.
+///
+/// This is created via the ``
+///
+/// This is merely a configuration structure. It does not modify the pools passed in until the
+/// executable is actually launched. An environment collects references (keys) to the inner buffers
+/// until it is time.
+///
+/// Note that the type system does not stop
+pub struct Environment<'pool> {
+    pool: &'pool mut Pool,
+    gpu: Gpu,
+    buffers: Vec<Image>,
+    inputs: HashMap<Register, usize>,
+}
+
 /// A running `Executable`.
 pub struct Execution {
     pub(crate) machine: Machine,
@@ -42,7 +64,7 @@ pub struct Execution {
 }
 
 pub(crate) struct InitialState {
-    pub(crate) instructions: Vec<Low>,
+    pub(crate) instructions: Arc<[Low]>,
     pub(crate) device: Device,
     pub(crate) queue: Queue,
     pub(crate) buffers: Vec<Image>,
@@ -113,7 +135,7 @@ pub struct Retire<'pool> {
 }
 
 pub(crate) struct Machine {
-    instructions: Vec<Low>,
+    instructions: Arc<[Low]>,
     instruction_pointer: usize,
 }
 
@@ -159,32 +181,130 @@ impl Image {
             key: None,
         }
     }
+
+    pub(crate) fn clone_like(&self) -> Self {
+        Image {
+            data: ImageData::LateBound(self.data.layout().clone()),
+            texel: self.texel.clone(),
+            key: self.key,
+        }
+    }
 }
 
 impl Executable {
-    pub fn from_pool(&mut self, pool: &mut Pool) -> bool {
-        if let Some((_, device)) = pool.select_device(&self.capabilities) {
-            self.gpu = Some(device);
-            true
-        } else {
-            false
-        }
+    pub fn from_pool<'p>(&self, pool: &'p mut Pool) -> Option<Environment<'p>> {
+        let (_, gpu) = pool.select_device(&self.capabilities)?;
+        Some(Environment {
+            pool,
+            gpu,
+            buffers: self.buffers.iter().map(Image::clone_like).collect(),
+            inputs: self.io_map.inputs.clone(),
+        })
     }
 
+    pub fn launch(&self, mut env: Environment) -> Result<Execution, StartError> {
+        self.check_satisfiable(&mut env)?;
+
+        Ok(Execution {
+            machine: Machine::new(Arc::clone(&self.instructions)),
+            gpu: env.gpu,
+            descriptors: Descriptors::default(),
+            command_encoder: None,
+            buffers: env.buffers,
+            binary_data: self.binary_data.clone(),
+        })
+    }
+
+    /// Run the executable but take all by value.
+    pub fn launch_once(self, mut env: Environment) -> Result<Execution, StartError> {
+        self.check_satisfiable(&mut env)?;
+        Ok(Execution {
+            machine: Machine::new(Arc::clone(&self.instructions)),
+            gpu: env.gpu,
+            descriptors: self.descriptors,
+            command_encoder: None,
+            buffers: env.buffers,
+            binary_data: self.binary_data,
+        })
+    }
+
+    /// Run validation testing if everything is read to launch.
+    ///
+    /// Note a mad lad could have passed a completely different environment so we, once again,
+    /// validate that the buffer descriptors are okay.
+    fn check_satisfiable(&self, env: &mut Environment) -> Result<(), StartError> {
+        let mut used_keys = HashSet::new();
+        for (_, &input) in &self.io_map.inputs {
+            let buffer = env.buffers.get(input)
+                .ok_or_else(|| StartError::InternalCommandError(line!()))?;
+            // It's okay to index our own state with our own index.
+            let reference = &self.buffers[input];
+
+            if reference.data.layout() != buffer.data.layout() {
+                return Err(StartError::InternalCommandError(line!()));
+            }
+
+            if reference.texel != buffer.texel {
+                // FIXME: not quite such an 'unknown' error.
+                return Err(StartError::InternalCommandError(line!()));
+            }
+
+            // Oh, this image is always already bound? Cool.
+            if !matches!(buffer.data, ImageData::LateBound(_)) {
+                continue;
+            }
+
+            let key = match buffer.key {
+                None => return Err(StartError::InternalCommandError(line!())),
+                Some(key) => key,
+            };
+
+            // FIXME: we could catch this much earlier.
+            if !used_keys.insert(key) {
+                return Err(StartError::InternalCommandError(line!()));
+            }
+
+            if env.pool.entry(key).is_none() {
+                return Err(StartError::InternalCommandError(line!()));
+            }
+        }
+
+        // Okay, checks done, let's patch up the state.
+        for (_, &input) in &self.io_map.inputs {
+            let buffer = &mut env.buffers[input];
+
+            // Unwrap okay, check this earlier.
+            let key = buffer.key.unwrap();
+            let mut pool_img = env.pool.entry(key).unwrap();
+
+            pool_img.trade(&mut buffer.data);
+        }
+
+        for (_, &output) in &self.io_map.outputs {
+            env.buffers[output].data.host_allocate();
+        }
+
+        Ok(())
+    }
+}
+
+impl Environment<'_> {
     pub fn bind(
         &mut self,
         reg: Register,
-        mut pool_img: PoolImageMut<'_>,
+        key: PoolKey,
     ) -> Result<(), StartError> {
-        let &idx = self
-            .io_map
-            .inputs
+        let &idx = self.inputs
             .get(&reg)
             .ok_or_else(|| StartError::InternalCommandError(line!()))?;
 
-        let image = &mut self.buffers[idx];
+        let pool_img = self.pool
+            .entry(key)
+            .ok_or_else(|| StartError::InternalCommandError(line!()))?;
 
+        let image = &mut self.buffers[idx];
         let descriptor = pool_img.descriptor();
+
         if descriptor.layout != *image.data.layout() {
             return Err(StartError::InternalCommandError(line!()));
         }
@@ -194,37 +314,9 @@ impl Executable {
             return Err(StartError::InternalCommandError(line!()));
         }
 
-        pool_img.trade(&mut image.data);
         image.key = Some(pool_img.key());
 
         Ok(())
-    }
-
-    pub fn launch(mut self) -> Result<Execution, StartError> {
-        let gpu = self
-            .gpu
-            .ok_or_else(|| StartError::InternalCommandError(line!()))?;
-
-        eprintln!("{:?}", &self.io_map.inputs);
-        for (_, &input) in &self.io_map.inputs {
-            if matches!(self.buffers[input].data, ImageData::LateBound(_)) {
-                // FIXME: should be an 'unbound image' error.
-                return Err(StartError::InternalCommandError(line!()));
-            }
-        }
-
-        for (_, &output) in &self.io_map.outputs {
-            self.buffers[output].data.host_allocate();
-        }
-
-        Ok(Execution {
-            machine: Machine::new(self.instructions),
-            gpu: gpu,
-            descriptors: self.descriptors,
-            command_encoder: None,
-            buffers: self.buffers,
-            binary_data: self.binary_data,
-        })
     }
 }
 
@@ -992,7 +1084,7 @@ impl Descriptors {
 }
 
 impl Machine {
-    pub(crate) fn new(instructions: Vec<Low>) -> Self {
+    pub(crate) fn new(instructions: Arc<[Low]>) -> Self {
         Machine {
             instructions,
             instruction_pointer: 0,

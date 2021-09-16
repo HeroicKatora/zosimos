@@ -495,17 +495,18 @@ fn run_once_with_output<T>(
         devices.next().expect("the pool to contain a device")
     });
 
-    let mut executable = plan
+    let executable = plan
         .lower_to(capabilities)
         .expect("No extras beyond device required");
-    assert!(executable.from_pool(pool), "no device found in pool");
+
+    let mut environment = executable.from_pool(pool)
+        .expect("no device found in pool");
 
     for (target, key) in binds {
-        let pool_img = pool.entry(key).unwrap();
-        executable.bind(target, pool_img).unwrap();
+        environment.bind(target, key).unwrap();
     }
 
-    let mut execution = executable.launch().expect("Launching failed");
+    let mut execution = executable.launch(environment).expect("Launching failed");
 
     while execution.is_running() {
         let _wait_point = execution.step().expect("Shouldn't fail but");
