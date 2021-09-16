@@ -6,14 +6,15 @@
 //! FIXME: This stops after a single test failure. It would be more useful to have our own harness
 //! here and do all of the tests, as separate as possible, recovering by recreating the whole state
 //! when a test has failed (because that could have corrupted shared state).
-use stealth_paint::buffer::{self, Descriptor, Whitepoint};
-use stealth_paint::command::{self, CommandBuffer, Rectangle, Register};
-use stealth_paint::pool::{Pool, PoolKey};
-use stealth_paint::program::{Capabilities, Program};
-use stealth_paint::run::Retire;
-
 #[path = "util.rs"]
 mod util;
+
+use stealth_paint::buffer::{self, Descriptor, Whitepoint};
+use stealth_paint::command::{self, CommandBuffer, Rectangle};
+use stealth_paint::pool::{Pool, PoolKey};
+use stealth_paint::program::Program;
+
+use self::util::{run_once_with_output, retire_with_one_image};
 
 const BACKGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/background.png");
 const FOREGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/foreground.png");
@@ -480,44 +481,4 @@ fn run_oklab(pool: &mut Pool) {
 
     let image_show = pool.entry(result).unwrap();
     util::assert_reference(image_show.into(), "oklab.png.crc");
-}
-
-/* Utility methods  */
-fn run_once_with_output<T>(
-    commands: CommandBuffer,
-    pool: &mut Pool,
-    binds: impl IntoIterator<Item = (Register, PoolKey)>,
-    output: impl FnOnce(&mut Retire) -> T,
-) -> T {
-    let plan = commands.compile().expect("Could build command buffer");
-    let capabilities = Capabilities::from({
-        let mut devices = pool.iter_devices();
-        devices.next().expect("the pool to contain a device")
-    });
-
-    let executable = plan
-        .lower_to(capabilities)
-        .expect("No extras beyond device required");
-
-    let mut environment = executable.from_pool(pool)
-        .expect("no device found in pool");
-
-    for (target, key) in binds {
-        environment.bind(target, key).unwrap();
-    }
-
-    let mut execution = executable.launch(environment).expect("Launching failed");
-
-    while execution.is_running() {
-        let _wait_point = execution.step().expect("Shouldn't fail but");
-    }
-
-    let mut retire = execution.retire_gracefully(pool);
-    let result = output(&mut retire);
-    retire.finish();
-    result
-}
-
-fn retire_with_one_image(reg: Register) -> impl FnOnce(&mut Retire) -> PoolKey {
-    move |retire: &mut Retire| retire.output(reg).expect("Valid for output").key()
 }
