@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::buffer::{BufferLayout, Descriptor, Texel};
 use crate::command::Register;
-use crate::pool::{ImageData, Pool, PoolImage, PoolImageMut, PoolKey};
+use crate::pool::{ImageData, Pool, PoolImage, PoolKey};
 use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
 
 use wgpu::{Device, Queue};
@@ -25,8 +25,6 @@ pub struct Executable {
     pub(crate) instructions: Arc<[Low]>,
     /// The host-side data which is used to initialize buffers.
     pub(crate) binary_data: Vec<u8>,
-    /// The device, if it has already been supplied.
-    pub(crate) gpu: Option<Gpu>,
     /// All device related state which we have preserved.
     pub(crate) descriptors: Descriptors,
     /// Input/Output buffers used for execution.
@@ -39,13 +37,14 @@ pub struct Executable {
 
 /// Configures devices and input/output buffers for an executable.
 ///
-/// This is created via the ``
+/// This is created via the [`Executable::from_pool`].
 ///
 /// This is merely a configuration structure. It does not modify the pools passed in until the
 /// executable is actually launched. An environment collects references (keys) to the inner buffers
 /// until it is time.
 ///
-/// Note that the type system does not stop
+/// Note that the type system does not stop you from submitting it to a different program but it
+/// may be rejected if the inputs and device capabilities differ.
 pub struct Environment<'pool> {
     pool: &'pool mut Pool,
     gpu: Gpu,

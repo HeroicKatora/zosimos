@@ -720,7 +720,6 @@ impl Program {
         Ok(run::Executable {
             instructions: encoder.instructions.into(),
             binary_data: encoder.binary_data,
-            gpu: None,
             descriptors: run::Descriptors::default(),
             buffers,
             capabilities,
