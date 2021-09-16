@@ -1,6 +1,6 @@
 use core::{iter::once, num::NonZeroU32, pin::Pin};
-use std::sync::Arc;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::buffer::{BufferLayout, Descriptor, Texel};
 use crate::command::Register;
@@ -234,7 +234,9 @@ impl Executable {
     fn check_satisfiable(&self, env: &mut Environment) -> Result<(), StartError> {
         let mut used_keys = HashSet::new();
         for (_, &input) in &self.io_map.inputs {
-            let buffer = env.buffers.get(input)
+            let buffer = env
+                .buffers
+                .get(input)
                 .ok_or_else(|| StartError::InternalCommandError(line!()))?;
             // It's okay to index our own state with our own index.
             let reference = &self.buffers[input];
@@ -288,16 +290,14 @@ impl Executable {
 }
 
 impl Environment<'_> {
-    pub fn bind(
-        &mut self,
-        reg: Register,
-        key: PoolKey,
-    ) -> Result<(), StartError> {
-        let &idx = self.inputs
+    pub fn bind(&mut self, reg: Register, key: PoolKey) -> Result<(), StartError> {
+        let &idx = self
+            .inputs
             .get(&reg)
             .ok_or_else(|| StartError::InternalCommandError(line!()))?;
 
-        let pool_img = self.pool
+        let pool_img = self
+            .pool
             .entry(key)
             .ok_or_else(|| StartError::InternalCommandError(line!()))?;
 

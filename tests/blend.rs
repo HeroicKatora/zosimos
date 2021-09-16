@@ -14,7 +14,7 @@ use stealth_paint::command::{self, CommandBuffer, Rectangle};
 use stealth_paint::pool::{Pool, PoolKey};
 use stealth_paint::program::Program;
 
-use self::util::{run_once_with_output, retire_with_one_image};
+use self::util::{retire_with_one_image, run_once_with_output};
 
 const BACKGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/background.png");
 const FOREGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/foreground.png");

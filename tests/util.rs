@@ -4,10 +4,10 @@ use image::GenericImageView;
 use std::hash::Hasher;
 use std::path::Path;
 
-use stealth_paint::pool::PoolImage;
 use stealth_paint::command::{CommandBuffer, Register};
-use stealth_paint::program::Capabilities;
+use stealth_paint::pool::PoolImage;
 use stealth_paint::pool::{Pool, PoolKey};
+use stealth_paint::program::Capabilities;
 use stealth_paint::run::{Executable, Retire};
 
 const CRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/reference");
@@ -77,12 +77,7 @@ pub fn run_once_with_output<T>(
         .lower_to(capabilities)
         .expect("No extras beyond device required");
 
-    run_executable_with_output(
-        &executable,
-        pool,
-        binds,
-        output
-    )
+    run_executable_with_output(&executable, pool, binds, output)
 }
 
 pub fn run_executable_with_output<T>(
@@ -91,9 +86,7 @@ pub fn run_executable_with_output<T>(
     binds: impl IntoIterator<Item = (Register, PoolKey)>,
     output: impl FnOnce(&mut Retire) -> T,
 ) -> T {
-
-    let mut environment = executable.from_pool(pool)
-        .expect("no device found in pool");
+    let mut environment = executable.from_pool(pool).expect("no device found in pool");
 
     for (target, key) in binds {
         environment.bind(target, key).unwrap();

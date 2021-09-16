@@ -3,11 +3,11 @@
 #[path = "util.rs"]
 mod util;
 
-use stealth_paint::pool::Pool;
 use stealth_paint::command::{self, CommandBuffer};
+use stealth_paint::pool::Pool;
 use stealth_paint::program::{Capabilities, Program};
 
-use self::util::{run_executable_with_output, retire_with_one_image};
+use self::util::{retire_with_one_image, run_executable_with_output};
 
 const BACKGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/background.png");
 const FOREGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/foreground.png");
@@ -63,8 +63,7 @@ fn integration() {
         .inscribe(background, placement, foreground)
         .expect("Valid to inscribe");
 
-    let (output, _outformat) = commands.output(result)
-        .expect("Valid for output");
+    let (output, _outformat) = commands.output(result).expect("Valid for output");
 
     let plan = commands.compile().expect("Could build command buffer");
     let capabilities = Capabilities::from({
