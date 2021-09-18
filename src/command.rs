@@ -312,6 +312,71 @@ pub struct Palette {
     // FIXME: wrapping?
 }
 
+/// Calculate a first derivative.
+pub struct Derivative {
+    pub method: DerivativeMethod,
+    pub direction: Direction,
+}
+
+pub enum Direction {
+    /// Along the height of the image.
+    Height,
+    /// Along the width of the image.
+    Width,
+}
+
+pub enum DerivativeMethod {
+    /// A 2-sized filter with diagonal basis direction.
+    ///     [[1 0] [0 -1]]
+    ///     [[0 1] [-1 0]]
+    Roberts,
+    /// The result of derivative with average smoothing.
+    Prewitt,
+    /// The result of derivative with weighted smoothing.
+    Sobel,
+    /// The Scharr 3×3 operator, floating point precision with the error bound of the paper.
+    ///
+    /// There is a single numerically consistent choice in differentiation but the smoothing for
+    /// rotational symmetry is:
+    ///     [46.84 162.32 46.84]/256
+    ///
+    /// It is optimized to most accurately model the perfect transfer function `pi·i·w` (the first
+    /// derivative operator) while providing the ability to steer the direction. That is, you can
+    /// calculate the derivative into any direction by composing Dx and Dy. The weights for this
+    /// optimization had been `w(k) = ∏i:(1 to D) cos^4(π/2·k_i)` where `D = 2` in the flat image
+    /// case.
+    ///
+    /// It's a bit constricting to use it here because on the GPU integer arithmetic is _NOT_ the
+    /// most efficient form of computation (which is the motivation behind using a quantized
+    /// integer matrix). They nevertheless exist for compatibility reasons.
+    ///
+    /// Reference: Scharr's dissertation, Optimale Operatoren in der Digitalen Bildverarbeitung
+    /// <https://doi.org/10.11588/heidok.00000962>
+    /// <http://archiv.ub.uni-heidelberg.de/volltextserver/962/1/Diss.pdf>
+    Scharr3,
+    /// A 4-tab derivative operator by Scharr.
+    ///     Derivative: [77.68 139.48 …]/256
+    ///     Smoothing: [16.44 111.56 …]/256
+    Scharr4,
+    /// A 5-tab derivative by Scharr.
+    ///     Derivative: [21.27 85.46 0 …]/256
+    ///     Smoothing: [5.91 61.77 120.64 …]/256
+    Scharr5,
+    /// The 4-bit approximated Scharr operator.
+    ///     1/32 [3 10 3]^T [1 0 -1]
+    ///
+    /// This is provided for compatibility! For accuracy you may instead prefer to use Scharr3 or
+    /// Schar5Tab.
+    Scharr3to4Bit,
+    /// A non-smoothed 5-tab derivative.
+    ///     [-0.262 1.525 0 -1.525 0.262]
+    Scharr5Tab,
+    /// The 8-bit approximated Scharr operator.
+    ///
+    /// This is provided for compatibility! For accuracy you may instead prefer to use Scharr3.
+    Scharr3To8Bit,
+}
+
 #[derive(Debug)]
 pub struct CommandError {
     inner: CommandErrorKind,

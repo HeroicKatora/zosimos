@@ -3,6 +3,7 @@ use crate::program::BufferInitContent;
 use std::borrow::Cow;
 
 pub mod bilinear;
+pub mod box3;
 pub mod distribution_normal2d;
 pub mod inject;
 pub mod oklab;
@@ -52,6 +53,8 @@ pub(crate) enum FragmentShaderKey {
     Inject,
     /// A shader transforming between XYZ and Oklab color space.
     OklabTransform(bool),
+    /// A convolution with a 3-by-3 box function.
+    Box3,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -63,6 +66,7 @@ pub(crate) enum FragmentShader {
     Bilinear(self::bilinear::Shader),
     Inject(self::inject::Shader),
     Oklab(self::oklab::Shader),
+    Box3(self::box3::Shader),
 }
 
 impl FragmentShader {
@@ -75,6 +79,7 @@ impl FragmentShader {
             FragmentShader::Bilinear(bilinear) => bilinear,
             FragmentShader::Inject(inject) => inject,
             FragmentShader::Oklab(oklab) => oklab,
+            FragmentShader::Box3(box3) => box3,
         }
     }
 }
