@@ -41,7 +41,10 @@ impl Shader {
 impl FragmentShaderData for Shader {
     /// The unique key identifying this shader module.
     fn key(&self) -> Option<FragmentShaderKey> {
-        Some(FragmentShaderKey::OklabTransform(true))
+        Some(FragmentShaderKey::OklabTransform(match self.direction {
+            Direction::Encode => true,
+            Direction::Decode => false,
+        }))
     }
 
     /// The SPIR-V shader source code.
