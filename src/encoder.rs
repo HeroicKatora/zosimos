@@ -911,7 +911,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(4*4*2),
+                        min_binding_size: NonZeroU64::new(128),
                         ty: wgpu::BufferBindingType::Uniform,
                     },
                     count: None,
