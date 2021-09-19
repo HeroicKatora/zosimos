@@ -775,6 +775,14 @@ impl ColMatrix {
 
 #[rustfmt::skip]
 impl RowMatrix {
+    pub(crate) fn with_outer_product(a: [f32; 3], b: [f32; 3]) -> Self {
+        RowMatrix([
+            a[0]*b[0], a[0]*b[1], a[0]*b[2],
+            a[1]*b[0], a[1]*b[1], a[1]*b[2],
+            a[2]*b[0], a[2]*b[1], a[2]*b[2],
+        ])
+    }
+
     pub(crate) fn new(rows: [f32; 9]) -> RowMatrix {
         RowMatrix(rows)
     }
@@ -784,6 +792,16 @@ impl RowMatrix {
             x, 0., 0.,
             0., y, 0.,
             0., 0., z,
+        ])
+    }
+
+    pub(crate) fn transpose(self) -> Self {
+        let [a, b, c, d, e, f, g, h, i] = self.into_inner();
+
+        RowMatrix([
+            a, d, g,
+            b, e, h,
+            c, f, i,
         ])
     }
 
@@ -1083,4 +1101,11 @@ impl Descriptor {
             texel: Texel::with_srgb_image(image),
         }
     }
+}
+
+#[test]
+fn matrix_ops() {
+    let mat = RowMatrix::with_outer_product([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]);
+
+    assert_eq!(mat, mat.transpose().transpose());
 }

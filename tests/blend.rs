@@ -68,6 +68,8 @@ fn integration() {
     run_swap(&mut pool, pool_background.clone());
 
     run_oklab(&mut pool);
+
+    run_derivative(&mut pool, pool_background.clone());
 }
 
 fn run_blending(
@@ -481,4 +483,47 @@ fn run_oklab(pool: &mut Pool) {
 
     let image_show = pool.entry(result).unwrap();
     util::assert_reference(image_show.into(), "oklab.png.crc");
+}
+
+fn run_derivative(pool: &mut Pool, (bg_key, background): (PoolKey, Descriptor)) {
+    const METHODS: &[command::DerivativeMethod] = &[
+        command::DerivativeMethod::Scharr3,
+        command::DerivativeMethod::Scharr3To4Bit,
+        command::DerivativeMethod::Scharr3To8Bit,
+        command::DerivativeMethod::Prewitt,
+        command::DerivativeMethod::Sobel,
+    ];
+
+    for method in METHODS {
+        let mut commands = CommandBuffer::default();
+
+        // Describe the pipeline:
+        // 0: in (background)
+        // 1: derivative(0, derive)
+        // 2: out(2)
+        let background = commands.input(background.clone()).unwrap();
+
+        let derived = commands
+            .derivative(
+                background,
+                command::Derivative {
+                    method: method.clone(),
+                    direction: command::Direction::Width,
+                },
+            )
+            .unwrap();
+
+        let (output_derived, _outformat) = commands.output(derived).expect("Valid for output");
+
+        let result = run_once_with_output(
+            commands,
+            pool,
+            vec![(background, bg_key)],
+            retire_with_one_image(output_derived),
+        );
+
+        let image_derived = pool.entry(result).unwrap();
+        let reference = format!("derived_{:?}.png.crc", method);
+        util::assert_reference(image_derived.into(), &reference);
+    }
 }

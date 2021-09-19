@@ -112,6 +112,12 @@ fn main() -> Result<(), BuildError> {
             entry: "oklab_decode",
             name_overwrite: Some("oklab_decode"),
         },
+        SimpleSource {
+            path: "src/shaders/box3.frag",
+            kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
+        },
     ];
 
     let mut compiler = Compiler::new().unwrap();
