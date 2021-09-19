@@ -653,19 +653,34 @@ impl Program {
         let ALL_TEXTURE_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::COPY_DST
             | wgpu::TextureUsages::COPY_SRC
             | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT;
+
+        #[allow(non_snake_case)]
+        let STAGE_TEXTURE_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::STORAGE_BINDING
             | wgpu::TextureUsages::RENDER_ATTACHMENT;
 
         while let Some(adapter) = from.next() {
+            eprintln!("{:?}", adapter);
             // FIXME: check limits.
             // FIXME: collect required texture formats from `self.textures`
             let basic_format =
                 adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8UnormSrgb);
             if !basic_format.allowed_usages.contains(ALL_TEXTURE_USAGE) {
+                eprintln!("No rgba8 support {:?}", basic_format.allowed_usages);
                 continue;
             }
 
-            from.for_each(drop);
+            let storage_format =
+                adapter.get_texture_format_features(wgpu::TextureFormat::R32Uint);
+            if !storage_format.allowed_usages.contains(STAGE_TEXTURE_USAGE) {
+                eprintln!("No r32uint storage support {:?}", basic_format.allowed_usages);
+                continue;
+            }
+
+            from.for_each(|ad| eprintln!("{:?}", ad));
             return Ok(adapter);
         }
 
@@ -674,9 +689,14 @@ impl Program {
 
     /// Return a descriptor for a device that's capable of executing the program.
     pub fn device_descriptor(&self) -> wgpu::DeviceDescriptor<'static> {
+        Self::minimal_device_descriptor()
+    }
+
+    pub fn minimal_device_descriptor() -> wgpu::DeviceDescriptor<'static> {
         wgpu::DeviceDescriptor {
             label: None,
-            features: wgpu::Features::empty(),
+            features: wgpu::Features::SPIRV_SHADER_PASSTHROUGH
+                | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
             limits: wgpu::Limits::default(),
         }
     }

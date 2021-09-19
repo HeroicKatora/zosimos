@@ -68,19 +68,19 @@ layout (location = 0) out vec4 f_color;
 
 /* Not all those bindings will be bound!
  */
-layout (set = 1, binding = 0, r32ui) uniform restrict readonly uimage2D image_r8ui;
-layout (set = 1, binding = 1, r32ui) uniform restrict readonly uimage2D image_r16ui;
-layout (set = 1, binding = 2, r32ui) uniform restrict readonly uimage2D image_r32ui;
-layout (set = 1, binding = 3, rgba16ui) uniform restrict readonly uimage2D image_rgba16ui;
-layout (set = 1, binding = 4, rgba32ui) uniform restrict readonly uimage2D image_rgba32ui;
+layout (set = 1, binding = 0, r32ui) uniform restrict uimage2D image_r8ui;
+layout (set = 1, binding = 1, r32ui) uniform restrict uimage2D image_r16ui;
+layout (set = 1, binding = 2, r32ui) uniform restrict uimage2D image_r32ui;
+layout (set = 1, binding = 3, rgba16ui) uniform restrict uimage2D image_rgba16ui;
+layout (set = 1, binding = 4, rgba32ui) uniform restrict uimage2D image_rgba32ui;
 
 /* Output images. Same as input but writeonly instead.
  */
-layout (set = 1, binding = 16, r32ui) uniform restrict writeonly uimage2D oimage_r8ui;
-layout (set = 1, binding = 17, r32ui) uniform restrict writeonly uimage2D oimage_r16ui;
-layout (set = 1, binding = 18, r32ui) uniform restrict writeonly uimage2D oimage_r32ui;
-layout (set = 1, binding = 19, rgba16ui) uniform restrict writeonly uimage2D oimage_rgba16ui;
-layout (set = 1, binding = 20, rgba32ui) uniform restrict writeonly uimage2D oimage_rgba32ui;
+layout (set = 1, binding = 16, r32ui) uniform restrict uimage2D oimage_r8ui;
+layout (set = 1, binding = 17, r32ui) uniform restrict uimage2D oimage_r16ui;
+layout (set = 1, binding = 18, r32ui) uniform restrict uimage2D oimage_r32ui;
+layout (set = 1, binding = 19, rgba16ui) uniform restrict uimage2D oimage_rgba16ui;
+layout (set = 1, binding = 20, rgba32ui) uniform restrict uimage2D oimage_rgba32ui;
 
 /** For encoding, this is the input frame buffer.
  */
@@ -503,7 +503,6 @@ void ENCODE_R32UI_AS_MAIN() {
 
   uint num = mux_uint(clamp(components, 0.0, 1.0), get_sample_bits());
   imageStore(oimage_r32ui, ivec2(gl_FragCoord), uvec4(num));
-  discard;
 }
 
 // The bit decoding used by 8bit, 16bit, 32bit staging.

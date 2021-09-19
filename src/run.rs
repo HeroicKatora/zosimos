@@ -369,7 +369,7 @@ impl Execution {
                 let group = self
                     .descriptors
                     .bind_group_layout(desc, &mut entry_buffer)?;
-                // eprintln!("Made {}: {:?}", self.descriptors.bind_group_layouts.len(), group);
+                eprintln!("Made {}: {:?}", self.descriptors.bind_group_layouts.len(), group);
                 let group = self.gpu.device.create_bind_group_layout(&group);
                 self.descriptors.bind_group_layouts.push(group);
                 Ok(SyncPoint::NO_SYNC)
@@ -407,14 +407,24 @@ impl Execution {
                 Ok(SyncPoint::NO_SYNC)
             }
             Low::Shader(desc) => {
-                eprintln!("{:?}", desc.source_spirv);
-
+                /*
                 let desc = wgpu::ShaderModuleDescriptor {
                     label: Some(desc.name),
                     source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                 };
 
                 let shader = self.gpu.device.create_shader_module(&desc);
+                */
+
+                let desc = wgpu::ShaderModuleDescriptorSpirV {
+                    label: Some(desc.name),
+                    source: desc.source_spirv.as_ref().into(),
+                };
+
+                let shader = unsafe {
+                    self.gpu.device.create_shader_module_spirv(&desc)
+                };
+
                 self.descriptors.shaders.push(shader);
                 Ok(SyncPoint::NO_SYNC)
             }

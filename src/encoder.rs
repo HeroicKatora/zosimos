@@ -911,7 +911,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(2 * 8 * 4),
+                        min_binding_size: NonZeroU64::new(4*4*2),
                         ty: wgpu::BufferBindingType::Uniform,
                     },
                     count: None,
@@ -1005,7 +1005,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     binding: i,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::ReadOnly,
+                        access: wgpu::StorageTextureAccess::ReadWrite,
                         format: kind.texture_format(),
                         view_dimension: wgpu::TextureViewDimension::D2,
                     },
@@ -1023,7 +1023,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     binding: i,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        access: wgpu::StorageTextureAccess::ReadWrite,
                         format: kind.texture_format(),
                         view_dimension: wgpu::TextureViewDimension::D2,
                     },
