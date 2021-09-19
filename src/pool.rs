@@ -3,6 +3,7 @@ use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
 use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer, Texel};
+use crate::{program, run::Gpu};
 
 /// Holds a number of image buffers, their descriptors and meta data.
 ///
@@ -10,10 +11,14 @@ use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer, Texel};
 #[derive(Default)]
 pub struct Pool {
     items: SlotMap<DefaultKey, Image>,
+    devices: SlotMap<DefaultKey, Gpu>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PoolKey(DefaultKey);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GpuKey(DefaultKey);
 
 /// A view on an image inside the pool.
 pub struct PoolImage<'pool> {
@@ -58,19 +63,74 @@ pub(crate) struct ImageMeta {
 pub(crate) enum ImageData {
     Host(ImageBuffer),
     /// The data lives in a generic buffer.
-    Gpu(Buffer, BufferLayout),
+    /// This buffer should be associated to one of the GPU devices.
+    Gpu {
+        buffer: Buffer,
+        layout: BufferLayout,
+        gpu: DefaultKey,
+    },
     /// The data lives in a texture buffer on the device.
-    GpuTexture(Texture, BufferLayout),
+    /// This buffer should be associated to one of the GPU devices.
+    GpuTexture {
+        texture: Texture,
+        layout: BufferLayout,
+        gpu: DefaultKey,
+    },
     /// The image data will be provided by the caller.
     /// Such data can only be used in operations that do not keep a reference, e.g. it is not
     /// possible to create a mere view.
     LateBound(BufferLayout),
 }
 
+impl PoolKey {
+    /// Create a new pool key that does not name any image.
+    pub fn null() -> Self {
+        PoolKey(DefaultKey::default())
+    }
+}
+
 impl Pool {
     /// Create an empty pool.
     pub fn new() -> Self {
         Pool::default()
+    }
+
+    /// Create a device given a descriptor of requested features.
+    ///
+    /// This will request a device from the adaptor according to the provided descriptor and then
+    /// directly insert it into the pool. Then it returns the unique key for that newly created
+    /// device and queue.
+    pub fn request_device(
+        &mut self,
+        adapter: &wgpu::Adapter,
+        device: wgpu::DeviceDescriptor,
+    ) -> Result<GpuKey, wgpu::RequestDeviceError> {
+        let request = adapter.request_device(&device, None);
+        let (device, queue) = program::block_on(request, None)?;
+        let gpu_key = self.devices.insert(Gpu { device, queue });
+        Ok(GpuKey(gpu_key))
+    }
+
+    pub fn iter_devices(&self) -> impl Iterator<Item = &'_ wgpu::Device> {
+        self.devices.iter().map(|kv| &kv.1.device)
+    }
+
+    pub(crate) fn reinsert_device(&mut self, gpu: Gpu) -> GpuKey {
+        GpuKey(self.devices.insert(gpu))
+    }
+
+    pub(crate) fn select_device(&mut self, caps: &program::Capabilities) -> Option<(GpuKey, Gpu)> {
+        let key = self.select_device_key(caps)?;
+        let device = self.devices.remove(key).unwrap();
+        Some((GpuKey(key), device))
+    }
+
+    fn select_device_key(&mut self, _: &program::Capabilities) -> Option<DefaultKey> {
+        for (key, _) in &self.devices {
+            // FIXME: check device against capabilities.
+            return Some(key);
+        }
+        None
     }
 
     /// Get a mutable handle of an image in the pool.
@@ -121,7 +181,7 @@ impl Pool {
     /// # Panics
     /// This method will panic if the layout is inconsistent.
     pub fn declare(&mut self, desc: Descriptor) -> PoolImageMut<'_> {
-        assert!(desc.is_consistent());
+        assert!(desc.is_consistent(), "{:?}", desc);
         self.new_with_data(ImageData::LateBound(desc.layout), desc.texel)
     }
 
@@ -167,16 +227,30 @@ impl ImageData {
             _ => None,
         }
     }
+
+    pub(crate) fn layout(&self) -> &BufferLayout {
+        match self {
+            ImageData::Host(canvas) => canvas.layout(),
+            ImageData::Gpu { layout, .. } => layout,
+            ImageData::GpuTexture { layout, .. } => layout,
+            ImageData::LateBound(layout) => layout,
+        }
+    }
+
+    pub(crate) fn host_allocate(&mut self) -> Self {
+        let buffer = ImageBuffer::with_layout(self.layout());
+        core::mem::replace(self, ImageData::Host(buffer))
+    }
 }
 
 impl PoolImage<'_> {
     pub fn to_image(&self) -> Option<image::DynamicImage> {
-        let data = self.as_bytes()?.to_vec();
+        let data = self.as_bytes()?;
         let layout = self.layout();
-        // FIXME: don't assume RGBA8.
-        let image = image::ImageBuffer::from_vec(layout.width, layout.height, data)
-            .expect("Should be fine lmao");
-        Some(image::DynamicImage::ImageRgba8(image))
+
+        let image = self.image.texel.samples.as_image_allocator()?;
+        let image = image(layout.width, layout.height, data)?;
+        Some(image)
     }
 
     pub fn key(&self) -> PoolKey {
@@ -257,8 +331,7 @@ impl PoolImageMut<'_> {
     /// Returns the previous image data.
     /// TODO: figure out if we should expose this..
     pub(crate) fn host_allocate(&mut self) -> ImageData {
-        let buffer = ImageBuffer::with_layout(self.layout());
-        self.replace(ImageData::Host(buffer))
+        self.image.data.host_allocate()
     }
 
     /// Make a copy of this host accessible image as a host allocated image.
@@ -267,12 +340,6 @@ impl PoolImageMut<'_> {
         let mut buffer = ImageBuffer::with_layout(self.layout());
         buffer.as_bytes_mut().copy_from_slice(data);
         Some(buffer)
-    }
-
-    /// Replace the image with equivalent late-bound data.
-    pub(crate) fn take(&mut self) -> ImageData {
-        let late_bound = ImageData::LateBound(self.layout().clone());
-        self.replace(late_bound)
     }
 
     /// TODO: figure out if assert/panicking is ergonomic enough for making it pub.
@@ -285,6 +352,21 @@ impl PoolImageMut<'_> {
     pub(crate) fn swap(&mut self, image: &mut ImageData) {
         assert_eq!(self.image.data.layout(), image.layout());
         core::mem::swap(&mut self.image.data, image)
+    }
+
+    /// If this image is not read on the host (as determined by meta) then execute a swap.
+    /// Otherwise try to perform a copy. Returns if the transaction succeeded.
+    pub(crate) fn trade(&mut self, image: &mut ImageData) -> bool {
+        if self.meta().no_read {
+            self.swap(image);
+            true
+        } else if let Some(copy) = self.host_copy() {
+            // TODO: this variant _mighty_ be able to re-use existing buffer in `image`.
+            *image = ImageData::Host(copy);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -313,17 +395,6 @@ impl<'pool> Iterator for IterMut<'pool> {
     }
 }
 
-impl ImageData {
-    pub(crate) fn layout(&self) -> &BufferLayout {
-        match self {
-            ImageData::Host(canvas) => canvas.layout(),
-            ImageData::Gpu(_, layout) => layout,
-            ImageData::GpuTexture(_, layout) => layout,
-            ImageData::LateBound(layout) => layout,
-        }
-    }
-}
-
 impl Default for ImageMeta {
     fn default() -> Self {
         ImageMeta {
@@ -338,8 +409,10 @@ impl fmt::Debug for ImageData {
         match self {
             ImageData::LateBound(layout) => write!(f, "ImageData::LayoutBound({:?})", layout),
             ImageData::Host(buffer) => write!(f, "ImageData::Host({:?})", buffer.layout()),
-            ImageData::GpuTexture(_, layout) => write!(f, "ImageData::GpuTexture({:?})", layout),
-            ImageData::Gpu(_, layout) => write!(f, "ImageData::GpuBuffer({:?})", layout),
+            ImageData::GpuTexture { layout, .. } => {
+                write!(f, "ImageData::GpuTexture({:?})", layout)
+            }
+            ImageData::Gpu { layout, .. } => write!(f, "ImageData::GpuBuffer({:?})", layout),
         }
     }
 }

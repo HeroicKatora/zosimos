@@ -39,6 +39,8 @@ features = ["spirv"]
 [build-dependencies]
 shaderc = "0.7"
 
+## Local, Testing dependencies.
+
 [dev-dependencies]
 crc32fast = "1.2"
 env_logger = "0.9"
@@ -50,3 +52,29 @@ features = ["png"]
 
 [[test]]
 name = "blend"
+
+[[test]]
+name = "direct"
+
+## From here on is our local development profile.
+## We use it for CI and testing, not release.
+## Important parts are compiling image deps with release.
+
+[profile.test]
+debug = 0
+
+[profile.dev.package."*"]
+debug = 0
+overflow-checks = false
+
+[profile.test.package]
+adler32.opt-level = 3
+crc32fast.opt-level = 3
+miniz_oxide.opt-level = 3
+png.opt-level = 3
+
+[profile.dev.package]
+adler32.opt-level = 3
+crc32fast.opt-level = 3
+miniz_oxide.opt-level = 3
+png.opt-level = 3

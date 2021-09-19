@@ -1,19 +1,12 @@
-use core::{
-    future::Future,
-    num::{NonZeroU32, NonZeroU64},
-    ops::Range,
-};
+use core::{future::Future, num::NonZeroU32, ops::Range};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use crate::buffer::{
-    Block, BufferLayout, Color, Descriptor, RowMatrix, SampleBits, SampleParts, Samples, Texel,
-    Transfer,
-};
+use crate::buffer::{BufferLayout, Descriptor, RowMatrix};
 use crate::command::{High, Rectangle, Register, Target};
-use crate::pool::{ImageData, Pool, PoolKey};
-use crate::util::ExtendOne;
+use crate::encoder::{Encoder, RegisterMap};
+use crate::pool::{Pool, PoolKey};
 use crate::{run, shaders};
 
 /// Planned out and intrinsically validated command buffer.
@@ -46,6 +39,10 @@ pub struct Program {
 /// A single command might be translated to multiple functions.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Function {
+    /// Execute a shader on an target rectangle.
+    ///
+    /// The UV coordinates and position is determined by vertex shader parameters computed from a
+    /// selection, a target location, and a viewport.
     /// VS: id
     ///   in: vec3 position
     ///   in: vec2 vertUv
@@ -55,8 +52,12 @@ pub(crate) enum Function {
     ///   in: vec2 uv
     ///   bind(1,0): texture
     ///   bind(1,1): sampler2D
+    ///   bind(2,0): shader specific data.
     ///   out: vec4 (color)
-    PaintOnTop {
+    PaintToSelection {
+        /// The texture which is used as source.
+        /// We require this to compute the specific quad coordinates.
+        texture: Texture,
         /// Source selection (relative to texture coordinates).
         selection: Rectangle,
         /// Target location in target texture.
@@ -65,8 +66,9 @@ pub(crate) enum Function {
         /// The target coordinates are relative to this and the fragment shader given by
         /// paint_on_top is only executed within that rectangle.
         viewport: Rectangle,
-        paint_on_top: PaintOnTopKind,
+        shader: shaders::FragmentShader,
     },
+    /// Execute a shader on full textures.
     /// VS: id
     ///   in: vec3 position
     ///   in: vec2 vertUv
@@ -76,9 +78,9 @@ pub(crate) enum Function {
     ///   in: vec2 uv
     ///   bind(1,0): texture
     ///   bind(1,1): sampler2D
-    ///   bind(2,0): transform matrix
+    ///   bind(2,0): shader specific data.
     ///   out: vec4 (color)
-    Transform { matrix: RowMatrix },
+    PaintFullScreen { shader: shaders::FragmentShader },
     /// VS: id
     /// FS:
     ///   bind(1, …) readonly inputs uimage2D
@@ -108,11 +110,6 @@ pub enum QuadTarget {
     Absolute([[f32; 2]; 4]),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum PaintOnTopKind {
-    Copy,
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct ImageBufferPlan {
     pub(crate) texture: Vec<Descriptor>,
@@ -139,101 +136,8 @@ pub struct ImageBufferAssignment {
 /// Get the descriptors of a particular buffer plan.
 #[derive(Clone, Copy, Debug)]
 pub struct ImageBufferDescriptors<'a> {
-    descriptor: &'a Descriptor,
-    layout: &'a BufferLayout,
-}
-
-/// Identifies one layout based buffer in the render pipeline, by an index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct Buffer(pub(crate) usize);
-
-/// Identifies one descriptor based resource in the render pipeline, by an index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct Texture(pub(crate) usize);
-
-/// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
-#[derive(Default)]
-struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
-    instructions: Instructions,
-
-    // Replicated fields from `run::Descriptors` but only length.
-    bind_groups: usize,
-    bind_group_layouts: usize,
-    buffers: usize,
-    command_buffers: usize,
-    pipeline_layouts: usize,
-    render_pipelines: usize,
-    sampler: usize,
-    shaders: usize,
-    textures: usize,
-    texture_views: usize,
-
-    // Additional validation properties.
-    is_in_command_encoder: bool,
-    is_in_render_pass: bool,
-
-    // Additional fields to map our runtime state.
-    /// How we map registers to device buffers.
-    buffer_plan: ImageBufferPlan,
-    /// Howe we mapped registers to images in the pool.
-    pool_plan: ImagePoolPlan,
-    /// The Bind Group layer Descriptor used in fragment shader, set=1.
-    paint_group_layout: Option<usize>,
-    /// The Bind Group Descriptor used in vertex buffer, set=0.
-    quad_group_layout: Option<usize>,
-    /// The Bind Group Descriptor for set=2, used for parameters of fragment shader.
-    fragment_data_group_layout: Option<usize>,
-    /// The Pipeline Descriptor used in generic paint shaders.
-    /// Will use the quad group and fragment data group layouts.
-    paint_pipeline_layout: Option<usize>,
-    /// The Bind Group Descriptor layout for the staging fragment shader.
-    /// Alternative for the fragment data group.
-    /// Since there is a limit on the number of active storage textures, we have one layout for
-    /// each potential usage.
-    stage_group_layout: HashMap<u32, usize>,
-    known_samplers: HashMap<SamplerDescriptor, usize>,
-    fragment_shaders: HashMap<FragmentShader, usize>,
-    vertex_shaders: HashMap<VertexShader, usize>,
-    simple_quad_buffer: Option<DeviceBuffer>,
-    /// The render pipeline state for staging a texture.
-    staged_to_pipelines: HashMap<Texture, SimpleRenderPipeline>,
-    /// The render pipeline state for undoing staging a texture.
-    staged_from_pipelines: HashMap<Texture, SimpleRenderPipeline>,
-
-    // Fields regarding the status of registers.
-    /// Describes how registers where mapped to buffers.
-    register_map: HashMap<Register, RegisterMap>,
-    /// Describes how textures have been mapped to the GPU.
-    texture_map: HashMap<Texture, TextureMap>,
-    /// Describes how buffers have been mapped to the GPU.
-    buffer_map: HashMap<Buffer, BufferMap>,
-    /// Describes which intermediate textures have been mapped to the GPU.
-    staging_map: HashMap<Texture, StagingTexture>,
-    // Arena style allocators.
-}
-
-/// The GPU buffers associated with a register.
-/// Supplements the buffer_plan by giving direct mappings to each device resource index in an
-/// encoder process.
-#[derive(Clone, Debug)]
-struct RegisterMap {
-    texture: DeviceTexture,
-    buffer: DeviceBuffer,
-    /// A device buffer with (COPY_DST | MAP_READ) for reading back the texture.
-    map_read: Option<DeviceBuffer>,
-    /// A device buffer with (COPY_SRC | MAP_WRITE) for initialization the texture.
-    map_write: Option<DeviceBuffer>,
-    /// A device texture for (de-)normalizing the texture contents.
-    staging: Option<DeviceTexture>,
-    /// The layout of the buffer.
-    /// This might differ from the layout of the corresponding pool image because it must adhere to
-    /// the layout requirements of the device. For example, the alignment of each row must be
-    /// divisible by 256 etc.
-    buffer_layout: BufferLayout,
-    /// The format of the non-staging texture.
-    texture_format: TextureDescriptor,
-    /// The format of the staging texture.
-    staging_format: Option<TextureDescriptor>,
+    pub(crate) descriptor: &'a Descriptor,
+    pub(crate) layout: &'a BufferLayout,
 }
 
 /// A gpu buffer associated with an image buffer.
@@ -244,66 +148,29 @@ pub struct DeviceBuffer(pub(crate) usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceTexture(pub(crate) usize);
 
-/// The gpu texture associated with the image.
-#[derive(Clone, Debug)]
-struct TextureMap {
-    device: DeviceTexture,
-    format: TextureDescriptor,
-}
-
-/// A 'staging' textures for rendering the internal texture to the externally chosen texel
-/// format including, for example, quantizing and clamping to a different numeric format.
-/// Note that the device texture needs to be a format that the device can use for color
-/// operations (read and store) but it might not support the format natively. In such cases we
-/// need to transform between the intended format and the native format. We could do this with
-/// a blit operation while copying from a buffer but this also depends on support from the
-/// device and wgpu does not allow arbitrary conversion (in 0.8 none are allowed).
-/// Hence we must perform such conversion ourselves with a specialized shader. This could also
-/// be a compute shader but then we must perform a buffer copy of everything so this can not be
-/// part of a graphic pipeline. If a staging texture exists then copies from the buffer and to
-/// the buffer always pass through it and we perform a sync from/to the staging texture before
-/// and after all paint operations involving that buffer.
-#[derive(Clone, Debug)]
-struct StagingTexture {
-    device: DeviceTexture,
-    format: TextureDescriptor,
-    stage_kind: shaders::stage::StageKind,
-    parameter: shaders::stage::XyzParameter,
-    /// A texture which we use as an attachment for encoding.
-    ///
-    /// The current implementation for encoding attaches the staging buffer as a storage image and
-    /// the texture as a sampled source texture. However, this means we can not use either of them
-    /// as the target attachment. So we have this additional texture that has the right size and
-    /// format to be used as a target attachment for encoding while we _never_ actually write to it
-    /// (op:write is disabled for that draw call).
-    /// FIXME: find a way to avoid this texture allocation.
-    temporary_attachment_buffer_for_encoding_remove_if_possible: DeviceTexture,
-}
-
-/// The gpu buffer associated with an image buffer.
-#[derive(Clone, Debug)]
-struct BufferMap {
-    device: DeviceBuffer,
-    layout: BufferLayout,
-}
-
+/// Identifies one layout based buffer in the render pipeline, by an index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum VertexShader {
-    Noop,
-}
+pub(crate) struct Buffer(pub(crate) usize);
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum FragmentShader {
-    PaintOnTop(PaintOnTopKind),
-    /// Linear color transformation.
-    LinearColorMatrix,
-    /// The conversion of texel format.
-    Convert,
+/// Identifies one descriptor based resource in the render pipeline, by an index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Texture(pub(crate) usize);
+
+/// A map of features which we may use during encoding.
+#[derive(Clone, Debug)]
+pub struct Capabilities {
+    features: wgpu::Features,
+    limits: wgpu::Limits,
 }
 
 #[derive(Debug)]
 pub struct LaunchError {
-    line: u32,
+    kind: LaunchErrorKind,
+}
+
+#[derive(Debug)]
+pub enum LaunchErrorKind {
+    FromLine(u32),
 }
 
 /// Low level instruction.
@@ -525,8 +392,18 @@ pub(crate) struct BufferDescriptor {
 /// For constructing a new buffer, of anonymous memory.
 #[derive(Debug)]
 pub(crate) struct BufferDescriptorInit {
-    pub content: Cow<'static, [u8]>,
+    pub content: BufferInitContent,
     pub usage: BufferUsage,
+}
+
+#[derive(Debug)]
+pub(crate) enum BufferInitContent {
+    Owned(Vec<u8>),
+    /// The buffer init data is from the program 'data segment'.
+    Defer {
+        start: usize,
+        end: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -559,6 +436,7 @@ pub(crate) struct TextureDescriptor {
     pub usage: TextureUsage,
 }
 
+/// Describe an image for the purpose of determining resource we want to associate with it.
 #[derive(Clone, Debug)]
 pub(crate) struct ImageDescriptor {
     pub size: (NonZeroU32, NonZeroU32),
@@ -566,6 +444,7 @@ pub(crate) struct ImageDescriptor {
     pub staging: Option<StagingDescriptor>,
 }
 
+/// The information on _how_ to stage (convert a texel-encoding to linear color) a texture.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StagingDescriptor {
     pub(crate) parameter: shaders::stage::XyzParameter,
@@ -573,7 +452,7 @@ pub(crate) struct StagingDescriptor {
 }
 
 impl ImageDescriptor {
-    fn to_texture(&self) -> TextureDescriptor {
+    pub(crate) fn to_texture(&self) -> TextureDescriptor {
         TextureDescriptor {
             size: self.size,
             format: self.format,
@@ -581,15 +460,16 @@ impl ImageDescriptor {
         }
     }
 
-    fn to_staging_texture(&self) -> Option<TextureDescriptor> {
+    pub(crate) fn to_staging_texture(&self) -> Option<TextureDescriptor> {
         self.staging.map(|staging| TextureDescriptor {
-            size: self.size,
+            size: staging.stage_kind.stage_size(self.size),
             format: staging.stage_kind.texture_format(),
             usage: TextureUsage::Staging,
         })
     }
 }
 
+/// The usage of a texture, of those we differentiate.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum TextureUsage {
     /// Copy Dst + Sampled
@@ -668,68 +548,11 @@ pub struct Launcher<'program> {
     pool: &'program mut Pool,
     /// The host image data for each texture (if any).
     /// Otherwise this a placeholder image.
-    binds: Vec<ImageData>,
+    binds: Vec<run::Image>,
     /// Assigns images from the internal pool to registers.
     /// They may be transferred from an input pool, and conversely we assign outputs. We can use
     /// the plan to put back all images into the pool when retiring the execution.
     pool_plan: ImagePoolPlan,
-}
-
-struct SimpleRenderPipelineDescriptor<'data> {
-    pipeline_target: PipelineTarget,
-    /// Bind data for (set 0, binding 0).
-    vertex_bind_data: BufferBind<'data>,
-    /// Texture for (set 1, binding 0)
-    fragment_texture: TextureBind,
-    /// Texture for (set 2, binding 0)
-    fragment_bind_data: BufferBind<'data>,
-    /// The vertex shader to use.
-    vertex: ShaderBind,
-    /// The fragment shader to use.
-    fragment: ShaderBind,
-}
-
-enum PipelineTarget {
-    Texture(Texture),
-    PreComputedGroup { target_format: wgpu::TextureFormat },
-}
-
-enum TextureBind {
-    Texture(Texture),
-    PreComputedGroup {
-        /// The index of the bind group we're binding to set `1`, the fragment set.
-        group: usize,
-        /// The layout corresponding to the bind group.
-        layout: usize,
-    },
-}
-
-enum BufferBind<'data> {
-    /// Upload the data, then bind the buffer.
-    Set {
-        data: &'data [u8],
-    },
-    None,
-    // /// The data is already there, simply bind the buffer.
-    // Load(DeviceBuffer),
-}
-
-enum ShaderBind {
-    ShaderMain(usize),
-    Shader {
-        id: usize,
-        entry_point: &'static str,
-    },
-}
-
-#[derive(Clone, Copy)]
-struct SimpleRenderPipeline {
-    pipeline: usize,
-    buffer: DeviceBuffer,
-    group: usize,
-    vertex_bind: Option<usize>,
-    vertices: u32,
-    fragment_bind: Option<usize>,
 }
 
 impl ImageBufferPlan {
@@ -796,6 +619,34 @@ impl Program {
     /// Choose an applicable adapter from one of the presented ones.
     pub fn choose_adapter(
         &self,
+        from: impl Iterator<Item = wgpu::Adapter>,
+    ) -> Result<wgpu::Adapter, MismatchError> {
+        Program::minimum_adapter(from)
+    }
+
+    /// Select an adapter that fulfills the minimum requirements for running programs.
+    ///
+    /// The library may be able to utilize any additional features on top but, following the design
+    /// of `wgpu`, these need to be explicitly enabled before lowering. [WIP]: there are no actual
+    /// uses of any additional features. So currently we require (a subset of WebGPU):
+    ///
+    /// * Generic support for `rgba8UnormSrgb`.
+    /// * Load/Store textures for `luma32uint`, `rgba16uint`.
+    /// * Load/Store for `rgba32uint` might allow additional texel support.
+    /// * `precise` (bit-reproducible) shaders are WIP in wgpu anyways.
+    ///
+    /// What could be available as options in the (near/far) future:
+    /// * No `PushConstants` but some shaders might benefit.
+    /// * [WIP] We don't do limit checks yet. But we really should because it's handled by panic.
+    /// * Timestamp Queries and Pipeline Statistics would be necessary for profiling (though only
+    ///     accurate on native). This would also be optional.
+    /// * `AddressModeClampToBorder` would be interesting because we'd need to emulate that right
+    ///     now. However, not sure how useful.
+    ///
+    /// However, given the current scheme any utilization of functions with arity >= 4 would
+    /// require additional opt-in as this hits the limit for number of sampled textures (that is,
+    /// the minimum required limit). Luckily, we do not have any such functions yet.
+    pub fn minimum_adapter(
         mut from: impl Iterator<Item = wgpu::Adapter>,
     ) -> Result<wgpu::Adapter, MismatchError> {
         #[allow(non_snake_case)]
@@ -840,7 +691,7 @@ impl Program {
             .textures
             .texture
             .iter()
-            .map(|desciptor| ImageData::LateBound(desciptor.layout.clone()))
+            .map(run::Image::with_late_bound)
             .collect();
 
         Launcher {
@@ -849,6 +700,145 @@ impl Program {
             binds,
             pool_plan: ImagePoolPlan::default(),
         }
+    }
+
+    pub fn lower_to(&self, capabilities: Capabilities) -> Result<run::Executable, LaunchError> {
+        let mut encoder = self.lower_to_impl(&capabilities, None)?;
+        encoder.finalize()?;
+        let io_map = encoder.io_map();
+
+        // Convert all textures to buffers.
+        // FIXME: _All_ textures? No, some amount of textures might not be IO.
+        // Currently this is true but no in general.
+        let buffers = self
+            .textures
+            .texture
+            .iter()
+            .map(run::Image::with_late_bound)
+            .collect();
+
+        Ok(run::Executable {
+            instructions: encoder.instructions.into(),
+            binary_data: encoder.binary_data,
+            descriptors: run::Descriptors::default(),
+            buffers,
+            capabilities,
+            io_map,
+        })
+    }
+
+    fn lower_to_impl(
+        &self,
+        capabilities: &Capabilities,
+        pool_plan: Option<&ImagePoolPlan>,
+    ) -> Result<Encoder, LaunchError> {
+        let mut encoder = Encoder::default();
+        encoder.enable_capabilities(&capabilities);
+
+        encoder.set_buffer_plan(&self.textures);
+        if let Some(pool_plan) = pool_plan {
+            encoder.set_pool_plan(pool_plan);
+        }
+
+        for high in &self.ops {
+            match high {
+                &High::Done(_) => {
+                    // TODO: should deallocate textures that aren't live anymore.
+                }
+                &High::Input(dst, _) => {
+                    // Identify how we ingest this image.
+                    // If it is a texture format that we support then we will allocate and upload
+                    // it directly. If it is not then we will allocate a generic version capable of
+                    // holding a lossless convert variant of it and add instructions to convert
+                    // into that buffer.
+                    encoder.copy_input_to_buffer(dst)?;
+                    encoder.copy_buffer_to_staging(dst)?;
+                }
+                &High::Output { src, dst } => {
+                    // eprintln!("Output {:?} to {:?}", src, dst);
+                    // Identify if we need to transform the texture from the internal format to the
+                    // one actually chosen for this texture.
+                    encoder.copy_staging_to_buffer(src)?;
+                    encoder.copy_buffer_to_output(src, dst)?;
+                }
+                &High::PushOperand(texture) => {
+                    encoder.copy_staging_to_texture(texture)?;
+                    encoder.push_operand(texture)?;
+                }
+                High::Construct { dst, fn_ } => {
+                    let dst_texture = match dst {
+                        Target::Discard(texture) | Target::Load(texture) => *texture,
+                    };
+
+                    encoder.ensure_allocate_texture(dst_texture)?;
+                    let dst_view = encoder.texture_view(dst_texture)?;
+
+                    let ops = match dst {
+                        Target::Discard(_) => {
+                            wgpu::Operations {
+                                // TODO: we could let choose a replacement color..
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
+                                store: true,
+                            }
+                        }
+                        Target::Load(_) => wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: true,
+                        },
+                    };
+
+                    let attachment = ColorAttachmentDescriptor {
+                        texture_view: dst_view,
+                        ops,
+                    };
+
+                    let render = encoder.prepare_render(fn_, dst_texture)?;
+
+                    // TODO: we need to remember the attachment format here.
+                    // This is need to to automatically construct the shader pipeline.
+                    encoder.push(Low::BeginCommands)?;
+                    encoder.push(Low::BeginRenderPass(RenderPassDescriptor {
+                        // FIXME: allocation?
+                        color_attachments: vec![attachment],
+                        depth_stencil: None,
+                    }))?;
+                    encoder.render(render)?;
+                    encoder.push(Low::EndRenderPass)?;
+                    encoder.push(Low::EndCommands)?;
+
+                    // Actually run it immediately.
+                    // TODO: this might not be the most efficient.
+                    encoder.push(Low::RunTopCommand)?;
+
+                    // Post paint, make sure we quantize everything.
+                    encoder.copy_texture_to_staging(dst_texture)?;
+                }
+                High::Copy { src, dst } => {
+                    let &RegisterMap {
+                        buffer: source_buffer,
+                        ref buffer_layout,
+                        ..
+                    } = encoder.allocate_register(*src)?;
+                    let size = buffer_layout.u64_len();
+                    let target_buffer = encoder.allocate_register(*dst)?.buffer;
+
+                    encoder.copy_staging_to_buffer(*src)?;
+
+                    encoder.push(Low::BeginCommands)?;
+                    encoder.push(Low::CopyBufferToBuffer {
+                        source_buffer,
+                        size,
+                        target_buffer,
+                    })?;
+                    encoder.push(Low::EndCommands)?;
+                    encoder.push(Low::RunTopCommand)?;
+
+                    encoder.copy_buffer_to_staging(*dst)?;
+                }
+            }
+        }
+
+        Ok(encoder)
     }
 }
 
@@ -912,1472 +902,51 @@ impl Launcher<'_> {
             Err(_) => return Err(LaunchError::InternalCommandError(line!())),
         };
 
-        let mut encoder = Encoder::default();
-        encoder.set_buffer_plan(&self.program.textures);
-        encoder.set_pool_plan(&self.pool_plan);
-        encoder.enable_capabilities(&device);
+        let capabilities = Capabilities::from(&device);
 
-        for high in &self.program.ops {
-            match high {
-                &High::Done(_) => {
-                    // TODO: should deallocate textures that aren't live anymore.
-                }
-                &High::Input(dst, _) => {
-                    // Identify how we ingest this image.
-                    // If it is a texture format that we support then we will allocate and upload
-                    // it directly. If it is not then we will allocate a generic version capable of
-                    // holding a lossless convert variant of it and add instructions to convert
-                    // into that buffer.
-                    encoder.copy_input_to_buffer(dst)?;
-                    encoder.copy_buffer_to_staging(dst)?;
-                }
-                &High::Output { src, dst } => {
-                    // eprintln!("Output {:?} to {:?}", src, dst);
-                    // Identify if we need to transform the texture from the internal format to the
-                    // one actually chosen for this texture.
-                    encoder.copy_staging_to_buffer(src)?;
-                    encoder.copy_buffer_to_output(src, dst)?;
-                }
-                High::Construct { .. } => {
-                    todo!()
-                }
-                High::Paint { texture, dst, fn_ } => {
-                    let dst_texture = match dst {
-                        Target::Discard(texture) | Target::Load(texture) => *texture,
-                    };
-
-                    encoder.ensure_allocate_texture(dst_texture)?;
-                    encoder.copy_staging_to_texture(*texture)?;
-
-                    let dst_view = encoder.texture_view(dst_texture)?;
-                    // eprintln!("tex{:?} +> tex{:?}", texture, dst_texture);
-
-                    let ops = match dst {
-                        Target::Discard(_) => {
-                            wgpu::Operations {
-                                // TODO: we could let choose a replacement color..
-                                load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
-                                store: true,
-                            }
-                        }
-                        Target::Load(_) => wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: true,
-                        },
-                    };
-
-                    let attachment = ColorAttachmentDescriptor {
-                        texture_view: dst_view,
-                        ops,
-                    };
-
-                    let render = encoder.prepare_render(*texture, fn_, dst_texture)?;
-
-                    // TODO: we need to remember the attachment format here.
-                    // This is need to to automatically construct the shader pipeline.
-                    encoder.push(Low::BeginCommands)?;
-                    encoder.push(Low::BeginRenderPass(RenderPassDescriptor {
-                        color_attachments: vec![attachment],
-                        depth_stencil: None,
-                    }))?;
-                    encoder.render(render)?;
-                    encoder.push(Low::EndRenderPass)?;
-                    encoder.push(Low::EndCommands)?;
-
-                    // Actually run it immediately.
-                    // TODO: this might not be the most efficient.
-                    encoder.push(Low::RunTopCommand)?;
-
-                    // Post paint, make sure we quantize everything.
-                    encoder.copy_texture_to_staging(*texture)?;
-                }
-            }
-        }
-
+        let mut encoder = self
+            .program
+            .lower_to_impl(&capabilities, Some(&self.pool_plan))?;
         let mut buffers = self.binds;
         encoder.extract_buffers(&mut buffers, &mut self.pool)?;
 
+        // Unbalanced operands shouldn't happen.
+        // This is part of validation layer but cheap and we always do it.
+        encoder.finalize()?;
+
         let init = run::InitialState {
-            instructions: encoder.instructions,
+            instructions: encoder.instructions.into(),
             device,
             queue,
             buffers,
+            binary_data: encoder.binary_data,
         };
 
         Ok(run::Execution::new(init))
     }
 }
 
-impl<I: ExtendOne<Low>> Encoder<I> {
-    /// Tell the encoder which commands are natively supported.
-    /// Some features require GPU support. At this point we decide if our request has succeeded and
-    /// we might poly-fill it with a compute shader or something similar.
-    fn enable_capabilities(&mut self, device: &wgpu::Device) {
-        // currently no feature selection..
-        let _ = device.features();
-        let _ = device.limits();
+impl BufferInitContent {
+    /// Construct a reference to data by allocating it freshly within the buffer.
+    pub fn new(buf: &mut Vec<u8>, data: &[impl bytemuck::Pod]) -> Self {
+        let start = buf.len();
+        buf.extend_from_slice(bytemuck::cast_slice(data));
+        let end = buf.len();
+        BufferInitContent::Defer { start, end }
     }
 
-    fn set_buffer_plan(&mut self, plan: &ImageBufferPlan) {
-        self.buffer_plan = plan.clone();
-    }
-
-    fn set_pool_plan(&mut self, plan: &ImagePoolPlan) {
-        self.pool_plan = plan.clone();
-    }
-
-    fn extract_buffers(
-        &self,
-        buffers: &mut Vec<ImageData>,
-        pool: &mut Pool,
-    ) -> Result<(), LaunchError> {
-        for (&pool_key, &texture) in &self.pool_plan.buffer {
-            let mut entry = pool
-                .entry(pool_key)
-                .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-            let buffer = &mut buffers[texture.0];
-
-            // Decide how to retrieve this image from the pool.
-            if buffer.as_bytes().is_none() {
-                // Just take the buffer if we are allowed to...
-                if entry.meta().no_read {
-                    entry.swap(buffer);
-                } else if let Some(copy) = entry.host_copy() {
-                    *buffer = ImageData::Host(copy);
-                } else {
-                    // Would need to copy from the GPU.
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-
-                if buffer.as_bytes().is_none() {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Validate and then add the command to the encoder.
-    ///
-    /// This ensures we can keep track of the expected state change, and validate the correct order
-    /// of commands. More specific sequencing commands will expect correct order or assume it
-    /// internally.
-    fn push(&mut self, low: Low) -> Result<(), LaunchError> {
-        match low {
-            Low::BindGroupLayout(_) => self.bind_group_layouts += 1,
-            Low::BindGroup(_) => self.bind_groups += 1,
-            Low::Buffer(_) | Low::BufferInit(_) => self.buffers += 1,
-            Low::PipelineLayout(_) => self.pipeline_layouts += 1,
-            Low::Sampler(_) => self.sampler += 1,
-            Low::Shader(_) => self.shaders += 1,
-            Low::Texture(_) => self.textures += 1,
-            Low::TextureView(_) => self.texture_views += 1,
-            Low::RenderPipeline(_) => self.render_pipelines += 1,
-            Low::BeginCommands => {
-                if self.is_in_command_encoder {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-
-                self.is_in_command_encoder = true;
-            }
-            Low::BeginRenderPass(_) => {
-                if self.is_in_render_pass {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-
-                if !self.is_in_command_encoder {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-
-                self.is_in_render_pass = true;
-            }
-            Low::EndCommands => {
-                if !self.is_in_command_encoder {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-
-                self.is_in_command_encoder = false;
-                self.command_buffers += 1;
-            }
-            Low::EndRenderPass => {
-                if !self.is_in_render_pass {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-
-                self.is_in_render_pass = false;
-            }
-            Low::SetPipeline(_) => {}
-            Low::SetBindGroup { group, .. } => {
-                if group >= self.bind_groups {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-            }
-            Low::SetVertexBuffer { buffer, .. } => {
-                if buffer >= self.buffers {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-            }
-            // TODO: could validate indices.
-            Low::DrawOnce { .. } | Low::DrawIndexedZero { .. } | Low::SetPushConstants { .. } => {}
-            Low::RunTopCommand => {
-                if self.command_buffers == 0 {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-
-                self.command_buffers -= 1;
-            }
-            Low::RunBotToTop(num) | Low::RunTopToBot(num) => {
-                if num >= self.command_buffers {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-
-                self.command_buffers -= num;
-            }
-            // TODO: could validate indices.
-            Low::WriteImageToTexture { .. }
-            | Low::CopyBufferToTexture { .. }
-            | Low::CopyTextureToBuffer { .. }
-            | Low::CopyBufferToBuffer { .. } => {
-                if !self.is_in_command_encoder {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
-            }
-            Low::WriteImageToBuffer { .. } | Low::ReadBuffer { .. } => {}
-        }
-
-        self.instructions.extend_one(low);
-        Ok(())
-    }
-
-    fn make_texture_descriptor(
-        &mut self,
-        texture: Texture,
-    ) -> Result<ImageDescriptor, LaunchError> {
-        let descriptor = &self.buffer_plan.texture[texture.0];
-
-        fn validate_size(layout: &BufferLayout) -> Option<(NonZeroU32, NonZeroU32)> {
-            Some((
-                NonZeroU32::new(layout.width)?,
-                NonZeroU32::new(layout.height)?,
-            ))
-        }
-
-        let size = validate_size(&descriptor.layout)
-            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-        let mut staging = None;
-
-        let format = match descriptor.texel {
-            Texel {
-                block: Block::Pixel,
-                samples:
-                    Samples {
-                        bits: SampleBits::Int8x4,
-                        parts: SampleParts::Rgba,
-                    },
-                color:
-                    Color::Xyz {
-                        // Match only that which is necessary to get the right numbers in the shader.
-                        transfer: Transfer::Srgb,
-                        ..
-                    },
-            } => wgpu::TextureFormat::Rgba8UnormSrgb,
-            Texel {
-                block: Block::Pixel,
-                samples:
-                    Samples {
-                        bits: SampleBits::Int8x4,
-                        parts: SampleParts::Rgba,
-                    },
-                color:
-                    Color::Xyz {
-                        // Match only that which is necessary to get the right numbers in the shader.
-                        transfer: Transfer::Linear,
-                        ..
-                    },
-            } => wgpu::TextureFormat::Rgba8Unorm,
-            Texel {
-                block: Block::Pixel,
-                samples,
-                color: Color::Xyz { transfer, .. },
-            } => {
-                let parameter = shaders::stage::XyzParameter {
-                    transfer,
-                    parts: samples.parts,
-                    bits: samples.bits,
-                };
-
-                let result = parameter.linear_format();
-                let stage_kind = parameter
-                    .stage_kind()
-                    // Unsupported format.
-                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-
-                staging = Some(StagingDescriptor {
-                    stage_kind,
-                    parameter,
-                });
-
-                result
-            }
-            _ => return Err(LaunchError::InternalCommandError(line!())),
-        };
-
-        Ok(ImageDescriptor {
-            format,
-            staging,
-            size,
-        })
-    }
-
-    fn allocate_register(&mut self, idx: Register) -> Result<&RegisterMap, LaunchError> {
-        self.ensure_allocate_register(idx)?;
-        // Trick, reborrow the thing..
-        Ok(&self.register_map[&idx])
-    }
-
-    // We must trick the borrow checker here..
-    fn ensure_allocate_register(&mut self, idx: Register) -> Result<(), LaunchError> {
-        let ImageBufferAssignment {
-            buffer: reg_buffer,
-            texture: reg_texture,
-        } = self.buffer_plan.get(idx)?;
-
-        if let Some(_) = self.register_map.get(&idx) {
-            return Ok(());
-        }
-
-        let staged = self.make_texture_descriptor(reg_texture)?;
-        let texture_format = staged.to_texture();
-        let staging_format = staged.to_staging_texture();
-        let descriptor = &self.buffer_plan.texture[reg_texture.0];
-
-        let bytes_per_row = (descriptor.layout.bytes_per_texel as u32)
-            .checked_mul(texture_format.size.0.get())
-            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-        let bytes_per_row = (bytes_per_row / 256 + u32::from(bytes_per_row % 256 != 0))
-            .checked_mul(256)
-            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-
-        let buffer_layout = BufferLayout {
-            bytes_per_texel: descriptor.layout.bytes_per_texel,
-            width: texture_format.size.0.get(),
-            height: texture_format.size.1.get(),
-            bytes_per_row,
-        };
-
-        let (buffer, map_write, map_read) = {
-            let buffer = self.buffers;
-            self.push(Low::Buffer(BufferDescriptor {
-                size: buffer_layout.u64_len(),
-                usage: BufferUsage::DataBuffer,
-            }))?;
-            self.push(Low::Buffer(BufferDescriptor {
-                size: buffer_layout.u64_len(),
-                usage: BufferUsage::DataIn,
-            }))?;
-            self.push(Low::Buffer(BufferDescriptor {
-                size: buffer_layout.u64_len(),
-                usage: BufferUsage::DataOut,
-            }))?;
-
-            // eprintln!("Buffer {:?} {:?}", buffer, buffer_layout.u64_len());
-            // eprintln!("Buffer {:?} {:?}", buffer + 1, buffer_layout.u64_len());
-            // eprintln!("Buffer {:?} {:?}", buffer + 2, buffer_layout.u64_len());
-
-            (
-                DeviceBuffer(buffer),
-                DeviceBuffer(buffer + 1),
-                DeviceBuffer(buffer + 2),
-            )
-        };
-
-        let texture = self.ensure_allocate_texture(reg_texture)?;
-        let staging = if let Some(staging) = self.staging_map.get(&reg_texture) {
-            Some(staging.device)
-        } else {
-            None
-        };
-
-        let map_entry = RegisterMap {
-            buffer,
-            texture,
-            map_read: Some(map_read),
-            map_write: Some(map_write),
-            staging,
-            buffer_layout,
-            texture_format,
-            staging_format,
-        };
-
-        // TODO do a match instead?
-        let in_map = self.register_map.entry(idx).or_insert(map_entry.clone());
-        *in_map = map_entry.clone();
-
-        self.buffer_map.insert(
-            reg_buffer,
-            BufferMap {
-                device: buffer,
-                layout: in_map.buffer_layout.clone(),
-            },
-        );
-
-        Ok(())
-    }
-
-    fn ensure_allocate_texture(
-        &mut self,
-        reg_texture: Texture,
-    ) -> Result<DeviceTexture, LaunchError> {
-        let staged = self.make_texture_descriptor(reg_texture)?;
-        let texture_format = staged.to_texture();
-        let staging_format = staged.to_staging_texture();
-
-        if let Some(texture_map) = self.texture_map.get(&reg_texture) {
-            return Ok(texture_map.device);
-        }
-
-        let texture = {
-            let texture = self.textures;
-            // eprintln!("Texture {:?} {:?}", texture, &texture_format);
-            self.push(Low::Texture(texture_format.clone()))?;
-            DeviceTexture(texture)
-        };
-
-        self.texture_map.insert(
-            reg_texture,
-            TextureMap {
-                device: texture,
-                format: texture_format.clone(),
-            },
-        );
-
-        if let Some(staging) = staging_format {
-            let st_parameter = staged
-                .staging
-                .as_ref()
-                .expect("Have a format for staging texture when we have staging texture");
-
-            let device = {
-                let texture = self.textures;
-                // eprintln!("Storage Texture {:?} {:?}", texture, &staging);
-                self.push(Low::Texture(staging.clone()))?;
-                DeviceTexture(texture)
-            };
-
-            let fallback = {
-                let texture = self.textures;
-                // eprintln!("Fallback Texture {:?} {:?}", texture, &staging);
-                self.push(Low::Texture(TextureDescriptor {
-                    usage: TextureUsage::Transient,
-                    size: staging.size,
-                    ..texture_format
-                }))?;
-                DeviceTexture(texture)
-            };
-
-            // eprintln!("{} {:?}", reg_texture.0, staging);
-            self.staging_map.insert(
-                reg_texture,
-                StagingTexture {
-                    device,
-                    format: staging.clone(),
-                    stage_kind: st_parameter.stage_kind,
-                    parameter: st_parameter.parameter.clone(),
-                    temporary_attachment_buffer_for_encoding_remove_if_possible: fallback,
-                },
-            );
-        }
-
-        Ok(texture)
-    }
-
-    fn ingest_image_data(&mut self, idx: Register) -> Result<Texture, LaunchError> {
-        let source_key = self.pool_plan.get(idx)?;
-        let texture = self.buffer_plan.get(idx)?.texture;
-        self.pool_plan.buffer.entry(source_key).or_insert(texture);
-        Ok(texture)
-    }
-
-    /// Copy from the input to the internal memory visible buffer.
-    fn copy_input_to_buffer(&mut self, idx: Register) -> Result<(), LaunchError> {
-        let regmap = self.allocate_register(idx)?.clone();
-        let source_image = self.ingest_image_data(idx)?;
-
-        let descriptor = &self.buffer_plan.texture[regmap.texture.0];
-        let size = descriptor.size();
-
-        // See below, required for direct buffer-to-buffer copy.
-        let sizeu64 = regmap.buffer_layout.u64_len();
-
-        // FIXME: if it is a simple copy we can use regmap.buffer directly.
-        let target_buffer = regmap.map_write.unwrap_or(regmap.buffer);
-
-        self.push(Low::WriteImageToBuffer {
-            source_image,
-            size,
-            offset: (0, 0),
-            target_buffer: target_buffer,
-            target_layout: regmap.buffer_layout,
-        })?;
-
-        // FIXME: we're using wgpu internal's scheduling for writing the data to the gpu buffer but
-        // this is a separate allocation. We'd instead like to use `regmap.map_write` and do our
-        // own buffer mapping but this requires async scheduling. Soo.. do that later.
-        // FIXME: might happen at next call within another command encoder..
-        if let Some(map_write) = regmap.map_write {
-            self.push(Low::BeginCommands)?;
-            self.push(Low::CopyBufferToBuffer {
-                source_buffer: map_write,
-                size: sizeu64,
-                target_buffer: regmap.buffer,
-            })?;
-            self.push(Low::EndCommands)?;
-            // TODO: maybe also don't run it immediately?
-            self.push(Low::RunTopCommand)?;
-        }
-
-        Ok(())
-    }
-
-    /// Copy from memory visible buffer to the texture.
-    fn copy_buffer_to_staging(&mut self, idx: Register) -> Result<(), LaunchError> {
-        let regmap = self.allocate_register(idx)?.clone();
-        let size = self.buffer_plan.texture[regmap.texture.0].size();
-
-        let target_texture = if let Some(staging) = regmap.staging {
-            staging
-        } else {
-            // .… or directly to the target buffer if we have no staging.
-            regmap.texture
-        };
-
-        // eprintln!("!!! Copying {:?}: to {:?}", idx, target_texture);
-
-        self.push(Low::BeginCommands)?;
-        self.push(Low::CopyBufferToTexture {
-            source_buffer: regmap.buffer,
-            source_layout: regmap.buffer_layout,
-            offset: (0, 0),
-            size,
-            target_texture,
-        })?;
-        // eprintln!("buf{:?} -> tex{:?} ({:?})", regmap.buffer, regmap.texture, size);
-
-        self.push(Low::EndCommands)?;
-        // TODO: maybe also don't run it immediately?
-        self.push(Low::RunTopCommand)?;
-
-        Ok(())
-    }
-
-    /// Copy quantized data to the internal buffer.
-    /// Note that this may be a no-op for buffers that need no staging buffer, i.e. where
-    /// quantization happens as part of the pipeline.
-    fn copy_staging_to_texture(&mut self, idx: Texture) -> Result<(), LaunchError> {
-        if let Some(staging) = self.staging_map.get(&idx) {
-            // eprintln!("{} {:?}", idx.0, staging);
-            // Try to use the cached version of this pipeline.
-            let pipeline = if let Some(pipeline) = self.staged_to_pipelines.get(&idx) {
-                pipeline.clone()
-            } else {
-                let fn_ = Function::ToLinearOpto {
-                    parameter: staging.parameter,
-                    stage_kind: staging.stage_kind,
-                };
-
-                self.prepare_render(idx, &fn_, idx)?
-            };
-
-            let dst_view = self.texture_view(idx)?;
-            let attachment = ColorAttachmentDescriptor {
-                texture_view: dst_view,
-                ops: wgpu::Operations {
-                    // TODO: we could let choose a replacement color..
-                    load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
-                    store: true,
-                },
-            };
-
-            self.push(Low::BeginCommands)?;
-            self.push(Low::BeginRenderPass(RenderPassDescriptor {
-                color_attachments: vec![attachment],
-                depth_stencil: None,
-            }))?;
-            self.render(pipeline)?;
-            self.push(Low::EndRenderPass)?;
-            self.push(Low::EndCommands)?;
-
-            self.push(Low::RunTopCommand)?;
-        }
-
-        Ok(())
-    }
-
-    /// Quantize the texture to the staging buffer.
-    /// May be a no-op, see reverse operation.
-    fn copy_texture_to_staging(&mut self, idx: Texture) -> Result<(), LaunchError> {
-        if let Some(staging) = self.staging_map.get(&idx) {
-            let texture = staging.temporary_attachment_buffer_for_encoding_remove_if_possible;
-
-            // eprintln!("{} {:?}", idx.0, staging);
-            // Try to use the cached version of this pipeline.
-            let pipeline = if let Some(pipeline) = self.staged_from_pipelines.get(&idx) {
-                pipeline.clone()
-            } else {
-                let fn_ = Function::FromLinearOpto {
-                    parameter: staging.parameter,
-                    stage_kind: staging.stage_kind,
-                };
-
-                self.prepare_render(idx, &fn_, idx)?
-            };
-
-            let dst_view = {
-                let descriptor = TextureViewDescriptor { texture };
-
-                let id = self.texture_views;
-                self.push(Low::TextureView(descriptor))?;
-                self.texture_views += 1;
-                id
-            };
-
-            let attachment = ColorAttachmentDescriptor {
-                texture_view: dst_view,
-                ops: wgpu::Operations {
-                    // TODO: we could let choose a replacement color..
-                    load: wgpu::LoadOp::Clear(wgpu::Color::RED),
-                    store: false,
-                },
-            };
-
-            self.push(Low::BeginCommands)?;
-            self.push(Low::BeginRenderPass(RenderPassDescriptor {
-                color_attachments: vec![attachment],
-                depth_stencil: None,
-            }))?;
-            self.render(pipeline)?;
-            self.push(Low::EndRenderPass)?;
-            self.push(Low::EndCommands)?;
-
-            self.push(Low::RunTopCommand)?;
-        }
-
-        Ok(())
-    }
-
-    /// Copy from texture to the memory buffer.
-    fn copy_staging_to_buffer(&mut self, idx: Register) -> Result<(), LaunchError> {
-        let regmap = self.allocate_register(idx)?.clone();
-        let size = self.buffer_plan.get_info(idx)?.descriptor.size();
-
-        let source_texture = if let Some(staging) = regmap.staging {
-            staging
-        } else {
-            regmap.texture
-        };
-
-        // eprintln!("!!! Copying {:?}: from {:?}", idx, source_texture);
-
-        self.push(Low::BeginCommands)?;
-        self.push(Low::CopyTextureToBuffer {
-            source_texture,
-            offset: (0, 0),
-            size,
-            target_buffer: regmap.buffer,
-            target_layout: regmap.buffer_layout,
-        })?;
-        self.push(Low::EndCommands)?;
-        // TODO: maybe also don't run it immediately?
-        self.push(Low::RunTopCommand)?;
-
-        Ok(())
-    }
-
-    /// Copy the memory buffer to the output.
-    fn copy_buffer_to_output(&mut self, idx: Register, dst: Register) -> Result<(), LaunchError> {
-        let regmap = self.allocate_register(idx)?.clone();
-        let target_image = self.ingest_image_data(dst)?;
-
-        let size = self.buffer_plan.get_info(idx)?.descriptor.size();
-        let sizeu64 = regmap.buffer_layout.u64_len();
-
-        let source_buffer = regmap.map_read.unwrap_or(regmap.buffer);
-
-        // FIXME: might happen at next call within another command encoder..
-        if let Some(map_read) = regmap.map_read {
-            self.push(Low::BeginCommands)?;
-            self.push(Low::CopyBufferToBuffer {
-                source_buffer: regmap.buffer,
-                size: sizeu64,
-                target_buffer: map_read,
-            })?;
-            // eprintln!("buf{:?} -> buf{:?} ({})", regmap.buffer, map_read, sizeu64);
-            self.push(Low::EndCommands)?;
-            // TODO: maybe also don't run it immediately?
-            self.push(Low::RunTopCommand)?;
-        }
-        // eprintln!("buf{:?} -> img{:?} ({:?})", source_buffer, target_image, size);
-
-        self.push(Low::ReadBuffer {
-            source_buffer,
-            source_layout: regmap.buffer_layout,
-            size,
-            offset: (0, 0),
-            target_image,
-        })
-    }
-
-    fn texture_view(&mut self, dst: Texture) -> Result<usize, LaunchError> {
-        let texture = self
-            .texture_map
-            .get(&dst)
-            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
-            .device;
-
-        let descriptor = TextureViewDescriptor { texture };
-
-        self.instructions.extend_one(Low::TextureView(descriptor));
-        let id = self.texture_views;
-        self.texture_views += 1;
-
-        // eprintln!("Texture {:?} (Device {:?}) in View {:?}", dst, texture, id);
-
-        Ok(id)
-    }
-
-    fn make_quad_bind_group(&mut self) -> usize {
-        let bind_group_layouts = &mut self.bind_group_layouts;
-        let instructions = &mut self.instructions;
-        *self.quad_group_layout.get_or_insert_with(|| {
-            let descriptor = BindGroupLayoutDescriptor {
-                entries: vec![wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                        ty: wgpu::BufferBindingType::Uniform,
-                    },
-                    count: None,
-                }],
-            };
-
-            instructions.extend_one(Low::BindGroupLayout(descriptor));
-            let descriptor_id = *bind_group_layouts;
-            *bind_group_layouts += 1;
-            descriptor_id
-        })
-    }
-
-    fn make_generic_fragment_bind_group(&mut self) -> usize {
-        let bind_group_layouts = &mut self.bind_group_layouts;
-        let instructions = &mut self.instructions;
-        *self.fragment_data_group_layout.get_or_insert_with(|| {
-            let descriptor = BindGroupLayoutDescriptor {
-                entries: vec![wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                        ty: wgpu::BufferBindingType::Uniform,
-                    },
-                    count: None,
-                }],
-            };
-
-            instructions.extend_one(Low::BindGroupLayout(descriptor));
-            let descriptor_id = *bind_group_layouts;
-            *bind_group_layouts += 1;
-            descriptor_id
-        })
-    }
-
-    fn make_paint_group_layout(&mut self) -> usize {
-        let bind_group_layouts = &mut self.bind_group_layouts;
-        let instructions = &mut self.instructions;
-        *self.paint_group_layout.get_or_insert_with(|| {
-            let descriptor = BindGroupLayoutDescriptor {
-                entries: vec![
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler {
-                            filtering: true,
-                            comparison: false,
-                        },
-                        count: None,
-                    },
-                ],
-            };
-
-            instructions.extend_one(Low::BindGroupLayout(descriptor));
-            let descriptor_id = *bind_group_layouts;
-            *bind_group_layouts += 1;
-            descriptor_id
-        })
-    }
-
-    fn make_stage_group(&mut self, binding: u32) -> usize {
-        use shaders::stage::StageKind;
-        let bind_group_layouts = &mut self.bind_group_layouts;
-        let instructions = &mut self.instructions;
-
-        // For encoding we have two extra bindings, sampler and in_texture.
-        let encode: bool = binding > StageKind::ALL.len() as u32;
-
-        *self.stage_group_layout.entry(binding).or_insert_with(|| {
-            let mut entries = vec![];
-            for (num, kind) in StageKind::ALL.iter().enumerate() {
-                let i = num as u32;
-                if i != binding {
-                    continue;
-                }
-
-                entries.push(wgpu::BindGroupLayoutEntry {
-                    binding: i,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::ReadOnly,
-                        format: kind.texture_format(),
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                });
-            }
-
-            for (num, kind) in StageKind::ALL.iter().enumerate() {
-                let i = num as u32 + 16;
-                if i != binding {
-                    continue;
-                }
-
-                entries.push(wgpu::BindGroupLayoutEntry {
-                    binding: i,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: kind.texture_format(),
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                });
-            }
-
-            if encode {
-                entries.push(wgpu::BindGroupLayoutEntry {
-                    binding: 32,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                });
-
-                entries.push(wgpu::BindGroupLayoutEntry {
-                    binding: 33,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler {
-                        filtering: true,
-                        comparison: false,
-                    },
-                    count: None,
-                });
-            }
-
-            let descriptor = BindGroupLayoutDescriptor { entries };
-            instructions.extend_one(Low::BindGroupLayout(descriptor));
-            let descriptor_id = *bind_group_layouts;
-            *bind_group_layouts += 1;
-            descriptor_id
-        })
-    }
-
-    fn make_paint_layout(&mut self, desc: &SimpleRenderPipelineDescriptor) -> usize {
-        let quad_bind_group = self.make_quad_bind_group();
-        let paint_bind_group = match desc.fragment_texture {
-            TextureBind::Texture(_) => self.make_paint_group_layout(),
-            TextureBind::PreComputedGroup { layout, .. } => layout,
-        };
-
-        let mut bind_group_layouts = vec![quad_bind_group, paint_bind_group];
-
-        if let BufferBind::None = desc.fragment_bind_data {
-            let layouts = &mut self.pipeline_layouts;
-            let instructions = &mut self.instructions;
-
-            *self.paint_pipeline_layout.get_or_insert_with(|| {
-                let descriptor = PipelineLayoutDescriptor {
-                    bind_group_layouts,
-                    push_constant_ranges: &[],
-                };
-
-                instructions.extend_one(Low::PipelineLayout(descriptor));
-                let descriptor_id = *layouts;
-                *layouts += 1;
-                descriptor_id
-            })
-        } else {
-            bind_group_layouts.push(self.make_generic_fragment_bind_group());
-
-            let layouts = &mut self.pipeline_layouts;
-            let instructions = &mut self.instructions;
-
-            let descriptor = PipelineLayoutDescriptor {
-                bind_group_layouts,
-                push_constant_ranges: &[],
-            };
-
-            instructions.extend_one(Low::PipelineLayout(descriptor));
-            let descriptor_id = *layouts;
-            *layouts += 1;
-            descriptor_id
+    /// Get a reference to the binary data, given the allocator/buffer.
+    pub fn as_slice<'lt>(&'lt self, buffer: &'lt Vec<u8>) -> &'lt [u8] {
+        match self {
+            BufferInitContent::Owned(ref data) => &data,
+            &BufferInitContent::Defer { start, end } => &buffer[start..end],
         }
     }
-
-    fn shader(&mut self, desc: ShaderDescriptor) -> Result<usize, LaunchError> {
-        self.instructions.extend_one(Low::Shader(desc));
-        let idx = self.shaders;
-        self.shaders += 1;
-        Ok(idx)
-    }
-
-    fn fragment_shader(
-        &mut self,
-        kind: Option<FragmentShader>,
-        source: Cow<'static, [u32]>,
-    ) -> Result<usize, LaunchError> {
-        if let Some(&shader) = kind.and_then(|k| self.fragment_shaders.get(&k)) {
-            return Ok(shader);
-        }
-
-        self.shader(ShaderDescriptor {
-            name: "",
-            source_spirv: source,
-        })
-    }
-
-    fn vertex_shader(
-        &mut self,
-        kind: Option<VertexShader>,
-        source: Cow<'static, [u32]>,
-    ) -> Result<usize, LaunchError> {
-        if let Some(&shader) = kind.and_then(|k| self.vertex_shaders.get(&k)) {
-            return Ok(shader);
-        }
-
-        self.shader(ShaderDescriptor {
-            name: "",
-            source_spirv: source,
-        })
-    }
-
-    #[rustfmt::skip]
-    fn simple_quad_buffer(&mut self) -> DeviceBuffer {
-        let buffers = &mut self.buffers;
-        let instructions = &mut self.instructions;
-        *self.simple_quad_buffer.get_or_insert_with(|| {
-            // Sole quad!
-            let content: &'static [f32; 8] = &[
-                1.0, 1.0,
-                1.0, 0.0,
-                0.0, 1.0,
-                0.0, 0.0,
-            ];
-
-            let descriptor = BufferDescriptorInit {
-                usage: BufferUsage::InVertices,
-                content: bytemuck::cast_slice(content).into(),
-            };
-
-            instructions.extend_one(Low::BufferInit(descriptor));
-
-            let buffer = *buffers;
-            *buffers += 1;
-            DeviceBuffer(buffer)
-        })
-    }
-
-    fn simple_render_pipeline(
-        &mut self,
-        desc: &SimpleRenderPipelineDescriptor,
-    ) -> Result<usize, LaunchError> {
-        let layout = self.make_paint_layout(desc);
-        let format = match desc.pipeline_target {
-            PipelineTarget::Texture(texture) => {
-                let format = self.texture_map[&texture].format.format;
-                // eprintln!("Target texture {:?} with format {:?}", texture, format);
-                format
-            }
-            PipelineTarget::PreComputedGroup { target_format } => {
-                // eprintln!("Target attachment with format {:?}", target_format);
-                target_format
-            }
-        };
-
-        let (vertex, vertex_entry_point) = match desc.vertex {
-            ShaderBind::ShaderMain(shader) => (shader, "main"),
-            ShaderBind::Shader { id, entry_point } => (id, entry_point),
-        };
-        let (fragment, fragment_entry_point) = match desc.fragment {
-            ShaderBind::ShaderMain(shader) => (shader, "main"),
-            ShaderBind::Shader { id, entry_point } => (id, entry_point),
-        };
-
-        self.instructions
-            .extend_one(Low::RenderPipeline(RenderPipelineDescriptor {
-                vertex: VertexState {
-                    entry_point: vertex_entry_point,
-                    vertex_module: vertex,
-                },
-                fragment: FragmentState {
-                    entry_point: fragment_entry_point,
-                    fragment_module: fragment,
-                    targets: vec![wgpu::ColorTargetState {
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                        format,
-                    }],
-                },
-                primitive: PrimitiveState::TriangleStrip,
-                layout,
-            }));
-
-        let pipeline = self.render_pipelines;
-        self.render_pipelines += 1;
-        Ok(pipeline)
-    }
-
-    fn make_sampler(&mut self, descriptor: SamplerDescriptor) -> usize {
-        let instructions = &mut self.instructions;
-        let sampler = &mut self.sampler;
-        *self
-            .known_samplers
-            .entry(descriptor)
-            .or_insert_with_key(|desc| {
-                let sampler_id = *sampler;
-                instructions.extend_one(Low::Sampler(SamplerDescriptor {
-                    address_mode: desc.address_mode,
-                    border_color: desc.border_color,
-                    resize_filter: desc.resize_filter,
-                }));
-                *sampler += 1;
-                sampler_id
-            })
-    }
-
-    fn make_bind_group_sampled_texture(&mut self, texture: Texture) -> Result<usize, LaunchError> {
-        let view = self.texture_view(texture)?;
-
-        let sampler = self.make_sampler(SamplerDescriptor {
-            address_mode: wgpu::AddressMode::default(),
-            border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
-            resize_filter: wgpu::FilterMode::Nearest,
-        });
-
-        let group = self.bind_groups;
-        let descriptor = BindGroupDescriptor {
-            layout_idx: self.make_paint_group_layout(),
-            entries: vec![
-                BindingResource::TextureView(view),
-                BindingResource::Sampler(sampler),
-            ],
-            sparse: vec![],
-        };
-
-        self.push(Low::BindGroup(descriptor))?;
-        Ok(group)
-    }
-
-    fn make_opto_fragment_group(
-        &mut self,
-        binding: u32,
-        // The staging texture, whose staging texture is bound to IO-storage image.
-        texture: Texture,
-        // The non-staging texture which we bind to the sampler.
-        view: Option<Texture>,
-    ) -> Result<usize, LaunchError> {
-        let texture = self
-            .staging_map
-            .get(&texture)
-            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
-            .device;
-
-        // FIXME: could be cached.
-        let image_id = self.texture_views;
-        self.push(Low::TextureView(TextureViewDescriptor { texture }))?;
-
-        let mut sparse = vec![(binding, BindingResource::TextureView(image_id))];
-
-        // For encoding we have two extra bindings, sampler and in_texture.
-        if let Some(view) = view {
-            // FIXME: unnecessary duplication.
-            let sampler = self.make_sampler(SamplerDescriptor {
-                address_mode: wgpu::AddressMode::default(),
-                border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
-                resize_filter: wgpu::FilterMode::Nearest,
-            });
-
-            let view = self
-                .texture_map
-                .get(&view)
-                .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
-                .device;
-
-            // FIXME: could be cached.
-            let view_id = self.texture_views;
-            self.push(Low::TextureView(TextureViewDescriptor { texture: view }))?;
-
-            sparse.push((32, BindingResource::TextureView(view_id)));
-            sparse.push((33, BindingResource::Sampler(sampler)));
-        }
-
-        let group = self.bind_groups;
-        let descriptor = BindGroupDescriptor {
-            layout_idx: self.make_stage_group(binding),
-            entries: vec![],
-            sparse,
-        };
-
-        self.push(Low::BindGroup(descriptor))?;
-        Ok(group)
-    }
-
-    fn make_bound_buffer(
-        &mut self,
-        bind: &BufferBind<'_>,
-        layout_idx: usize,
-    ) -> Result<Option<usize>, LaunchError> {
-        let buffer = match bind {
-            BufferBind::None => return Ok(None),
-            BufferBind::Set { data } => {
-                let buffer = self.buffers;
-                self.push(Low::BufferInit(BufferDescriptorInit {
-                    // FIXME: avoid the allocation here?
-                    content: Cow::Owned(data.to_vec()),
-                    usage: BufferUsage::Uniform,
-                }))?;
-                DeviceBuffer(buffer)
-            }
-        };
-
-        let group = self.bind_groups;
-        let descriptor = BindGroupDescriptor {
-            layout_idx,
-            entries: vec![BindingResource::Buffer {
-                buffer_idx: buffer.0,
-                offset: 0,
-                size: None,
-            }],
-            sparse: vec![],
-        };
-
-        self.push(Low::BindGroup(descriptor))?;
-        Ok(Some(group))
-    }
-
-    /// Render the pipeline, after all customization and buffers were bound..
-    fn prepare_simple_pipeline(
-        &mut self,
-        descriptor: SimpleRenderPipelineDescriptor,
-    ) -> Result<SimpleRenderPipeline, LaunchError> {
-        let SimpleRenderPipelineDescriptor {
-            pipeline_target: _,
-            vertex_bind_data,
-            fragment_texture: texture,
-            fragment_bind_data,
-            vertex: _,
-            fragment: _,
-        } = &descriptor;
-
-        let pipeline = self.simple_render_pipeline(&descriptor)?;
-        let buffer = self.simple_quad_buffer();
-
-        let group = match texture {
-            TextureBind::Texture(texture) => {
-                let group = self.make_bind_group_sampled_texture(*texture)?;
-                // eprintln!("Using Texture {:?} as group {:?}", texture, group);
-                group
-            }
-            &TextureBind::PreComputedGroup { group, .. } => {
-                // eprintln!("Using Target Group {:?}", group);
-                group
-            }
-        };
-
-        let vertex_layout = self.make_quad_bind_group();
-        let vertex_bind = self.make_bound_buffer(vertex_bind_data, vertex_layout)?;
-
-        // FIXME: this builds the layout even when it is not required.
-        let vertex_layout = self.make_generic_fragment_bind_group();
-        let fragment_bind = self.make_bound_buffer(fragment_bind_data, vertex_layout)?;
-
-        Ok(SimpleRenderPipeline {
-            pipeline,
-            buffer,
-            group,
-            vertex_bind,
-            vertices: 4,
-            fragment_bind,
-        })
-    }
-
-    #[rustfmt::skip]
-    pub const FULL_VERTEX_BUFFER: [[f32; 2]; 16] = [
-        // [min_u, min_v], [0.0, 0.0],
-        [0.0, 0.0], [0.0, 0.0],
-        // [max_u, 0.0], [0.0, 0.0],
-        [1.0, 0.0], [0.0, 0.0],
-        // [max_u, max_v], [0.0, 0.0],
-        [1.0, 1.0], [0.0, 0.0],
-        // [min_u, max_v], [0.0, 0.0],
-        [0.0, 1.0], [0.0, 0.0],
-
-        [0.0, 0.0], [0.0, 0.0],
-        [1.0, 0.0], [0.0, 0.0],
-        [1.0, 1.0], [0.0, 0.0],
-        [0.0, 1.0], [0.0, 0.0],
-    ];
-
-    fn render(&mut self, pipeline: SimpleRenderPipeline) -> Result<(), LaunchError> {
-        let SimpleRenderPipeline {
-            pipeline,
-            group,
-            buffer,
-            vertex_bind,
-            vertices,
-            fragment_bind,
-        } = pipeline;
-
-        self.push(Low::SetPipeline(pipeline))?;
-
-        if let Some(quad) = vertex_bind {
-            self.push(Low::SetBindGroup {
-                group: quad,
-                index: 0,
-                offsets: Cow::Borrowed(&[]),
-            })?;
-        }
-
-        self.push(Low::SetBindGroup {
-            group,
-            index: 1,
-            offsets: Cow::Borrowed(&[]),
-        })?;
-
-        self.push(Low::SetVertexBuffer {
-            buffer: buffer.0,
-            slot: 0,
-        })?;
-
-        if let Some(bind) = fragment_bind {
-            self.push(Low::SetBindGroup {
-                group: bind,
-                index: 2,
-                offsets: Cow::Borrowed(&[]),
-            })?;
-        }
-
-        self.push(Low::DrawOnce { vertices })?;
-
-        Ok(())
-    }
-
-    #[rustfmt::skip]
-    fn prepare_render(
-        &mut self,
-        // The texture which we are using as the fragment source.
-        texture: Texture,
-        // The function we are using.
-        function: &Function,
-        // The texture we are rendering to.
-        target: Texture,
-    )
-        -> Result<SimpleRenderPipeline, LaunchError>
-    {
-        match function {
-            Function::PaintOnTop { selection, target: target_coords, viewport, paint_on_top } => {
-                let (tex_width, tex_height) = self.texture_map[&texture].format.size;
-
-                let vertex = self.vertex_shader(
-                    Some(VertexShader::Noop),
-                    shader_include_to_spirv(shaders::VERT_NOOP))?;
-
-                let fragment = paint_on_top.fragment_shader();
-                let fragment = self.fragment_shader(
-                    Some(FragmentShader::PaintOnTop(paint_on_top.clone())),
-                    shader_include_to_spirv(fragment))?;
-
-                // FIXME: there seems to be two floats padding after each vec2.
-                let min_u = (selection.x as f32) / (tex_width.get() as f32);
-                let max_u = (selection.max_x as f32) / (tex_width.get() as f32);
-                let min_v = (selection.y as f32) / (tex_height.get() as f32);
-                let max_v = (selection.max_y as f32) / (tex_height.get() as f32);
-
-                let coords = target_coords.to_screenspace_coords(viewport);
-
-                // std140, always pad to 16 bytes.
-                let buffer: [[f32; 2]; 16] = [
-                    [min_u, min_v], [0.0, 0.0],
-                    [max_u, min_v], [0.0, 0.0],
-                    [max_u, max_v], [0.0, 0.0],
-                    [min_u, max_v], [0.0, 0.0],
-
-                    coords[0], [0.0, 0.0],
-                    coords[1], [0.0, 0.0],
-                    coords[2], [0.0, 0.0],
-                    coords[3], [0.0, 0.0],
-                ];
-
-                self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
-                    pipeline_target: PipelineTarget::Texture(target),
-                    vertex_bind_data: BufferBind::Set {
-                        data: bytemuck::cast_slice(&buffer[..]),
-                    },
-                    fragment_texture: TextureBind::Texture(texture),
-                    fragment_bind_data: BufferBind::None,
-                    vertex: ShaderBind::ShaderMain(vertex),
-                    fragment: ShaderBind::ShaderMain(fragment),
-                })
-            },
-            Function::Transform { matrix } => {
-                let vertex = self.vertex_shader(
-                    Some(VertexShader::Noop),
-                    shader_include_to_spirv(shaders::VERT_NOOP))?;
-
-                let fragment = self.fragment_shader(
-                    Some(FragmentShader::LinearColorMatrix),
-                    shader_include_to_spirv(shaders::FRAG_LINEAR))?;
-
-                let matrix = matrix.into_inner();
-
-                // std140, always pad to 16 bytes.
-                // matrix is an array of its columns.
-                let rgb_matrix: [f32; 12] = [
-                   matrix[0], matrix[3], matrix[6], 0.0,
-                   matrix[1], matrix[4], matrix[7], 0.0,
-                   matrix[2], matrix[5], matrix[8], 0.0,
-                ];
-
-                self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
-                    pipeline_target: PipelineTarget::Texture(target),
-                    vertex_bind_data: BufferBind::Set {
-                        data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
-                    },
-                    fragment_texture: TextureBind::Texture(texture),
-                    fragment_bind_data: BufferBind::Set {
-                        data: bytemuck::cast_slice(&rgb_matrix[..]),
-                    },
-                    vertex: ShaderBind::ShaderMain(vertex),
-                    fragment: ShaderBind::ShaderMain(fragment),
-                })
-            },
-            Function::ToLinearOpto { parameter, stage_kind } => {
-                let vertex = self.vertex_shader(
-                    Some(VertexShader::Noop),
-                    shader_include_to_spirv(shaders::VERT_NOOP))?;
-
-                let fragment = self.fragment_shader(
-                    Some(FragmentShader::Convert),
-                    shader_include_to_spirv(stage_kind.decode_src()))?;
-
-                let buffer = parameter.serialize_std140();
-                // FIXME: see below, shaderc requires renamed entry points to "main".
-                let _entry_point = stage_kind.encode_entry_point();
-
-                let layout = self.make_stage_group(stage_kind.decode_binding());
-
-                let group = self.make_opto_fragment_group(
-                    stage_kind.decode_binding(),
-                    texture,
-                    None,
-                )?;
-
-                self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
-                    pipeline_target: PipelineTarget::PreComputedGroup {
-                        target_format: parameter.linear_format(),
-                    },
-                    vertex_bind_data: BufferBind::Set {
-                        data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
-                    },
-                    fragment_texture: TextureBind::PreComputedGroup {
-                        group,
-                        layout,
-                    },
-                    fragment_bind_data: BufferBind::Set {
-                        data: bytemuck::cast_slice(&buffer[..]),
-                    },
-                    vertex: ShaderBind::ShaderMain(vertex),
-                    fragment: ShaderBind::Shader {
-                        // FIXME: for some weird reason this MUST be `main` instead of the true
-                        // entry point. This is probably a 'bug' in the pass through `shaderc` in
-                        // preprocessing.
-                        entry_point: "main",
-                        id: fragment,
-                    },
-                })
-            }
-            Function::FromLinearOpto { parameter, stage_kind } => {
-                let vertex = self.vertex_shader(
-                    Some(VertexShader::Noop),
-                    shader_include_to_spirv(shaders::VERT_NOOP))?;
-
-                let fragment = self.fragment_shader(
-                    Some(FragmentShader::Convert),
-                    shader_include_to_spirv(stage_kind.encode_src()))?;
-
-                let buffer = parameter.serialize_std140();
-                // FIXME: see below, shaderc requires renamed entry points to "main".
-                let _entry_point = stage_kind.decode_entry_point();
-
-                let layout = self.make_stage_group(stage_kind.encode_binding());
-
-                let group = self.make_opto_fragment_group(
-                    stage_kind.encode_binding(),
-                    texture,
-                    Some(texture),
-                )?;
-
-                // eprintln!("{:?} {:?}", parameter, buffer);
-
-                self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
-                    pipeline_target: PipelineTarget::PreComputedGroup {
-                        target_format: parameter.linear_format(),
-                    },
-                    vertex_bind_data: BufferBind::Set {
-                        data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
-                    },
-                    fragment_texture: TextureBind::PreComputedGroup {
-                        group,
-                        layout,
-                    },
-                    fragment_bind_data: BufferBind::Set {
-                        data: bytemuck::cast_slice(&buffer[..]),
-                    },
-                    vertex: ShaderBind::ShaderMain(vertex),
-                    fragment: ShaderBind::Shader {
-                        // FIXME: for some weird reason this MUST be `main` instead of the true
-                        // entry point. This is probably a 'bug' in the pass through `shaderc` in
-                        // preprocessing.
-                        entry_point: "main",
-                        id: fragment,
-                    },
-                })
-            }
-        }
+}
+
+impl From<Vec<u8>> for BufferInitContent {
+    fn from(vec: Vec<u8>) -> Self {
+        BufferInitContent::Owned(vec)
     }
 }
 
@@ -2427,17 +996,11 @@ impl From<Rectangle> for QuadTarget {
     }
 }
 
-fn shader_include_to_spirv(src: &[u8]) -> Cow<'static, [u32]> {
-    assert!(src.len() % 4 == 0);
-    let mut target = vec![0u32; src.len() / 4];
-    bytemuck::cast_slice_mut(&mut target).copy_from_slice(src);
-    Cow::Owned(target)
-}
-
-impl PaintOnTopKind {
-    fn fragment_shader(&self) -> &[u8] {
-        match self {
-            PaintOnTopKind::Copy => shaders::FRAG_COPY,
+impl From<&'_ wgpu::Device> for Capabilities {
+    fn from(device: &'_ wgpu::Device) -> Self {
+        Capabilities {
+            features: device.features(),
+            limits: device.limits(),
         }
     }
 }
@@ -2460,7 +1023,9 @@ impl LaunchError {
     // FIXME: find a better error representation but it's okay for now.
     // #[deprecated = "This should be cleaned up"]
     pub(crate) fn InternalCommandError(line: u32) -> Self {
-        LaunchError { line }
+        LaunchError {
+            kind: LaunchErrorKind::FromLine(line),
+        }
     }
 }
 

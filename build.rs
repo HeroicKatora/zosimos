@@ -49,6 +49,24 @@ fn main() -> Result<(), BuildError> {
         SimpleSource {
             path: "src/shaders/stage.frag",
             kind: ShaderKind::Fragment,
+            entry: "encode_r8ui",
+            name_overwrite: Some("stage_e8ui"),
+        },
+        SimpleSource {
+            path: "src/shaders/stage.frag",
+            kind: ShaderKind::Fragment,
+            entry: "decode_r16ui",
+            name_overwrite: Some("stage_d16ui"),
+        },
+        SimpleSource {
+            path: "src/shaders/stage.frag",
+            kind: ShaderKind::Fragment,
+            entry: "encode_r16ui",
+            name_overwrite: Some("stage_e16ui"),
+        },
+        SimpleSource {
+            path: "src/shaders/stage.frag",
+            kind: ShaderKind::Fragment,
             entry: "decode_r32ui",
             name_overwrite: Some("stage_d32ui"),
         },
@@ -57,6 +75,48 @@ fn main() -> Result<(), BuildError> {
             kind: ShaderKind::Fragment,
             entry: "encode_r32ui",
             name_overwrite: Some("stage_e32ui"),
+        },
+        SimpleSource {
+            path: "src/shaders/fill.frag",
+            kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
+        },
+        SimpleSource {
+            path: "src/shaders/distribution_normal2d.frag",
+            kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
+        },
+        SimpleSource {
+            path: "src/shaders/palette.frag",
+            kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
+        },
+        SimpleSource {
+            path: "src/shaders/bilinear.frag",
+            kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
+        },
+        SimpleSource {
+            path: "src/shaders/oklab.frag",
+            kind: ShaderKind::Fragment,
+            entry: "oklab_encode",
+            name_overwrite: Some("oklab_encode"),
+        },
+        SimpleSource {
+            path: "src/shaders/oklab.frag",
+            kind: ShaderKind::Fragment,
+            entry: "oklab_decode",
+            name_overwrite: Some("oklab_decode"),
+        },
+        SimpleSource {
+            path: "src/shaders/box3.frag",
+            kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
         },
     ];
 

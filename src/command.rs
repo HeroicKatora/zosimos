@@ -1,9 +1,15 @@
-use crate::buffer::{BufferLayout, Color, ColorChannel, Descriptor, RowMatrix, Texel, Whitepoint};
+use crate::buffer::{
+    self, BufferLayout, ChannelPosition, Color, ColorChannel, Descriptor, RowMatrix, SampleParts,
+    Texel, Whitepoint,
+};
 use crate::pool::PoolImage;
 use crate::program::{
-    CompileError, Function, ImageBufferAssignment, ImageBufferPlan, PaintOnTopKind, Program,
-    QuadTarget, Texture,
+    CompileError, Function, ImageBufferAssignment, ImageBufferPlan, Program, QuadTarget, Texture,
 };
+pub use crate::shaders::bilinear::Shader as Bilinear;
+pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
+use crate::shaders::{self, FragmentShader, PaintOnTopKind};
+
 use std::collections::HashMap;
 
 /// A reference to one particular value.
@@ -63,6 +69,9 @@ enum Op {
 
 #[derive(Clone, Debug)]
 pub(crate) enum ConstructOp {
+    Bilinear(Bilinear),
+    /// A 2d normal distribution.
+    DistributionNormal(shaders::DistributionNormal2d),
     // TODO: can optimize this repr for the common case.
     Solid(Vec<u8>),
 }
@@ -87,16 +96,15 @@ pub(crate) enum High {
         /// The target texture.
         dst: Register,
     },
-    #[deprecated = "Should be mapped to of paint with a discarding load or another buffer initialization."]
-    Construct { dst: Texture, op: ConstructOp },
-    Paint {
-        texture: Texture,
-        dst: Target,
-        fn_: Function,
-    },
+    /// Add an additional texture operand to the next operation.
+    PushOperand(Texture),
+    /// Call a function on the currently prepared operands.
+    Construct { dst: Target, fn_: Function },
     /// Last phase marking a register as done.
     /// This is emitted after the Command defining the register has been translated.
-    Done(usize),
+    Done(Register),
+    /// Copy binary data from a buffer to another.
+    Copy { src: Register, dst: Register },
 }
 
 /// The target image texture of a paint operation (pipeline).
@@ -108,7 +116,7 @@ pub(crate) enum Target {
     Load(Texture),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum UnaryOp {
     /// Op = id
     Crop(Rectangle),
@@ -116,14 +124,19 @@ pub(crate) enum UnaryOp {
     /// And color needs to be 'color compatible' with the prior T (see module).
     ColorConvert(ColorConversion),
     /// Op(T) = T[.color=select(channel, color)]
-    Extract { channel: ColorChannel },
+    Extract { channel: ChannelPosition },
     /// Op(T) = T[.whitepoint=target]
     /// This is a partial method for CIE XYZ-ish color spaces. Note that ICC requires adaptation to
     /// D50 for example as the reference color space.
     ChromaticAdaptation(ChromaticAdaptation),
+    /// Op(T) = T[.texel=texel]
+    /// And the byte width of new texel must be consistent with the current byte width.
+    Transmute,
+    /// Op(T) = T
+    Derivative(Derivative),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum BinaryOp {
     /// Op = id
     Affine(Affine),
@@ -133,7 +146,13 @@ pub(crate) enum BinaryOp {
     /// Replace a channel T with U itself.
     /// Op[T, U] = T
     /// where select(channel, T.color) = U.color
-    Inject { channel: ColorChannel },
+    Inject {
+        channel: ChannelPosition,
+        from_channels: SampleParts,
+    },
+    /// Sample from a palette based on the color value of another image.
+    /// Op[T, U] = T
+    Palette(shaders::PaletteShader),
 }
 
 /// A rectangle in `u32` space.
@@ -158,7 +177,7 @@ pub enum Blend {
 ///
 /// Affine transformations are a combination of scaling, translation, rotation. They describe a
 /// transformation of the 2D space of the original image.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Affine {
     /// The affine transformation, as a row-major homogeneous matrix.
     ///
@@ -174,7 +193,7 @@ pub struct Affine {
 /// an image so far that a very particular subset of pixels (or linear interpolation) is shown that
 /// results in an image visually very different from the original. Such an attack works because
 /// scaling down leads to many pixels being ignored.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum AffineSample {
     /// Choose the nearest pixel.
     ///
@@ -189,11 +208,21 @@ pub enum AffineSample {
 
 /// The parameters of color conversion which we will use in the draw call.
 #[derive(Clone, Debug)]
-pub(crate) struct ColorConversion {
-    /// The matrix converting source to XYZ.
-    to_xyz_matrix: RowMatrix,
-    /// The matrix converting from XYZ to target.
-    from_xyz_matrix: RowMatrix,
+pub(crate) enum ColorConversion {
+    Xyz {
+        /// The matrix converting source to XYZ.
+        to_xyz_matrix: RowMatrix,
+        /// The matrix converting from XYZ to target.
+        from_xyz_matrix: RowMatrix,
+    },
+    XyzToOklab {
+        /// The matrix converting source to XYZ.
+        to_xyz_matrix: RowMatrix,
+    },
+    OklabToXyz {
+        /// The matrix converting from XYZ to target.
+        from_xyz_matrix: RowMatrix,
+    },
 }
 
 /// Reference of matrices and more: http://brucelindbloom.com/index.html?Eqn_ChromAdapt.html
@@ -275,9 +304,125 @@ pub enum ChromaticAdaptationMethod {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     /// Which color channel will provide the texture coordinate along width axis.
-    pub width: ColorChannel,
+    pub width: Option<ColorChannel>,
     /// Which color channel will provide the texture coordinate along height axis.
-    pub height: ColorChannel,
+    pub height: Option<ColorChannel>,
+    /// The base coordinate for sampling along width.
+    pub width_base: i32,
+    /// The base coordinate for sampling along height.
+    pub height_base: i32,
+    // FIXME: wrapping?
+}
+
+/// Calculate a first derivative.
+#[derive(Clone, Debug, Hash)]
+pub struct Derivative {
+    pub method: DerivativeMethod,
+    pub direction: Direction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Direction {
+    /// Along the height of the image.
+    Height,
+    /// Along the width of the image.
+    Width,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DerivativeMethod {
+    /// A 2-sized filter with diagonal basis direction.
+    ///     [[1 0] [0 -1]]
+    ///     [[0 1] [-1 0]]
+    Roberts,
+    /// The result of derivative with average smoothing.
+    ///     1/6 [1 1 1]^T [1 0 -1]
+    Prewitt,
+    /// The result of derivative with weighted smoothing.
+    ///     1/8 [1 2 1]^T [1 0 -1]
+    Sobel,
+    /// The Scharr 3×3 operator, floating point precision with the error bound of the paper.
+    ///
+    /// There is a single numerically consistent choice in differentiation but the smoothing for
+    /// rotational symmetry is:
+    ///     [46.84 162.32 46.84]/256
+    ///
+    /// It is optimized to most accurately model the perfect transfer function `pi·i·w` (the first
+    /// derivative operator) while providing the ability to steer the direction. That is, you can
+    /// calculate the derivative into any direction by composing Dx and Dy. The weights for this
+    /// optimization had been `w(k) = ∏i:(1 to D) cos^4(π/2·k_i)` where `D = 2` in the flat image
+    /// case.
+    ///
+    /// It's a bit constricting to use it here because on the GPU integer arithmetic is _NOT_ the
+    /// most efficient form of computation (which is the motivation behind using a quantized
+    /// integer matrix). They nevertheless exist for compatibility reasons.
+    ///
+    /// Reference: Scharr's dissertation, Optimale Operatoren in der Digitalen Bildverarbeitung
+    /// <https://doi.org/10.11588/heidok.00000962>
+    /// <http://archiv.ub.uni-heidelberg.de/volltextserver/962/1/Diss.pdf>
+    Scharr3,
+    /// A 4-tab derivative operator by Scharr.
+    /// * Derivative: `[77.68 139.48 …]/256`
+    /// * Smoothing: `[16.44 111.56 …]/256`
+    Scharr4,
+    /// A 5-tab derivative by Scharr.
+    /// * Derivative: `[21.27 85.46 0 …]/256`
+    /// * Smoothing: `[5.91 61.77 120.64 …]/256`
+    Scharr5,
+    /// The 4-bit approximated Scharr operator.
+    ///     1/32 [3 10 3]^T [1 0 -1]
+    ///
+    /// This is provided for compatibility! For accuracy you may instead prefer to use Scharr3 or
+    /// Schar5Tab.
+    Scharr3To4Bit,
+    /// A non-smoothed 5-tab derivative.
+    ///     `[-0.262 1.525 0 -1.525 0.262]`
+    Scharr5Tab,
+    /// The 8-bit approximated Scharr operator.
+    ///
+    /// This is provided for compatibility! For accuracy you may instead prefer to use Scharr3.
+    Scharr3To8Bit,
+}
+
+/// Methods for removing noise from an image.
+///
+/// WIP: these are not yet implemented.
+///
+/// This intuitive understanding applies to single valued, gray scale images. The operator will
+/// also work for any colored images as long as the color space defines a luminance, lightness,
+/// or value channel. We will then choose a pixel by median of that channel.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SmoothingMethod {
+    /// Also called: average, arithmetic mean.
+    Laplace,
+    /// Weighted average using a gauss kernel.
+    Gaussian,
+    /// Choose the median value from surrounding pixels.
+    ///
+    /// The choice is made through the Luma channel.
+    Median,
+    /// Bilateral filter, weighting pixels by values.
+    ///
+    /// The weighting is made through the Luma channel.
+    Bilteral,
+    /// Chooses a value from the surrounding region with minimal variance.
+    ///
+    /// This implements Kuwahara's initial approach where the representation is chosen to be the
+    /// mean value and the regions are defined as exactly 4 regions overlapping on the axes and the
+    /// pixel itself.
+    ///
+    /// Using hexadecimal bit masks to represent the regions, an example with 3×3 regions:
+    ///
+    /// ```text
+    /// 11322
+    /// 11322
+    /// 55faa
+    /// 44c88
+    /// 44c88
+    /// ```
+    Kuwahara,
 }
 
 #[derive(Debug)]
@@ -291,8 +436,18 @@ enum CommandErrorKind {
     ConflictingTypes(Descriptor, Descriptor),
     GenericTypeError,
     Other,
+    Unimplemented,
 }
 
+/// FIXME: missing functions
+/// - a way to represent colors as a function of wavelength, then evaluate with the standard
+/// observers.
+/// - implement simulation of color blindness (reuses matrix multiplication, related to observer)
+/// - generate color ramps
+/// - color interpolation along a cubic spline (how do we represent the parameters?)
+/// - hue shift, transforms on the a*b* circle, such as mobius transform (z-a)/(1-z·adj(a)) i.e or
+///   other holomorphic functions. Ways to construct mobius transfrom from three key points. That
+///   is particular relevant for color correction.
 impl CommandBuffer {
     /// Declare an input.
     ///
@@ -340,20 +495,44 @@ impl CommandBuffer {
         // cases, we will later add some temporary conversion.
         match (&desc_src.texel.color, &texel.color) {
             (
-                Color::Xyz {
+                Color::Rgb {
                     primary: primary_src,
                     whitepoint: wp_src,
                     ..
                 },
-                Color::Xyz {
+                Color::Rgb {
                     primary: primary_dst,
                     whitepoint: wp_dst,
                     ..
                 },
             ) if wp_src == wp_dst => {
-                conversion = ColorConversion {
+                conversion = ColorConversion::Xyz {
                     from_xyz_matrix: primary_src.to_xyz(*wp_src),
                     to_xyz_matrix: primary_dst.to_xyz(*wp_dst),
+                };
+            }
+            (
+                Color::Rgb {
+                    primary,
+                    whitepoint: Whitepoint::D65,
+                    ..
+                },
+                Color::Oklab,
+            ) => {
+                conversion = ColorConversion::XyzToOklab {
+                    to_xyz_matrix: primary.to_xyz(Whitepoint::D65),
+                };
+            }
+            (
+                Color::Oklab,
+                Color::Rgb {
+                    primary,
+                    whitepoint: Whitepoint::D65,
+                    ..
+                },
+            ) => {
+                conversion = ColorConversion::OklabToXyz {
+                    from_xyz_matrix: primary.to_xyz(Whitepoint::D65),
                 };
             }
             _ => {
@@ -398,13 +577,13 @@ impl CommandBuffer {
         let (to_xyz_matrix, from_xyz_matrix);
 
         match desc_src.texel.color {
-            Color::Xyz {
+            Color::Rgb {
                 whitepoint,
                 primary,
                 transfer,
                 luminance,
             } => {
-                texel_color = Color::Xyz {
+                texel_color = Color::Rgb {
                     whitepoint: target,
                     primary,
                     transfer,
@@ -490,13 +669,28 @@ impl CommandBuffer {
         let texel = desc
             .channel_texel(channel)
             .ok_or_else(|| CommandError::OTHER)?;
+
+        let layout = buffer::RowLayoutDescription {
+            width: desc.layout.width(),
+            height: desc.layout.height(),
+            texel_stride: texel.samples.bits.bytes() as u64,
+            row_stride: (texel.samples.bits.bytes() as u64) * u64::from(desc.layout.width()),
+        };
+
+        let layout =
+            buffer::BufferLayout::with_row_layout(layout).ok_or_else(|| CommandError::OTHER)?;
+
+        // Check that we can actually extract that channel.
+        // This could be unimplemented if the position of a particular channel is not yet a stable
+        // detail. Also, we might introduce 'virtual' channels such as `Luminance` on an RGB image
+        // where such channels are computed by linear combination instead of a binary incidence
+        // vector. Then there might be colors where this does not exist.
+        let channel = ChannelPosition::new(channel).ok_or_else(|| CommandError::OTHER)?;
+
         let op = Op::Unary {
             src,
             op: UnaryOp::Extract { channel },
-            desc: Descriptor {
-                layout: desc.layout.clone(),
-                texel,
-            },
+            desc: Descriptor { layout, texel },
         };
 
         Ok(self.push(op))
@@ -511,11 +705,40 @@ impl CommandBuffer {
     /// One important use of this method is to add or removed the color interpretation of an image.
     /// This can be necessary when it has been algorithmically created or when one wants to
     /// intentionally ignore such meaning.
-    pub fn transmute(&mut self, _: Register, _: Texel) -> Result<Register, CommandError> {
-        Err(CommandError::OTHER)
+    pub fn transmute(&mut self, src: Register, texel: Texel) -> Result<Register, CommandError> {
+        let desc = self.describe_reg(src)?;
+
+        let supposed_type = Descriptor {
+            layout: desc.layout.clone(),
+            texel,
+        };
+
+        if desc.texel.samples.bits.bytes() != supposed_type.texel.samples.bits.bytes() {
+            return Err(CommandError {
+                inner: CommandErrorKind::ConflictingTypes(desc.clone(), supposed_type),
+            });
+        }
+
+        if !supposed_type.is_consistent() {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(supposed_type),
+            });
+        }
+
+        let op = Op::Unary {
+            src,
+            op: UnaryOp::Transmute,
+            desc: supposed_type,
+        };
+
+        Ok(self.push(op))
     }
 
     /// Overwrite some channels with overlaid data.
+    ///
+    /// This performs an implicit conversion of the overlaid data to the color channels which is
+    /// performed as if by transmutation. However, contrary to the transmutation we will _only_
+    /// allow the sample parts to be changed arbitrarily.
     pub fn inject(
         &mut self,
         below: Register,
@@ -526,18 +749,52 @@ impl CommandBuffer {
         let expected_texel = desc_below
             .channel_texel(channel)
             .ok_or_else(|| CommandError::OTHER)?;
-        let desc_above = self.describe_reg(above)?;
+        let mut desc_above = self.describe_reg(above)?.clone();
 
-        if expected_texel != desc_above.texel {
+        if desc_above.texel.samples.parts.num_components()
+            != expected_texel.samples.parts.num_components()
+        {
+            let wanted = Descriptor {
+                texel: expected_texel,
+                ..desc_below.clone()
+            };
+
             return Err(CommandError {
-                inner: CommandErrorKind::ConflictingTypes(desc_below.clone(), desc_above.clone()),
+                inner: CommandErrorKind::ConflictingTypes(wanted, desc_above),
             });
         }
+
+        // Override the sample part interpretation.
+        let from_channels = desc_above.texel.samples.parts;
+        desc_above.texel.samples.parts = expected_texel.samples.parts;
+
+        // FIXME: should we do parsing instead of validation?
+        // Some type like ChannelPosition but for multiple.
+        if from_channels.into_vec4().is_none() {
+            return Err(CommandError::OTHER);
+        }
+
+        if expected_texel != desc_above.texel {
+            let wanted = Descriptor {
+                texel: expected_texel,
+                ..desc_below.clone()
+            };
+
+            return Err(CommandError {
+                inner: CommandErrorKind::ConflictingTypes(wanted, desc_above),
+            });
+        }
+
+        // Find where to insert, see `extract` for this step.
+        let channel = ChannelPosition::new(channel).ok_or_else(|| CommandError::OTHER)?;
 
         let op = Op::Binary {
             lhs: below,
             rhs: above,
-            op: BinaryOp::Inject { channel },
+            op: BinaryOp::Inject {
+                channel,
+                from_channels,
+            },
             desc: desc_below.clone(),
         };
 
@@ -547,11 +804,75 @@ impl CommandBuffer {
     /// Grab colors from a palette based on an underlying image of indices.
     pub fn palette(
         &mut self,
-        _below: Register,
-        _channel: Palette,
-        _above: Register,
+        palette: Register,
+        config: Palette,
+        indices: Register,
     ) -> Result<Register, CommandError> {
-        todo!()
+        let desc = self.describe_reg(palette)?;
+        let idx_desc = self.describe_reg(indices)?;
+
+        // FIXME: check that channels are actually in indices' color type.
+        let x_coord = if let Some(coord) = config.width {
+            let pos = ChannelPosition::new(coord).ok_or_else(|| CommandError::TYPE_ERR)?;
+            pos.into_vec4()
+        } else {
+            [0.0; 4]
+        };
+
+        let y_coord = if let Some(coord) = config.height {
+            let pos = ChannelPosition::new(coord).ok_or_else(|| CommandError::TYPE_ERR)?;
+            pos.into_vec4()
+        } else {
+            [0.0; 4]
+        };
+
+        // Compute the target layout (and that we can represent it).
+        let target_layout = BufferLayout::with_row_layout(buffer::RowLayoutDescription {
+            width: idx_desc.layout.width(),
+            height: idx_desc.layout.height(),
+            row_stride: (idx_desc.layout.width() * u32::from(desc.layout.bytes_per_texel)).into(),
+            texel_stride: desc.layout.bytes_per_texel.into(),
+        })
+        .ok_or_else(|| CommandError::OTHER)?;
+
+        let op = Op::Binary {
+            lhs: palette,
+            rhs: indices,
+            op: BinaryOp::Palette(shaders::PaletteShader {
+                x_coord,
+                y_coord,
+                base_x: config.width_base,
+                base_y: config.height_base,
+            }),
+            desc: Descriptor {
+                layout: target_layout,
+                texel: desc.texel.clone(),
+            },
+        };
+
+        Ok(self.push(op))
+    }
+
+    /// Calculate the derivative of an image.
+    ///
+    /// Currently, will only calculate the derivative for color channels. The alpha channel will be
+    /// copied from the source pixel. To also calculate a derivative over the alpha channel you
+    /// should extract it as a value channel, calculate the derivative there and the inject the
+    /// result back to the image.
+    pub fn derivative(
+        &mut self,
+        image: Register,
+        config: Derivative,
+    ) -> Result<Register, CommandError> {
+        let desc = self.describe_reg(image)?.clone();
+
+        let op = Op::Unary {
+            src: image,
+            op: UnaryOp::Derivative(config),
+            desc,
+        };
+
+        Ok(self.push(op))
     }
 
     /// Overlay this image as part of a larger one, performing blending.
@@ -563,7 +884,7 @@ impl CommandBuffer {
         _blend: Blend,
     ) -> Result<Register, CommandError> {
         // TODO: What blending should we support
-        Err(CommandError::OTHER)
+        Err(CommandError::UNIMPLEMENTED)
     }
 
     /// A solid color image, from a descriptor and a single texel.
@@ -583,6 +904,60 @@ impl CommandBuffer {
         Ok(self.push(Op::Construct {
             desc: describe,
             op: ConstructOp::Solid(data.to_owned()),
+        }))
+    }
+
+    /// A 2d image with a normal distribution.
+    ///
+    /// The parameters are controlled through the `distribution` parameter while the `texel`
+    /// parameter controls the eventual binary encoding of the image. It must be compatible with a
+    /// single gray channel (but you can have electrical transfer functions, choose arbitrary bit
+    /// widths etc.).
+    pub fn distribution_normal2d(
+        &mut self,
+        describe: Descriptor,
+        distribution: shaders::DistributionNormal2d,
+    ) -> Result<Register, CommandError> {
+        if !describe.is_consistent() {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(describe),
+            });
+        }
+
+        if describe.texel.samples.parts != SampleParts::Luma
+            && describe.texel.samples.parts != SampleParts::LumaA
+        {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(describe),
+            });
+        }
+
+        Ok(self.push(Op::Construct {
+            desc: describe,
+            op: ConstructOp::DistributionNormal(distribution),
+        }))
+    }
+
+    /// Evaluate a bilinear function over a 2d image.
+    ///
+    /// For each color channel, the parameter contains intervals of values that define how its
+    /// value is determined along the width and height axis.
+    ///
+    /// This can be used similar to `numpy`'s `mgrid`.
+    pub fn bilinear(
+        &mut self,
+        describe: Descriptor,
+        distribution: Bilinear,
+    ) -> Result<Register, CommandError> {
+        if !describe.is_consistent() {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(describe),
+            });
+        }
+
+        Ok(self.push(Op::Construct {
+            desc: describe,
+            op: ConstructOp::Bilinear(distribution),
         }))
     }
 
@@ -608,7 +983,8 @@ impl CommandBuffer {
         match affine.sampling {
             AffineSample::Nearest => (),
             AffineSample::BiLinear => {
-                todo!("Check for a color which we can sample bi-linearly")
+                // "Check for a color which we can sample bi-linearly"
+                return Err(CommandError::UNIMPLEMENTED);
             }
         }
 
@@ -694,10 +1070,24 @@ impl CommandBuffer {
                     });
                 }
                 Op::Construct { desc: _, op } => {
-                    high_ops.push(High::Construct {
-                        dst: texture,
-                        op: op.clone(),
-                    });
+                    match op {
+                        &ConstructOp::DistributionNormal(ref distribution) => {
+                            high_ops.push(High::Construct {
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::Normal2d(distribution.clone()),
+                                },
+                            })
+                        }
+                        ConstructOp::Bilinear(bilinear) => high_ops.push(High::Construct {
+                            dst: Target::Discard(texture),
+                            fn_: Function::PaintFullScreen {
+                                shader: FragmentShader::Bilinear(bilinear.clone()),
+                            },
+                        }),
+                        _ => return Err(CompileError::NotYetImplemented),
+                    }
+
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 Op::Unary { desc: _, src, op } => {
@@ -705,14 +1095,15 @@ impl CommandBuffer {
                         &UnaryOp::Crop(region) => {
                             let target =
                                 Rectangle::with_width_height(region.width(), region.height());
-                            high_ops.push(High::Paint {
-                                texture: reg_to_texture[src],
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[src],
                                     selection: region,
                                     target: target.into(),
                                     viewport: target,
-                                    paint_on_top: PaintOnTopKind::Copy,
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
                                 },
                             });
                         }
@@ -728,11 +1119,15 @@ impl CommandBuffer {
                             // eprintln!("{:?}", adapt);
                             // eprintln!("{:?}", matrix);
 
-                            high_ops.push(High::Paint {
-                                texture: reg_to_texture[src],
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::Transform {
-                                    matrix: matrix.into(),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::LinearColorMatrix(
+                                        shaders::LinearColorTransform {
+                                            matrix: matrix.into(),
+                                        },
+                                    ),
                                 },
                             });
                         }
@@ -746,20 +1141,47 @@ impl CommandBuffer {
                             // light representation are used in a single paint call but this
                             // violates it on purpose.
 
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
                             // FIXME: using a copy here but this means we do this in unnecessarily
                             // many steps. We first decode to linear color, then draw, then code
                             // back to the non-linear electrical space.
                             // We could do this directly from one matrix to another or try using an
                             // ephemeral intermediate attachment?
-                            high_ops.push(High::Paint {
-                                texture: reg_to_texture[src],
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::Transform {
-                                    matrix: color.into_matrix(),
+                                fn_: Function::PaintFullScreen {
+                                    shader: color.into_shader(),
                                 },
                             });
                         }
-                        _ => return Err(CompileError::NotYetImplemented),
+                        UnaryOp::Extract { channel: _ } => {
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
+
+                            high_ops.push(High::Construct {
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintFullScreen {
+                                    // This will grab the right channel, that is all of them.
+                                    // The actual conversion is done in de-staging of the result.
+                                    // TODO: evaluate if this is the right way to do it. We could
+                                    // also perform a LinearColorMatrix shader here with close to
+                                    // the same amount of shader code but a precise result.
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
+                                },
+                            })
+                        }
+                        UnaryOp::Derivative(derivative) => {
+                            let shader = derivative.method.into_shader(derivative.direction)?;
+
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
+                            high_ops.push(High::Construct {
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintFullScreen { shader },
+                            })
+                        }
+                        UnaryOp::Transmute => high_ops.push(High::Copy {
+                            src: *src,
+                            dst: Register(idx),
+                        }),
                     }
 
                     reg_to_texture.insert(Register(idx), texture);
@@ -777,59 +1199,92 @@ impl CommandBuffer {
                         BinaryOp::Affine(affine) => {
                             let affine_matrix = RowMatrix::new(affine.transformation);
 
-                            high_ops.push(High::Paint {
+                            high_ops.push(High::PushOperand(reg_to_texture[lhs]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                texture: reg_to_texture[lhs],
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[lhs],
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
-                                    paint_on_top: PaintOnTopKind::Copy,
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
                                 },
                             });
 
-                            high_ops.push(High::Paint {
-                                texture: reg_to_texture[rhs],
+                            high_ops.push(High::PushOperand(reg_to_texture[rhs]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[rhs],
                                     selection: upper_region,
                                     target: QuadTarget::from(upper_region).affine(&affine_matrix),
                                     viewport: lower_region,
-                                    paint_on_top: affine.sampling.as_paint_on_top()?,
+                                    shader: FragmentShader::PaintOnTop(
+                                        affine.sampling.as_paint_on_top()?,
+                                    ),
+                                },
+                            })
+                        }
+                        BinaryOp::Inject {
+                            channel,
+                            from_channels,
+                        } => {
+                            high_ops.push(High::PushOperand(reg_to_texture[lhs]));
+                            high_ops.push(High::PushOperand(reg_to_texture[rhs]));
+
+                            high_ops.push(High::Construct {
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::Inject(shaders::inject::Shader {
+                                        mix: channel.into_vec4(),
+                                        color: from_channels.into_vec4().unwrap(),
+                                    }),
                                 },
                             })
                         }
                         BinaryOp::Inscribe { placement } => {
-                            high_ops.push(High::Paint {
+                            high_ops.push(High::PushOperand(reg_to_texture[lhs]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                texture: reg_to_texture[lhs],
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[lhs],
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
-                                    paint_on_top: PaintOnTopKind::Copy,
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
                                 },
                             });
 
-                            high_ops.push(High::Paint {
+                            high_ops.push(High::PushOperand(reg_to_texture[rhs]));
+                            high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
-                                texture: reg_to_texture[rhs],
-                                fn_: Function::PaintOnTop {
+                                fn_: Function::PaintToSelection {
+                                    texture: reg_to_texture[rhs],
                                     selection: upper_region,
                                     target: (*placement).into(),
                                     viewport: lower_region,
-                                    paint_on_top: PaintOnTopKind::Copy,
+                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
                                 },
                             });
                         }
-                        _ => return Err(CompileError::NotYetImplemented),
+                        BinaryOp::Palette(shader) => {
+                            high_ops.push(High::PushOperand(reg_to_texture[lhs]));
+                            high_ops.push(High::PushOperand(reg_to_texture[rhs]));
+
+                            high_ops.push(High::Construct {
+                                dst: Target::Load(texture),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::Palette(shader.clone()),
+                                },
+                            });
+                        }
                     }
 
                     reg_to_texture.insert(Register(idx), texture);
                 }
             }
 
-            high_ops.push(High::Done(idx));
+            high_ops.push(High::Done(Register(idx)));
         }
 
         Ok(Program {
@@ -857,9 +1312,25 @@ impl CommandBuffer {
 }
 
 impl ColorConversion {
-    pub(crate) fn into_matrix(&self) -> RowMatrix {
-        let from = self.from_xyz_matrix.inv().into();
-        self.to_xyz_matrix.multiply_right(from).into()
+    pub(crate) fn into_shader(&self) -> FragmentShader {
+        match self {
+            ColorConversion::Xyz {
+                to_xyz_matrix,
+                from_xyz_matrix,
+            } => {
+                let from = from_xyz_matrix.inv().into();
+                let matrix = to_xyz_matrix.multiply_right(from).into();
+
+                FragmentShader::LinearColorMatrix(shaders::LinearColorTransform { matrix })
+            }
+            ColorConversion::XyzToOklab { to_xyz_matrix } => {
+                FragmentShader::Oklab(shaders::oklab::Shader::with_encode(*to_xyz_matrix))
+            }
+            ColorConversion::OklabToXyz { from_xyz_matrix } => {
+                let from_xyz_matrix = from_xyz_matrix.inv().into();
+                FragmentShader::Oklab(shaders::oklab::Shader::with_decode(from_xyz_matrix))
+            }
+        }
     }
 }
 
@@ -919,6 +1390,76 @@ impl ChromaticAdaptation {
         });
 
         Ok(matrices)
+    }
+}
+
+#[rustfmt::skip]
+impl DerivativeMethod {
+    fn into_shader(&self, direction: Direction) -> Result<FragmentShader, CompileError> {
+        use DerivativeMethod::*;
+        use shaders::box3;
+        match self {
+            Prewitt => {
+                let matrix = RowMatrix::with_outer_product(
+                    [1./3., 1./3., 1./3.],
+                    [0.5, 0.0, -0.5],
+                );
+
+                let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
+                Ok(shaders::FragmentShader::Box3(shader))
+            }
+            Sobel => {
+                let matrix = RowMatrix::with_outer_product(
+                    [1./4., 1./2., 1./4.],
+                    [0.5, 0.0, -0.5],
+                );
+
+                let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
+                Ok(shaders::FragmentShader::Box3(shader))
+            }
+            Scharr3 => {
+                let matrix = RowMatrix::with_outer_product(
+                    [46.84/256., 162.32/256., 46.84/256.],
+                    [0.5, 0.0, -0.5],
+                );
+
+                let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
+                Ok(shaders::FragmentShader::Box3(shader))
+            }
+            Scharr3To4Bit => {
+                let matrix = RowMatrix::with_outer_product(
+                    [3./16., 10./16., 3./16.],
+                    [0.5, 0.0, -0.5],
+                );
+
+                let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
+                Ok(shaders::FragmentShader::Box3(shader))
+            }
+            Scharr3To8Bit => {
+                let matrix = RowMatrix::with_outer_product(
+                    [47./256., 162./256., 47./256.],
+                    [0.5, 0.0, -0.5],
+                );
+
+                let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
+                Ok(shaders::FragmentShader::Box3(shader))
+            }
+            // FIXME: implement these.
+            // When you do add them to tests/blend.rs
+            | Roberts
+            | Scharr4
+            | Scharr5
+            | Scharr5Tab => Err(CompileError::NotYetImplemented)
+        }
+    }
+}
+
+impl Direction {
+    fn adjust_vertical_box(self, mat: RowMatrix) -> RowMatrix {
+        match self {
+            Direction::Width => mat,
+            Direction::Height => mat.transpose(),
+        }
     }
 }
 
@@ -1122,6 +1663,15 @@ impl CommandError {
 
     /// Specifies that a register reference was invalid.
     const BAD_REGISTER: Self = Self::OTHER;
+
+    /// This has not yet been implemented, sorry.
+    ///
+    /// Errors of this kind will be removed over the course of bringing the crate to a first stable
+    /// release, this this will be removed. The method, and importantly its signature, are already
+    /// added for the purpose of exposition and documenting the intention.
+    const UNIMPLEMENTED: Self = CommandError {
+        inner: CommandErrorKind::Unimplemented,
+    };
 
     pub fn is_type_err(&self) -> bool {
         matches!(
