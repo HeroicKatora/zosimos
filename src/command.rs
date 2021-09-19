@@ -116,7 +116,7 @@ pub(crate) enum Target {
     Load(Texture),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum UnaryOp {
     /// Op = id
     Crop(Rectangle),
@@ -129,12 +129,14 @@ pub(crate) enum UnaryOp {
     /// This is a partial method for CIE XYZ-ish color spaces. Note that ICC requires adaptation to
     /// D50 for example as the reference color space.
     ChromaticAdaptation(ChromaticAdaptation),
-    /// Opt(T) = T[.texel=texel]
+    /// Op(T) = T[.texel=texel]
     /// And the byte width of new texel must be consistent with the current byte width.
     Transmute,
+    /// Op(T) = T
+    Derivative(Derivative),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum BinaryOp {
     /// Op = id
     Affine(Affine),
@@ -175,7 +177,7 @@ pub enum Blend {
 ///
 /// Affine transformations are a combination of scaling, translation, rotation. They describe a
 /// transformation of the 2D space of the original image.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Affine {
     /// The affine transformation, as a row-major homogeneous matrix.
     ///
@@ -191,7 +193,7 @@ pub struct Affine {
 /// an image so far that a very particular subset of pixels (or linear interpolation) is shown that
 /// results in an image visually very different from the original. Such an attack works because
 /// scaling down leads to many pixels being ignored.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum AffineSample {
     /// Choose the nearest pixel.
     ///
@@ -313,11 +315,13 @@ pub struct Palette {
 }
 
 /// Calculate a first derivative.
+#[derive(Clone, Debug, Hash)]
 pub struct Derivative {
     pub method: DerivativeMethod,
     pub direction: Direction,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Direction {
     /// Along the height of the image.
     Height,
@@ -325,14 +329,18 @@ pub enum Direction {
     Width,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DerivativeMethod {
     /// A 2-sized filter with diagonal basis direction.
     ///     [[1 0] [0 -1]]
     ///     [[0 1] [-1 0]]
     Roberts,
     /// The result of derivative with average smoothing.
+    ///     1/6 [1 1 1]^T [1 0 -1]
     Prewitt,
     /// The result of derivative with weighted smoothing.
+    ///     1/8 [1 2 1]^T [1 0 -1]
     Sobel,
     /// The Scharr 3×3 operator, floating point precision with the error bound of the paper.
     ///
@@ -355,21 +363,21 @@ pub enum DerivativeMethod {
     /// <http://archiv.ub.uni-heidelberg.de/volltextserver/962/1/Diss.pdf>
     Scharr3,
     /// A 4-tab derivative operator by Scharr.
-    ///     Derivative: [77.68 139.48 …]/256
-    ///     Smoothing: [16.44 111.56 …]/256
+    /// * Derivative: `[77.68 139.48 …]/256`
+    /// * Smoothing: `[16.44 111.56 …]/256`
     Scharr4,
     /// A 5-tab derivative by Scharr.
-    ///     Derivative: [21.27 85.46 0 …]/256
-    ///     Smoothing: [5.91 61.77 120.64 …]/256
+    /// * Derivative: `[21.27 85.46 0 …]/256`
+    /// * Smoothing: `[5.91 61.77 120.64 …]/256`
     Scharr5,
     /// The 4-bit approximated Scharr operator.
     ///     1/32 [3 10 3]^T [1 0 -1]
     ///
     /// This is provided for compatibility! For accuracy you may instead prefer to use Scharr3 or
     /// Schar5Tab.
-    Scharr3to4Bit,
+    Scharr3To4Bit,
     /// A non-smoothed 5-tab derivative.
-    ///     [-0.262 1.525 0 -1.525 0.262]
+    ///     `[-0.262 1.525 0 -1.525 0.262]`
     Scharr5Tab,
     /// The 8-bit approximated Scharr operator.
     ///
@@ -384,6 +392,8 @@ pub enum DerivativeMethod {
 /// This intuitive understanding applies to single valued, gray scale images. The operator will
 /// also work for any colored images as long as the color space defines a luminance, lightness,
 /// or value channel. We will then choose a pixel by median of that channel.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SmoothingMethod {
     /// Also called: average, arithmetic mean.
     Laplace,
@@ -843,6 +853,26 @@ impl CommandBuffer {
         Ok(self.push(op))
     }
 
+    /// Calculate the derivative of an image.
+    ///
+    /// Currently, will only calculate the derivative for color channels. The alpha channel will be
+    /// copied from the source pixel. To also calculate a derivative over the alpha channel you
+    /// should extract it as a value channel, calculate the derivative there and the inject the
+    /// result back to the image.
+    pub fn derivative(&mut self, image: Register, config: Derivative)
+        -> Result<Register, CommandError>
+    {
+        let desc = self.describe_reg(image)?.clone();
+
+        let op = Op::Unary {
+            src: image,
+            op: UnaryOp::Derivative(config),
+            desc,
+        };
+
+        Ok(self.push(op))
+    }
+
     /// Overlay this image as part of a larger one, performing blending.
     pub fn blend(
         &mut self,
@@ -1137,6 +1167,15 @@ impl CommandBuffer {
                                 },
                             })
                         }
+                        UnaryOp::Derivative(derivative) => {
+                            let shader = derivative.method.into_shader(derivative.direction)?;
+
+                            high_ops.push(High::PushOperand(reg_to_texture[src]));
+                            high_ops.push(High::Construct {
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintFullScreen { shader },
+                            })
+                        }
                         UnaryOp::Transmute => high_ops.push(High::Copy {
                             src: *src,
                             dst: Register(idx),
@@ -1349,6 +1388,74 @@ impl ChromaticAdaptation {
         });
 
         Ok(matrices)
+    }
+}
+
+#[rustfmt::skip]
+impl DerivativeMethod {
+    fn into_shader(&self, direction: Direction) -> Result<FragmentShader, CompileError> {
+        use DerivativeMethod::*;
+        use shaders::box3;
+        match self {
+            Prewitt => {
+                let matrix = RowMatrix::with_outer_product(
+                    [1./3., 1./3., 1./3.],
+                    [0.5, 0.0, -0.5],
+                );
+
+                let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
+                Ok(shaders::FragmentShader::Box3(shader))
+            }
+            Sobel => {
+                let matrix = RowMatrix::with_outer_product(
+                    [1./4., 1./2., 1./4.],
+                    [0.5, 0.0, -0.5],
+                );
+
+                let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
+                Ok(shaders::FragmentShader::Box3(shader))
+            }
+            Scharr3 => {
+                let matrix = RowMatrix::with_outer_product(
+                    [46.84/256., 162.32/256., 46.84/256.],
+                    [0.5, 0.0, -0.5],
+                );
+
+                let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
+                Ok(shaders::FragmentShader::Box3(shader))
+            }
+            Scharr3To4Bit => {
+                let matrix = RowMatrix::with_outer_product(
+                    [3., 10., 3.],
+                    [0.5, 0.0, -0.5],
+                );
+
+                let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
+                Ok(shaders::FragmentShader::Box3(shader))
+            }
+            Scharr3To8Bit => {
+                let matrix = RowMatrix::with_outer_product(
+                    [47./256., 162./256., 47./256.],
+                    [0.5, 0.0, -0.5],
+                );
+
+                let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
+                Ok(shaders::FragmentShader::Box3(shader))
+            }
+            | Roberts
+            | Scharr4
+            | Scharr5
+            | Scharr5Tab => Err(CompileError::NotYetImplemented)
+        }
+    }
+}
+
+impl Direction {
+    fn adjust_vertical_box(self, mat: RowMatrix) -> RowMatrix {
+        match self {
+            Direction::Width => mat,
+            Direction::Height => mat.transpose(),
+        }
     }
 }
 
