@@ -4,8 +4,7 @@ use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey};
 use crate::buffer::RowMatrix;
 
 /// a linear transformation on rgb color.
-pub const SHADER: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/spirv/box3.frag.v"));
+pub const SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/box3.frag.v"));
 
 /// The palette shader, computing texture coordinates from an input color.
 #[derive(Clone, Debug, PartialEq)]
@@ -15,9 +14,7 @@ pub(crate) struct Shader {
 
 impl Shader {
     pub fn new(matrix: RowMatrix) -> Self {
-        Shader {
-            matrix,
-        }
+        Shader { matrix }
     }
 }
 

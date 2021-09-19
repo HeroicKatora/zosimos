@@ -1105,9 +1105,7 @@ impl Descriptor {
 
 #[test]
 fn matrix_ops() {
-    let mat = RowMatrix::with_outer_product(
-        [0.0, 0.0, 1.0],
-        [0.0, 1.0, 0.0]);
+    let mat = RowMatrix::with_outer_product([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]);
 
     assert_eq!(mat, mat.transpose().transpose());
 }

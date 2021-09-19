@@ -859,9 +859,11 @@ impl CommandBuffer {
     /// copied from the source pixel. To also calculate a derivative over the alpha channel you
     /// should extract it as a value channel, calculate the derivative there and the inject the
     /// result back to the image.
-    pub fn derivative(&mut self, image: Register, config: Derivative)
-        -> Result<Register, CommandError>
-    {
+    pub fn derivative(
+        &mut self,
+        image: Register,
+        config: Derivative,
+    ) -> Result<Register, CommandError> {
         let desc = self.describe_reg(image)?.clone();
 
         let op = Op::Unary {
