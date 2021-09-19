@@ -486,33 +486,44 @@ fn run_oklab(pool: &mut Pool) {
 }
 
 fn run_derivative(pool: &mut Pool, (bg_key, background): (PoolKey, Descriptor)) {
-    let mut commands = CommandBuffer::default();
+    const METHODS: &[command::DerivativeMethod] = &[
+        command::DerivativeMethod::Scharr3,
+        command::DerivativeMethod::Scharr3To4Bit,
+        command::DerivativeMethod::Scharr3To8Bit,
+        command::DerivativeMethod::Prewitt,
+        command::DerivativeMethod::Sobel,
+    ];
 
-    // Describe the pipeline:
-    // 0: in (background)
-    // 1: derivative(0, derive)
-    // 2: out(2)
-    let background = commands.input(background).unwrap();
+    for method in METHODS {
+        let mut commands = CommandBuffer::default();
 
-    let derived = commands
-        .derivative(
-            background,
-            command::Derivative {
-                method: command::DerivativeMethod::Scharr3,
-                direction: command::Direction::Width,
-            },
-        )
-        .unwrap();
+        // Describe the pipeline:
+        // 0: in (background)
+        // 1: derivative(0, derive)
+        // 2: out(2)
+        let background = commands.input(background.clone()).unwrap();
 
-    let (output_derived, _outformat) = commands.output(derived).expect("Valid for output");
+        let derived = commands
+            .derivative(
+                background,
+                command::Derivative {
+                    method: method.clone(),
+                    direction: command::Direction::Width,
+                },
+            )
+            .unwrap();
 
-    let result = run_once_with_output(
-        commands,
-        pool,
-        vec![(background, bg_key)],
-        retire_with_one_image(output_derived),
-    );
+        let (output_derived, _outformat) = commands.output(derived).expect("Valid for output");
 
-    let image_derived = pool.entry(result).unwrap();
-    util::assert_reference(image_derived.into(), "derived.png.crc");
+        let result = run_once_with_output(
+            commands,
+            pool,
+            vec![(background, bg_key)],
+            retire_with_one_image(output_derived),
+        );
+
+        let image_derived = pool.entry(result).unwrap();
+        let reference = format!("derived_{:?}.png.crc", method);
+        util::assert_reference(image_derived.into(), &reference);
+    }
 }

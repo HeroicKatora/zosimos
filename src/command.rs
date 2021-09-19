@@ -1426,7 +1426,7 @@ impl DerivativeMethod {
             }
             Scharr3To4Bit => {
                 let matrix = RowMatrix::with_outer_product(
-                    [3., 10., 3.],
+                    [3./16., 10./16., 3./16.],
                     [0.5, 0.0, -0.5],
                 );
 
@@ -1442,6 +1442,8 @@ impl DerivativeMethod {
                 let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
                 Ok(shaders::FragmentShader::Box3(shader))
             }
+            // FIXME: implement these.
+            // When you do add them to tests/blend.rs
             | Roberts
             | Scharr4
             | Scharr5
