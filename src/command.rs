@@ -377,6 +377,44 @@ pub enum DerivativeMethod {
     Scharr3To8Bit,
 }
 
+/// Methods for removing noise from an image.
+///
+/// WIP: these are not yet implemented.
+///
+/// This intuitive understanding applies to single valued, gray scale images. The operator will
+/// also work for any colored images as long as the color space defines a luminance, lightness,
+/// or value channel. We will then choose a pixel by median of that channel.
+pub enum SmoothingMethod {
+    /// Also called: average, arithmetic mean.
+    Laplace,
+    /// Weighted average using a gauss kernel.
+    Gaussian,
+    /// Choose the median value from surrounding pixels.
+    ///
+    /// The choice is made through the Luma channel.
+    Median,
+    /// Bilateral filter, weighting pixels by values.
+    ///
+    /// The weighting is made through the Luma channel.
+    Bilteral,
+    /// Chooses a value from the surrounding region with minimal variance.
+    ///
+    /// This implements Kuwahara's initial approach where the representation is chosen to be the
+    /// mean value and the regions are defined as exactly 4 regions overlapping on the axes and the
+    /// pixel itself.
+    ///
+    /// Using hexadecimal bit masks to represent the regions, an example with 3×3 regions:
+    ///
+    /// ```text
+    /// 11322
+    /// 11322
+    /// 55faa
+    /// 44c88
+    /// 44c88
+    /// ```
+    Kuwahara,
+}
+
 #[derive(Debug)]
 pub struct CommandError {
     inner: CommandErrorKind,
