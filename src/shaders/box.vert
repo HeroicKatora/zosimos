@@ -1,8 +1,9 @@
 #version 450
+#extension GL_EXT_scalar_block_layout : require
 layout (location = 0) in vec2 vertPosition;
 layout (location = 0) out vec2 uv;
 
-layout (set = 0, binding = 0, std140) uniform PaintCoordinates {
+layout (set = 0, binding = 0, std430) uniform PaintCoordinates {
   /* Positions in clockwise rotation starting at top-left. */
   vec2 rect_selection[4];
   vec2 rect_position[4];
