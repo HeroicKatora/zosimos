@@ -667,10 +667,15 @@ vec4 parts_normalize(vec4 components, uint parts) {
     return vec4(components.yzw, 1.0);
   case SAMPLE_PARTS_Xbgr:
     return vec4(components.wzy, 1.0);
+  // HACK(naga-1403):
+  // this could be unified with the branch below but Naga has a bug.
   case SAMPLE_PARTS_Lab:
+    return vec4(components.xyz, 1.0);
   case SAMPLE_PARTS_LCh:
     return vec4(components.xyz, 1.0);
+  // HACK(naga-1403)
   case SAMPLE_PARTS_LabA:
+    return components.xyzw;
   case SAMPLE_PARTS_LChA:
     return components.xyzw;
   }
@@ -711,16 +716,21 @@ vec4 parts_denormalize(vec4 c, uint parts) {
     return vec4(1.0, c.rgb);
   case SAMPLE_PARTS_Xbgr:
     return vec4(1.0, c.bgr);
+  // HACK(naga-1403)
   case SAMPLE_PARTS_Lab:
+    return vec4(c.xyz, 1.0);
   case SAMPLE_PARTS_LCh:
     return vec4(c.xyz, 1.0);
+  // HACK(naga-1403)
   case SAMPLE_PARTS_LabA:
+    return c.xyzw;
   case SAMPLE_PARTS_LChA:
     return c.xyzw;
   }
   return c.xyzw;
 }
 
+// HACK(naga-1403) not sure if anything here is affected.
 vec4 parts_transfer(vec4 linear, uint fnk) {
 #define TRANSFER_WITH_XYZ(E, FN) vec4(FN(E.x), FN(E.y), FN(E.z), E.a)
   switch (fnk) {
@@ -751,6 +761,7 @@ vec4 parts_transfer(vec4 linear, uint fnk) {
   return linear;
 }
 
+// HACK(naga-1403) not sure if anything here is affected.
 vec4 parts_untransfer(vec4 nonlin, uint fnk) {
 #define TRANSFER_WITH_XYZ(E, FN) vec4(FN(E.x), FN(E.y), FN(E.z), E.a)
   switch (fnk) {
