@@ -407,23 +407,24 @@ impl Execution {
                 Ok(SyncPoint::NO_SYNC)
             }
             Low::Shader(desc) => {
-                /*
-                let desc = wgpu::ShaderModuleDescriptor {
-                    label: Some(desc.name),
-                    source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
-                };
+                let shader;
+                if !std::env::var("STEALTH_PAINT_PASSTHROUGH").is_ok() {
+                    let desc = wgpu::ShaderModuleDescriptor {
+                        label: Some(desc.name),
+                        source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
+                    };
 
-                let shader = self.gpu.device.create_shader_module(&desc);
-                */
+                    shader = self.gpu.device.create_shader_module(&desc);
+                } else {
+                    let desc = wgpu::ShaderModuleDescriptorSpirV {
+                        label: Some(desc.name),
+                        source: desc.source_spirv.as_ref().into(),
+                    };
 
-                let desc = wgpu::ShaderModuleDescriptorSpirV {
-                    label: Some(desc.name),
-                    source: desc.source_spirv.as_ref().into(),
-                };
-
-                // SAFETY: who knows. FIXME: once naga's validation is good enough.
-                let shader = unsafe {
-                    self.gpu.device.create_shader_module_spirv(&desc)
+                    // SAFETY: who knows. FIXME: once naga's validation is good enough.
+                    shader = unsafe {
+                        self.gpu.device.create_shader_module_spirv(&desc)
+                    };
                 };
 
                 self.descriptors.shaders.push(shader);
