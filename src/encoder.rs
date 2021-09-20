@@ -1004,10 +1004,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: i,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::ReadWrite,
-                        format: kind.texture_format(),
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
                         view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 });
@@ -1023,7 +1023,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     binding: i,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::ReadWrite,
+                        access: wgpu::StorageTextureAccess::WriteOnly,
                         format: kind.texture_format(),
                         view_dimension: wgpu::TextureViewDimension::D2,
                     },
@@ -1048,6 +1048,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler {
                         filtering: true,
+                        comparison: false,
+                    },
+                    count: None,
+                });
+            } else {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 34,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler {
+                        filtering: false,
                         comparison: false,
                     },
                     count: None,
@@ -1289,10 +1299,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let image_id = self.texture_views;
         self.push(Low::TextureView(TextureViewDescriptor { texture }))?;
 
-        let mut sparse = vec![(binding, BindingResource::TextureView(image_id))];
+        let mut sparse;
 
         // For encoding we have two extra bindings, sampler and in_texture.
         if let Some(view) = view {
+            sparse = vec![(binding, BindingResource::TextureView(image_id))];
+
             // FIXME: unnecessary duplication.
             let sampler = self.make_sampler(SamplerDescriptor {
                 address_mode: wgpu::AddressMode::default(),
@@ -1312,6 +1324,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             sparse.push((32, BindingResource::TextureView(view_id)));
             sparse.push((33, BindingResource::Sampler(sampler)));
+        } else {
+            sparse = vec![(binding, BindingResource::TextureView(image_id))];
+
+            let sampler = self.make_sampler(SamplerDescriptor {
+                address_mode: wgpu::AddressMode::default(),
+                border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+                resize_filter: wgpu::FilterMode::Nearest,
+            });
+
+            sparse.push((34, BindingResource::Sampler(sampler)));
         }
 
         let group = self.bind_groups;

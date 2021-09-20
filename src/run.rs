@@ -407,14 +407,15 @@ impl Execution {
                 Ok(SyncPoint::NO_SYNC)
             }
             Low::Shader(desc) => {
+                /*
                 let desc = wgpu::ShaderModuleDescriptor {
                     label: Some(desc.name),
                     source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                 };
 
                 let shader = self.gpu.device.create_shader_module(&desc);
+                */
 
-                /*
                 let desc = wgpu::ShaderModuleDescriptorSpirV {
                     label: Some(desc.name),
                     source: desc.source_spirv.as_ref().into(),
@@ -423,7 +424,6 @@ impl Execution {
                 let shader = unsafe {
                     self.gpu.device.create_shader_module_spirv(&desc)
                 };
-                */
 
                 self.descriptors.shaders.push(shader);
                 Ok(SyncPoint::NO_SYNC)

@@ -68,24 +68,25 @@ layout (location = 0) out vec4 f_color;
 
 /* Not all those bindings will be bound!
  */
-layout (set = 1, binding = 0, r32ui) uniform restrict uimage2D image_r8ui;
-layout (set = 1, binding = 1, r32ui) uniform restrict uimage2D image_r16ui;
-layout (set = 1, binding = 2, r32ui) uniform restrict uimage2D image_r32ui;
-layout (set = 1, binding = 3, rgba16ui) uniform restrict uimage2D image_rgba16ui;
-layout (set = 1, binding = 4, rgba32ui) uniform restrict uimage2D image_rgba32ui;
+layout (set = 1, binding = 0) uniform utexture2D image_r8ui;
+layout (set = 1, binding = 1) uniform utexture2D image_r16ui;
+layout (set = 1, binding = 2) uniform utexture2D image_r32ui;
+layout (set = 1, binding = 3) uniform utexture2D image_rgba16ui;
+layout (set = 1, binding = 4) uniform utexture2D image_rgba32ui;
 
 /* Output images. Same as input but writeonly instead.
  */
-layout (set = 1, binding = 16, r32ui) uniform restrict uimage2D oimage_r8ui;
-layout (set = 1, binding = 17, r32ui) uniform restrict uimage2D oimage_r16ui;
-layout (set = 1, binding = 18, r32ui) uniform restrict uimage2D oimage_r32ui;
-layout (set = 1, binding = 19, rgba16ui) uniform restrict uimage2D oimage_rgba16ui;
-layout (set = 1, binding = 20, rgba32ui) uniform restrict uimage2D oimage_rgba32ui;
+layout (set = 1, binding = 16, r32ui) uniform restrict writeonly uimage2D oimage_r8ui;
+layout (set = 1, binding = 17, r32ui) uniform restrict writeonly uimage2D oimage_r16ui;
+layout (set = 1, binding = 18, r32ui) uniform restrict writeonly uimage2D oimage_r32ui;
+layout (set = 1, binding = 19, rgba16ui) uniform restrict writeonly uimage2D oimage_rgba16ui;
+layout (set = 1, binding = 20, rgba32ui) uniform restrict writeonly uimage2D oimage_rgba32ui;
 
 /** For encoding, this is the input frame buffer.
  */
 layout (set = 1, binding = 32) uniform texture2D in_texture;
 layout (set = 1, binding = 33) uniform sampler texture_sampler;
+layout (set = 1, binding = 34) uniform sampler read_sampler;
 
 layout (set = 2, binding = 0, std140) uniform Parameter {
   uvec4 space;
@@ -424,7 +425,7 @@ vec3 transfer_lch_to_lab(vec3 lch) {
  */
 
 void DECODE_R8UI_AS_MAIN() {
-  uint num = imageLoad(image_r8ui, decodeStageTexelCoord()).x;
+  uint num = texelFetch(usampler2D(image_r8ui, read_sampler), decodeStageTexelCoord(), 0).x;
   uint work = (num >> 8*decodeSubtexelCoord()) & 0xff;
   vec4 components = demux_uint(work, get_sample_bits());
 
@@ -454,7 +455,7 @@ void ENCODE_R8UI_AS_MAIN() {
 }
 
 void DECODE_R16UI_AS_MAIN() {
-  uint num = imageLoad(image_r16ui, decodeStageTexelCoord()).x;
+  uint num = texelFetch(usampler2D(image_r16ui, read_sampler), decodeStageTexelCoord(), 0).x;
   uint work = (num >> 16*decodeSubtexelCoord()) & 0xffff;
   vec4 components = demux_uint(work, get_sample_bits());
 
@@ -484,7 +485,7 @@ void ENCODE_R16UI_AS_MAIN() {
 }
 
 void DECODE_R32UI_AS_MAIN() {
-  uint num = imageLoad(image_r32ui, ivec2(gl_FragCoord)).x;
+  uint num = texelFetch(usampler2D(image_r32ui, read_sampler), ivec2(gl_FragCoord), 0).x;
   vec4 components = demux_uint(num, get_sample_bits());
 
   // FIXME: YUV transform and accurate YUV transform.

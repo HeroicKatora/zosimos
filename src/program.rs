@@ -695,8 +695,7 @@ impl Program {
     pub fn minimal_device_descriptor() -> wgpu::DeviceDescriptor<'static> {
         wgpu::DeviceDescriptor {
             label: None,
-            features: wgpu::Features::SPIRV_SHADER_PASSTHROUGH
-                | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+            features: wgpu::Features::SPIRV_SHADER_PASSTHROUGH,
             limits: wgpu::Limits::default(),
         }
     }
