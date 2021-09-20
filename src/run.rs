@@ -421,6 +421,7 @@ impl Execution {
                     source: desc.source_spirv.as_ref().into(),
                 };
 
+                // SAFETY: who knows. FIXME: once naga's validation is good enough.
                 let shader = unsafe {
                     self.gpu.device.create_shader_module_spirv(&desc)
                 };

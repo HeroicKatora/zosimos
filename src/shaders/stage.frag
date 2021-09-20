@@ -129,8 +129,10 @@ const uint SAMPLE_PARTS_Xrgb = 13;
 const uint SAMPLE_PARTS_Abgr = 14;
 const uint SAMPLE_PARTS_Xbgr = 15;
 const uint SAMPLE_PARTS_Yuv = 16;
-const uint SAMPLE_PARTS_LCh = 17;
-const uint SAMPLE_PARTS_LChA = 18;
+const uint SAMPLE_PARTS_Lab = 17;
+const uint SAMPLE_PARTS_LabA = 18;
+const uint SAMPLE_PARTS_LCh = 19;
+const uint SAMPLE_PARTS_LChA = 20;
 
 uint get_sample_parts() {
   return parameter.space.y;
@@ -485,7 +487,7 @@ void ENCODE_R16UI_AS_MAIN() {
 }
 
 void DECODE_R32UI_AS_MAIN() {
-  uint num = texelFetch(usampler2D(image_r32ui, read_sampler), ivec2(gl_FragCoord), 0).x;
+  uint num = texelFetch(usampler2D(image_r32ui, read_sampler), decodeStageTexelCoord(), 0).x;
   vec4 components = demux_uint(num, get_sample_bits());
 
   // FIXME: YUV transform and accurate YUV transform.
@@ -665,12 +667,14 @@ vec4 parts_normalize(vec4 components, uint parts) {
     return vec4(components.yzw, 1.0);
   case SAMPLE_PARTS_Xbgr:
     return vec4(components.wzy, 1.0);
+  case SAMPLE_PARTS_Lab:
   case SAMPLE_PARTS_LCh:
     return vec4(components.xyz, 1.0);
+  case SAMPLE_PARTS_LabA:
   case SAMPLE_PARTS_LChA:
     return components.xyzw;
   }
-  return vec4(0.0);
+  return BIT_DECODE_FAIL;
 }
 
 // Invert parts_normalize.
@@ -707,8 +711,10 @@ vec4 parts_denormalize(vec4 c, uint parts) {
     return vec4(1.0, c.rgb);
   case SAMPLE_PARTS_Xbgr:
     return vec4(1.0, c.bgr);
+  case SAMPLE_PARTS_Lab:
   case SAMPLE_PARTS_LCh:
     return vec4(c.xyz, 1.0);
+  case SAMPLE_PARTS_LabA:
   case SAMPLE_PARTS_LChA:
     return c.xyzw;
   }
