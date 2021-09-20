@@ -369,7 +369,7 @@ impl Execution {
                 let group = self
                     .descriptors
                     .bind_group_layout(desc, &mut entry_buffer)?;
-                eprintln!("Made {}: {:?}", self.descriptors.bind_group_layouts.len(), group);
+                // eprintln!("Made {}: {:?}", self.descriptors.bind_group_layouts.len(), group);
                 let group = self.gpu.device.create_bind_group_layout(&group);
                 self.descriptors.bind_group_layouts.push(group);
                 Ok(SyncPoint::NO_SYNC)

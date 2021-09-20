@@ -663,24 +663,23 @@ impl Program {
             | wgpu::TextureUsages::RENDER_ATTACHMENT;
 
         while let Some(adapter) = from.next() {
-            eprintln!("{:?}", adapter);
             // FIXME: check limits.
             // FIXME: collect required texture formats from `self.textures`
             let basic_format =
                 adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8UnormSrgb);
             if !basic_format.allowed_usages.contains(ALL_TEXTURE_USAGE) {
-                eprintln!("No rgba8 support {:?}", basic_format.allowed_usages);
+                // eprintln!("No rgba8 support {:?}", basic_format.allowed_usages);
                 continue;
             }
 
             let storage_format =
                 adapter.get_texture_format_features(wgpu::TextureFormat::R32Uint);
             if !storage_format.allowed_usages.contains(STAGE_TEXTURE_USAGE) {
-                eprintln!("No r32uint storage support {:?}", basic_format.allowed_usages);
+                // eprintln!("No r32uint storage support {:?}", basic_format.allowed_usages);
                 continue;
             }
 
-            from.for_each(|ad| eprintln!("{:?}", ad));
+            from.for_each(drop);
             return Ok(adapter);
         }
 
@@ -695,7 +694,11 @@ impl Program {
     pub fn minimal_device_descriptor() -> wgpu::DeviceDescriptor<'static> {
         wgpu::DeviceDescriptor {
             label: None,
-            features: wgpu::Features::SPIRV_SHADER_PASSTHROUGH,
+            features: if !std::env::var("STEALTH_PAINT_PASSTHROUGH").is_ok() {
+                wgpu::Features::empty()
+            } else {
+                wgpu::Features::SPIRV_SHADER_PASSTHROUGH
+            },
             limits: wgpu::Limits::default(),
         }
     }
