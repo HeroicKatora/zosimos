@@ -672,8 +672,7 @@ impl Program {
                 continue;
             }
 
-            let storage_format =
-                adapter.get_texture_format_features(wgpu::TextureFormat::R32Uint);
+            let storage_format = adapter.get_texture_format_features(wgpu::TextureFormat::R32Uint);
             if !storage_format.allowed_usages.contains(STAGE_TEXTURE_USAGE) {
                 // eprintln!("No r32uint storage support {:?}", basic_format.allowed_usages);
                 continue;

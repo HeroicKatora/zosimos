@@ -422,9 +422,7 @@ impl Execution {
                     };
 
                     // SAFETY: who knows. FIXME: once naga's validation is good enough.
-                    shader = unsafe {
-                        self.gpu.device.create_shader_module_spirv(&desc)
-                    };
+                    shader = unsafe { self.gpu.device.create_shader_module_spirv(&desc) };
                 };
 
                 self.descriptors.shaders.push(shader);
@@ -495,8 +493,12 @@ impl Execution {
                         program::TextureUsage::Attachment => {
                             U::COPY_SRC | U::COPY_DST | U::TEXTURE_BINDING | U::RENDER_ATTACHMENT
                         }
-                        program::TextureUsage::Staging => U::COPY_SRC | U::COPY_DST | U::STORAGE_BINDING | U::TEXTURE_BINDING,
-                        program::TextureUsage::Transient => U::TEXTURE_BINDING | U::RENDER_ATTACHMENT,
+                        program::TextureUsage::Staging => {
+                            U::COPY_SRC | U::COPY_DST | U::STORAGE_BINDING | U::TEXTURE_BINDING
+                        }
+                        program::TextureUsage::Transient => {
+                            U::TEXTURE_BINDING | U::RENDER_ATTACHMENT
+                        }
                     },
                 };
                 let texture = self.gpu.device.create_texture(&desc);
