@@ -24,9 +24,10 @@ const FOREGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/foreg
 fn integration() {
     env_logger::init();
 
-    const ANY: wgpu::BackendBit = wgpu::BackendBit::all();
+    const ANY: wgpu::Backends = wgpu::Backends::VULKAN;
     // FIXME: this drop SEGFAULTs for me...
     let instance = core::mem::ManuallyDrop::new(wgpu::Instance::new(ANY));
+    eprintln!("{:?}", instance);
     let adapter =
         Program::minimum_adapter(instance.enumerate_adapters(ANY)).expect("to get an adapter");
 
@@ -44,7 +45,7 @@ fn integration() {
         (entry.key(), entry.descriptor())
     };
 
-    pool.request_device(&adapter, wgpu::DeviceDescriptor::default())
+    pool.request_device(&adapter, Program::minimal_device_descriptor())
         .expect("to get a device");
 
     run_blending(&mut pool, pool_foreground.clone(), pool_background.clone());

@@ -68,11 +68,11 @@ layout (location = 0) out vec4 f_color;
 
 /* Not all those bindings will be bound!
  */
-layout (set = 1, binding = 0, r32ui) uniform restrict readonly uimage2D image_r8ui;
-layout (set = 1, binding = 1, r32ui) uniform restrict readonly uimage2D image_r16ui;
-layout (set = 1, binding = 2, r32ui) uniform restrict readonly uimage2D image_r32ui;
-layout (set = 1, binding = 3, rgba16ui) uniform restrict readonly uimage2D image_rgba16ui;
-layout (set = 1, binding = 4, rgba32ui) uniform restrict readonly uimage2D image_rgba32ui;
+layout (set = 1, binding = 0) uniform utexture2D image_r8ui;
+layout (set = 1, binding = 1) uniform utexture2D image_r16ui;
+layout (set = 1, binding = 2) uniform utexture2D image_r32ui;
+layout (set = 1, binding = 3) uniform utexture2D image_rgba16ui;
+layout (set = 1, binding = 4) uniform utexture2D image_rgba32ui;
 
 /* Output images. Same as input but writeonly instead.
  */
@@ -86,6 +86,7 @@ layout (set = 1, binding = 20, rgba32ui) uniform restrict writeonly uimage2D oim
  */
 layout (set = 1, binding = 32) uniform texture2D in_texture;
 layout (set = 1, binding = 33) uniform sampler texture_sampler;
+layout (set = 1, binding = 34) uniform sampler read_sampler;
 
 layout (set = 2, binding = 0, std140) uniform Parameter {
   uvec4 space;
@@ -426,7 +427,7 @@ vec3 transfer_lch_to_lab(vec3 lch) {
  */
 
 void DECODE_R8UI_AS_MAIN() {
-  uint num = imageLoad(image_r8ui, decodeStageTexelCoord()).x;
+  uint num = texelFetch(usampler2D(image_r8ui, read_sampler), decodeStageTexelCoord(), 0).x;
   uint work = (num >> 8*decodeSubtexelCoord()) & 0xff;
   vec4 components = demux_uint(work, get_sample_bits());
 
@@ -456,7 +457,7 @@ void ENCODE_R8UI_AS_MAIN() {
 }
 
 void DECODE_R16UI_AS_MAIN() {
-  uint num = imageLoad(image_r16ui, decodeStageTexelCoord()).x;
+  uint num = texelFetch(usampler2D(image_r16ui, read_sampler), decodeStageTexelCoord(), 0).x;
   uint work = (num >> 16*decodeSubtexelCoord()) & 0xffff;
   vec4 components = demux_uint(work, get_sample_bits());
 
@@ -486,7 +487,7 @@ void ENCODE_R16UI_AS_MAIN() {
 }
 
 void DECODE_R32UI_AS_MAIN() {
-  uint num = imageLoad(image_r32ui, decodeStageTexelCoord()).x;
+  uint num = texelFetch(usampler2D(image_r32ui, read_sampler), decodeStageTexelCoord(), 0).x;
   vec4 components = demux_uint(num, get_sample_bits());
 
   // FIXME: YUV transform and accurate YUV transform.
@@ -666,10 +667,15 @@ vec4 parts_normalize(vec4 components, uint parts) {
     return vec4(components.yzw, 1.0);
   case SAMPLE_PARTS_Xbgr:
     return vec4(components.wzy, 1.0);
+  // HACK(naga-1403):
+  // this could be unified with the branch below but Naga has a bug.
   case SAMPLE_PARTS_Lab:
+    return vec4(components.xyz, 1.0);
   case SAMPLE_PARTS_LCh:
     return vec4(components.xyz, 1.0);
+  // HACK(naga-1403)
   case SAMPLE_PARTS_LabA:
+    return components.xyzw;
   case SAMPLE_PARTS_LChA:
     return components.xyzw;
   }
@@ -710,15 +716,21 @@ vec4 parts_denormalize(vec4 c, uint parts) {
     return vec4(1.0, c.rgb);
   case SAMPLE_PARTS_Xbgr:
     return vec4(1.0, c.bgr);
+  // HACK(naga-1403)
   case SAMPLE_PARTS_Lab:
+    return vec4(c.xyz, 1.0);
   case SAMPLE_PARTS_LCh:
     return vec4(c.xyz, 1.0);
+  // HACK(naga-1403)
   case SAMPLE_PARTS_LabA:
+    return c.xyzw;
   case SAMPLE_PARTS_LChA:
     return c.xyzw;
   }
+  return c.xyzw;
 }
 
+// HACK(naga-1403) not sure if anything here is affected.
 vec4 parts_transfer(vec4 linear, uint fnk) {
 #define TRANSFER_WITH_XYZ(E, FN) vec4(FN(E.x), FN(E.y), FN(E.z), E.a)
   switch (fnk) {
@@ -746,8 +758,10 @@ vec4 parts_transfer(vec4 linear, uint fnk) {
   case TRANSFER_Oklab:
   return vec4(transfer_lab_to_lch(linear.xyz), linear.a);
   }
+  return linear;
 }
 
+// HACK(naga-1403) not sure if anything here is affected.
 vec4 parts_untransfer(vec4 nonlin, uint fnk) {
 #define TRANSFER_WITH_XYZ(E, FN) vec4(FN(E.x), FN(E.y), FN(E.z), E.a)
   switch (fnk) {
@@ -775,4 +789,5 @@ vec4 parts_untransfer(vec4 nonlin, uint fnk) {
   case TRANSFER_Oklab:
   return vec4(transfer_lch_to_lab(nonlin.xyz), nonlin.a);
   }
+  return nonlin;
 }

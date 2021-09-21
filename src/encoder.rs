@@ -908,10 +908,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             let descriptor = BindGroupLayoutDescriptor {
                 entries: vec![wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStage::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(2 * 8 * 4),
+                        min_binding_size: NonZeroU64::new(64),
                         ty: wgpu::BufferBindingType::Uniform,
                     },
                     count: None,
@@ -932,7 +932,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             let descriptor = BindGroupLayoutDescriptor {
                 entries: vec![wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         has_dynamic_offset: false,
                         min_binding_size: None,
@@ -955,7 +955,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         *self.paint_group_layout.entry(count).or_insert_with(|| {
             let mut entries = vec![wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStage::FRAGMENT,
+                visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler {
                     filtering: true,
                     comparison: false,
@@ -966,7 +966,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             for i in 0..count {
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: 1 + i as u32,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         multisampled: false,
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -995,7 +995,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         *self.stage_group_layout.entry(binding).or_insert_with(|| {
             let mut entries = vec![];
-            for (num, kind) in StageKind::ALL.iter().enumerate() {
+            for (num, _) in StageKind::ALL.iter().enumerate() {
                 let i = num as u32;
                 if i != binding {
                     continue;
@@ -1003,11 +1003,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: i,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::ReadOnly,
-                        format: kind.texture_format(),
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
                         view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 });
@@ -1021,7 +1021,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: i,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
                         format: kind.texture_format(),
@@ -1034,7 +1034,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             if encode {
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: 32,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         multisampled: false,
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -1045,9 +1045,19 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: 33,
-                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler {
                         filtering: true,
+                        comparison: false,
+                    },
+                    count: None,
+                });
+            } else {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 34,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler {
+                        filtering: false,
                         comparison: false,
                     },
                     count: None,
@@ -1128,7 +1138,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         self.shader(ShaderDescriptor {
             name: "",
-            flags: wgpu::ShaderFlags::empty(),
             source_spirv: source,
         })
     }
@@ -1144,7 +1153,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         self.shader(ShaderDescriptor {
             name: "",
-            flags: wgpu::ShaderFlags::empty(),
             source_spirv: source,
         })
     }
@@ -1212,7 +1220,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment_module: fragment,
                     targets: vec![wgpu::ColorTargetState {
                         blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrite::ALL,
+                        write_mask: wgpu::ColorWrites::ALL,
                         format,
                     }],
                 },
@@ -1291,10 +1299,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let image_id = self.texture_views;
         self.push(Low::TextureView(TextureViewDescriptor { texture }))?;
 
-        let mut sparse = vec![(binding, BindingResource::TextureView(image_id))];
+        let mut sparse;
 
         // For encoding we have two extra bindings, sampler and in_texture.
         if let Some(view) = view {
+            sparse = vec![(binding, BindingResource::TextureView(image_id))];
+
             // FIXME: unnecessary duplication.
             let sampler = self.make_sampler(SamplerDescriptor {
                 address_mode: wgpu::AddressMode::default(),
@@ -1314,6 +1324,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             sparse.push((32, BindingResource::TextureView(view_id)));
             sparse.push((33, BindingResource::Sampler(sampler)));
+        } else {
+            sparse = vec![(binding, BindingResource::TextureView(image_id))];
+
+            let sampler = self.make_sampler(SamplerDescriptor {
+                address_mode: wgpu::AddressMode::default(),
+                border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+                resize_filter: wgpu::FilterMode::Nearest,
+            });
+
+            sparse.push((34, BindingResource::Sampler(sampler)));
         }
 
         let group = self.bind_groups;
@@ -1407,20 +1427,20 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     #[rustfmt::skip]
-    pub const FULL_VERTEX_BUFFER: [[f32; 2]; 16] = [
+    pub const FULL_VERTEX_BUFFER: [[f32; 2]; 8] = [
         // [min_u, min_v], [0.0, 0.0],
-        [0.0, 0.0], [0.0, 0.0],
+        [0.0, 0.0],
         // [max_u, 0.0], [0.0, 0.0],
-        [1.0, 0.0], [0.0, 0.0],
+        [1.0, 0.0],
         // [max_u, max_v], [0.0, 0.0],
-        [1.0, 1.0], [0.0, 0.0],
+        [1.0, 1.0],
         // [min_u, max_v], [0.0, 0.0],
-        [0.0, 1.0], [0.0, 0.0],
+        [0.0, 1.0],
 
-        [0.0, 0.0], [0.0, 0.0],
-        [1.0, 0.0], [0.0, 0.0],
-        [1.0, 1.0], [0.0, 0.0],
-        [0.0, 1.0], [0.0, 0.0],
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [1.0, 1.0],
+        [0.0, 1.0],
     ];
 
     pub(crate) fn render(&mut self, pipeline: SimpleRenderPipeline) -> Result<(), LaunchError> {
@@ -1494,7 +1514,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 let fragment = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
 
-                let buffer: [[f32; 2]; 16];
+                let buffer: [[f32; 2]; 8];
                 // FIXME: there seems to be two floats padding after each vec2.
                 let min_u = (selection.x as f32) / (tex_width.get() as f32);
                 let max_u = (selection.max_x as f32) / (tex_width.get() as f32);
@@ -1503,17 +1523,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 let coords = target_coords.to_screenspace_coords(viewport);
 
-                // std140, always pad to 16 bytes.
+                // std430
                 buffer = [
-                    [min_u, min_v], [0.0, 0.0],
-                    [max_u, min_v], [0.0, 0.0],
-                    [max_u, max_v], [0.0, 0.0],
-                    [min_u, max_v], [0.0, 0.0],
+                    [min_u, min_v],
+                    [max_u, min_v],
+                    [max_u, max_v],
+                    [min_u, max_v],
 
-                    coords[0], [0.0, 0.0],
-                    coords[1], [0.0, 0.0],
-                    coords[2], [0.0, 0.0],
-                    coords[3], [0.0, 0.0],
+                    coords[0],
+                    coords[1],
+                    coords[2],
+                    coords[3],
                 ];
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{

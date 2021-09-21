@@ -241,7 +241,7 @@ pub(crate) enum Low {
         vertices: u32,
     },
     SetPushConstants {
-        stages: wgpu::ShaderStage,
+        stages: wgpu::ShaderStages,
         offset: u32,
         data: Cow<'static, [u8]>,
     },
@@ -410,7 +410,6 @@ pub(crate) enum BufferInitContent {
 pub(crate) struct ShaderDescriptor {
     pub name: &'static str,
     pub source_spirv: Cow<'static, [u32]>,
-    pub flags: wgpu::ShaderFlags,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -651,10 +650,17 @@ impl Program {
         mut from: impl Iterator<Item = wgpu::Adapter>,
     ) -> Result<wgpu::Adapter, MismatchError> {
         #[allow(non_snake_case)]
-        let ALL_TEXTURE_USAGE: wgpu::TextureUsage = wgpu::TextureUsage::COPY_DST
-            | wgpu::TextureUsage::COPY_SRC
-            | wgpu::TextureUsage::SAMPLED
-            | wgpu::TextureUsage::RENDER_ATTACHMENT;
+        let ALL_TEXTURE_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT;
+
+        #[allow(non_snake_case)]
+        let STAGE_TEXTURE_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT;
 
         while let Some(adapter) = from.next() {
             // FIXME: check limits.
@@ -662,6 +668,13 @@ impl Program {
             let basic_format =
                 adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8UnormSrgb);
             if !basic_format.allowed_usages.contains(ALL_TEXTURE_USAGE) {
+                // eprintln!("No rgba8 support {:?}", basic_format.allowed_usages);
+                continue;
+            }
+
+            let storage_format = adapter.get_texture_format_features(wgpu::TextureFormat::R32Uint);
+            if !storage_format.allowed_usages.contains(STAGE_TEXTURE_USAGE) {
+                // eprintln!("No r32uint storage support {:?}", basic_format.allowed_usages);
                 continue;
             }
 
@@ -674,9 +687,17 @@ impl Program {
 
     /// Return a descriptor for a device that's capable of executing the program.
     pub fn device_descriptor(&self) -> wgpu::DeviceDescriptor<'static> {
+        Self::minimal_device_descriptor()
+    }
+
+    pub fn minimal_device_descriptor() -> wgpu::DeviceDescriptor<'static> {
         wgpu::DeviceDescriptor {
             label: None,
-            features: wgpu::Features::empty(),
+            features: if !std::env::var("STEALTH_PAINT_PASSTHROUGH").is_ok() {
+                wgpu::Features::empty()
+            } else {
+                wgpu::Features::SPIRV_SHADER_PASSTHROUGH
+            },
             limits: wgpu::Limits::default(),
         }
     }
@@ -1006,8 +1027,8 @@ impl From<&'_ wgpu::Device> for Capabilities {
 }
 
 impl BufferUsage {
-    pub fn to_wgpu(self) -> wgpu::BufferUsage {
-        use wgpu::BufferUsage as U;
+    pub fn to_wgpu(self) -> wgpu::BufferUsages {
+        use wgpu::BufferUsages as U;
         match self {
             BufferUsage::InVertices => U::COPY_DST | U::VERTEX,
             BufferUsage::DataIn => U::MAP_WRITE | U::COPY_SRC,

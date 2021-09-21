@@ -1,8 +1,9 @@
 #version 450
+#extension GL_EXT_scalar_block_layout : require
 layout (location = 0) in vec2 uv;
 layout (location = 0) out vec4 f_color;
 
-layout (set = 1, binding = 0) uniform FragmentColor {
+layout (set = 1, binding = 0, std430) uniform FragmentColor {
     // The expected value of each coordinate (often denoted mu).
     vec2 expectation;
     // The covariance matrix of random values (often denoted Sigma). This is
@@ -11,7 +12,7 @@ layout (set = 1, binding = 0) uniform FragmentColor {
     // This ensures the caller is aware of degenerate cases. You may choose to
     // use the Pseudo-Inverse to have this shader model 1-dimensional
     // distributions instead.
-    mat2 covariance_inverse;
+    mat2x2 covariance_inverse;
     // The pseudo determinant of the covariance matrix, i.e. the product of all
     // non-zero eigen values.
     float pseudo_determinant;
@@ -36,8 +37,11 @@ double pseudoDeterminant(mat2 m) {
 
 void main() {
     vec2 screenSpace = 2.0*(uv - vec2(0.5));
-    vec2 pos = (screenSpace - u_fragmentParams.expectation);
-    float exponent = 0.5 * dot(pos, u_fragmentParams.covariance_inverse * pos);
+    vec2 pos = (screenSpace - vec2(u_fragmentParams.expectation));
+    mat2x2 covinv = mat2x2(
+    	vec2(u_fragmentParams.covariance_inverse[0]),
+	vec2(u_fragmentParams.covariance_inverse[1]));
+    float exponent = 0.5 * dot(pos, covinv * pos);
     float value = exp(-exponent) / sqrt(u_fragmentParams.pseudo_determinant);
 
     // TODO: can we provide useful information in other channels?
