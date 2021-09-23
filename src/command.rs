@@ -9,6 +9,7 @@ use crate::program::{
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
 use crate::shaders::{self, FragmentShader, PaintOnTopKind};
+use crate::types;
 
 use std::collections::HashMap;
 
@@ -1044,6 +1045,7 @@ impl CommandBuffer {
 
         let mut textures = ImageBufferPlan::default();
         let mut reg_to_texture: HashMap<Register, Texture> = HashMap::default();
+        let mut function = types::Function::new();
 
         for (idx, op) in self.ops.iter().enumerate() {
             let liveness = first_use[idx]..last_use[idx];
@@ -1062,12 +1064,14 @@ impl CommandBuffer {
                 Op::Input { desc } => {
                     high_ops.push(High::Input(Register(idx), desc.clone()));
                     reg_to_texture.insert(Register(idx), texture);
+                    function.inputs.push(descriptor.clone());
                 }
                 &Op::Output { src } => {
                     high_ops.push(High::Output {
                         src,
                         dst: Register(idx),
                     });
+                    function.outputs.push(descriptor.clone());
                 }
                 Op::Construct { desc: _, op } => {
                     match op {
@@ -1290,6 +1294,7 @@ impl CommandBuffer {
         Ok(Program {
             ops: high_ops,
             textures,
+            function,
         })
     }
 

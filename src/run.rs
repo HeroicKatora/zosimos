@@ -203,7 +203,7 @@ impl Executable {
 
     pub fn launch(&self, mut env: Environment) -> Result<Execution, StartError> {
         self.check_satisfiable(&mut env)?;
-
+        env.gpu.device.start_capture();
         Ok(Execution {
             machine: Machine::new(Arc::clone(&self.instructions)),
             gpu: env.gpu,
@@ -217,6 +217,7 @@ impl Executable {
     /// Run the executable but take all by value.
     pub fn launch_once(self, mut env: Environment) -> Result<Execution, StartError> {
         self.check_satisfiable(&mut env)?;
+        env.gpu.device.start_capture();
         Ok(Execution {
             machine: Machine::new(Arc::clone(&self.instructions)),
             gpu: env.gpu,

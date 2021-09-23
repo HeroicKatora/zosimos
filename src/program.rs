@@ -7,7 +7,7 @@ use crate::buffer::{BufferLayout, Descriptor, RowMatrix};
 use crate::command::{High, Rectangle, Register, Target};
 use crate::encoder::{Encoder, RegisterMap};
 use crate::pool::{Pool, PoolKey};
-use crate::{run, shaders};
+use crate::{run, shaders, types};
 
 /// Planned out and intrinsically validated command buffer.
 ///
@@ -28,6 +28,8 @@ pub struct Program {
     /// The encoder can make use of this mapping as intermediate resources for transfer between
     /// different images or from host to graphic device etc.
     pub(crate) textures: ImageBufferPlan,
+    /// The input/output type of this program.
+    pub(crate) function: types::Function,
 }
 
 /// Describes a function call in more common terms.
@@ -616,6 +618,11 @@ impl ImagePoolPlan {
 }
 
 impl Program {
+    /// Get the function type associated with this program.
+    pub fn function_type(&self) -> &types::Function {
+        &self.function
+    }
+
     /// Choose an applicable adapter from one of the presented ones.
     pub fn choose_adapter(
         &self,
