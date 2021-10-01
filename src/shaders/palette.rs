@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey};
+use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey, ShaderData};
 use crate::buffer::{ChannelPosition, ColorChannel};
 
 /// a linear transformation on rgb color.
@@ -50,10 +50,9 @@ impl FragmentShaderData for Shader {
         Cow::Borrowed(SHADER)
     }
 
-    fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
+    fn binary_data(&self, buffer: &mut ShaderData) -> Option<BufferInitContent> {
         let mat4x2 = [self.x_coord, self.y_coord];
-
-        Some(BufferInitContent::new(buffer, &mat4x2))
+        Some(buffer.add(&mat4x2))
     }
 
     fn num_args(&self) -> u32 {

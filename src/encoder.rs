@@ -25,7 +25,7 @@ use crate::{run, shaders};
 pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     pub(crate) instructions: Instructions,
     /// The allocate binary data for runtime execution.
-    pub(crate) binary_data: Vec<u8>,
+    pub(crate) binary_data: shaders::ShaderData,
 
     // Replicated fields from `run::Descriptors` but only length.
     bind_groups: usize,
@@ -1671,7 +1671,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     /// Ingest the data into the encoder's active buffer data.
     fn ingest_data(&mut self, data: &[impl bytemuck::Pod]) -> BufferInitContent {
-        BufferInitContent::new(&mut self.binary_data, data)
+        self.binary_data.add(data)
     }
 
     pub(crate) fn io_map(&self) -> run::IoMap {

@@ -398,6 +398,20 @@ pub(crate) struct BufferDescriptorInit {
     pub usage: BufferUsage,
 }
 
+pub(crate) struct ParameterBuffer {
+    data: Vec<u8>,
+    statics: Vec<StaticParameter>,
+    types: types::StaticArena,
+}
+
+/// Internal type of [`ParameterBuffer`].
+struct StaticParameter {
+    /// The type of the parameter (implies a layout).
+    kind: types::Static,
+    /// The offset of the parameter relative to the complete parameter buffer.
+    offset: u64,
+}
+
 #[derive(Debug)]
 pub(crate) enum BufferInitContent {
     Owned(Vec<u8>),
@@ -747,7 +761,7 @@ impl Program {
 
         Ok(run::Executable {
             instructions: encoder.instructions.into(),
-            binary_data: encoder.binary_data,
+            binary_data: encoder.binary_data.binary,
             descriptors: run::Descriptors::default(),
             buffers,
             capabilities,
@@ -947,12 +961,14 @@ impl Launcher<'_> {
             device,
             queue,
             buffers,
-            binary_data: encoder.binary_data,
+            binary_data: encoder.binary_data.binary,
         };
 
         Ok(run::Execution::new(init))
     }
 }
+
+
 
 impl BufferInitContent {
     /// Construct a reference to data by allocating it freshly within the buffer.

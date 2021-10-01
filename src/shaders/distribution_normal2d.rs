@@ -1,4 +1,4 @@
-use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey};
+use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey, ShaderData};
 use std::borrow::Cow;
 
 /// a linear transformation on rgb color.
@@ -114,7 +114,7 @@ impl FragmentShaderData for Shader {
         Cow::Borrowed(SHADER)
     }
 
-    fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
+    fn binary_data(&self, buffer: &mut ShaderData) -> Option<BufferInitContent> {
         let Shader {
             expectation: exp,
             covariance_inverse: Mat2 { row_major: inv },
@@ -123,7 +123,7 @@ impl FragmentShaderData for Shader {
 
         let rgb_data: [f32; 7] = [exp[0], exp[1], inv[0], inv[1], inv[2], inv[3], *det];
 
-        Some(BufferInitContent::new(buffer, &rgb_data))
+        Some(buffer.add(&rgb_data))
     }
 
     fn num_args(&self) -> u32 {

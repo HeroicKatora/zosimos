@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey};
+use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey, ShaderData};
 
 /// a bilinear initialization on a (up to) 4-component color.
 pub const SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/inject.frag.v"));
@@ -22,8 +22,8 @@ impl FragmentShaderData for Shader {
         Cow::Borrowed(SHADER)
     }
 
-    fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
-        Some(BufferInitContent::new(buffer, &[self.mix, self.color]))
+    fn binary_data(&self, buffer: &mut ShaderData) -> Option<BufferInitContent> {
+        Some(buffer.add(&[self.mix, self.color]))
     }
 
     fn num_args(&self) -> u32 {

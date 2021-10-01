@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey};
+use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey, ShaderData};
 use crate::buffer::RowMatrix;
 
 /// a linear transformation on rgb color.
@@ -30,10 +30,9 @@ impl FragmentShaderData for Shader {
     }
 
     /// Encode the shader's data into the buffer, returning the descriptor to that.
-    fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
+    fn binary_data(&self, buffer: &mut ShaderData) -> Option<BufferInitContent> {
         let data = self.matrix.into_mat3x3_std140();
-
-        Some(BufferInitContent::new(buffer, &data))
+        Some(buffer.add(&data))
     }
 
     fn num_args(&self) -> u32 {

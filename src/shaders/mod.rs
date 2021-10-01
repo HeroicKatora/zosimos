@@ -1,14 +1,18 @@
-use crate::buffer::RowMatrix;
-use crate::program::BufferInitContent;
-use std::borrow::Cow;
-
 pub mod bilinear;
 pub mod box3;
+mod data;
 pub mod distribution_normal2d;
 pub mod inject;
 pub mod oklab;
 pub mod palette;
 pub mod stage;
+
+use std::borrow::Cow;
+
+use crate::buffer::RowMatrix;
+use crate::program::BufferInitContent;
+
+pub use self::data::ShaderData;
 
 /// A vertex box shader, rendering a sole quad with given vertex and uv coordinate system.
 pub const VERT_NOOP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/box.vert.v"));
@@ -27,7 +31,7 @@ pub(crate) trait FragmentShaderData: core::fmt::Debug {
     /// The SPIR-V shader source code.
     fn spirv_source(&self) -> Cow<'static, [u8]>;
     /// Encode the shader's data into the buffer, returning the descriptor to that.
-    fn binary_data(&self, _: &mut Vec<u8>) -> Option<BufferInitContent> {
+    fn binary_data(&self, _: &mut ShaderData) -> Option<BufferInitContent> {
         None
     }
     fn num_args(&self) -> u32 {
@@ -121,9 +125,9 @@ impl FragmentShaderData for LinearColorTransform {
         Cow::Borrowed(FRAG_LINEAR)
     }
 
-    fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
+    fn binary_data(&self, buffer: &mut ShaderData) -> Option<BufferInitContent> {
         let rgb_matrix: [f32; 12] = self.matrix.into_mat3x3_std140();
-        Some(BufferInitContent::new(buffer, &rgb_matrix))
+        Some(buffer.add(&rgb_matrix))
     }
 }
 
