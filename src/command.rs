@@ -1,3 +1,5 @@
+mod crop;
+
 use crate::buffer::{
     self, BufferLayout, ChannelPosition, Color, ColorChannel, Descriptor, RowMatrix, SampleParts,
     Texel, Whitepoint,
@@ -37,6 +39,23 @@ pub struct Register(pub(crate) usize);
 #[derive(Default)]
 pub struct CommandBuffer {
     ops: Vec<Op>,
+    statics: Statics,
+}
+
+/// An internal reference to one particular static slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Static(pub(crate) usize);
+
+/// The statics used in the command buffer.
+///
+/// We require commands to pre-register if they intend to control parameters in the compiled
+/// executable. This is for two reasons: Such parameter blocks need to have a unique ID associated
+/// with them; and this keeps the impact of recursively defined aggregate types low by interning
+/// the complete type definition graph.
+#[derive(Default, Clone)]
+pub(crate) struct Statics {
+    types: types::StaticArena,
+    slots: Vec<types::Static>,
 }
 
 #[derive(Clone)]
@@ -120,7 +139,7 @@ pub(crate) enum Target {
 #[derive(Clone, Debug)]
 pub(crate) enum UnaryOp {
     /// Op = id
-    Crop(Rectangle),
+    Crop(crop::Op),
     /// Op(color)[T] = T[.color=color]
     /// And color needs to be 'color compatible' with the prior T (see module).
     ColorConvert(ColorConversion),
@@ -450,6 +469,10 @@ enum CommandErrorKind {
 ///   other holomorphic functions. Ways to construct mobius transfrom from three key points. That
 ///   is particular relevant for color correction.
 impl CommandBuffer {
+    pub fn new() -> Self {
+        CommandBuffer::default()
+    }
+
     /// Declare an input.
     ///
     /// Inputs MUST later be bound from the pool during launch.
@@ -474,12 +497,17 @@ impl CommandBuffer {
 
     /// Select a rectangular part of an image.
     pub fn crop(&mut self, src: Register, rect: Rectangle) -> Result<Register, CommandError> {
-        let desc = self.describe_reg(src)?.clone();
-        Ok(self.push(Op::Unary {
-            src,
-            op: UnaryOp::Crop(rect),
-            desc,
-        }))
+        use self::crop::Encoder;
+        Encoder::crop(self, src, rect)
+    }
+
+    /// Configure selecting a rectangular part of an image.
+    ///
+    /// This returns a builder-style struct that allows you to configure additional nooks of the
+    /// operation. Use [`crop()`] unless you need it.
+    pub fn crop_with(&mut self, src: Register, rect: Rectangle) -> Result<crop::Crop<'_>, CommandError> {
+        use self::crop::Encoder;
+        Encoder::crop_with(self, src, rect)
     }
 
     /// Create an image with different color encoding.
@@ -1096,7 +1124,8 @@ impl CommandBuffer {
                 }
                 Op::Unary { desc: _, src, op } => {
                     match op {
-                        &UnaryOp::Crop(region) => {
+                        UnaryOp::Crop(crop) => {
+                            let region = crop.rectangle;
                             let target =
                                 Rectangle::with_width_height(region.width(), region.height());
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
@@ -1295,6 +1324,7 @@ impl CommandBuffer {
             ops: high_ops,
             textures,
             function,
+            statics: self.statics.clone(),
         })
     }
 
@@ -1313,6 +1343,13 @@ impl CommandBuffer {
         let reg = Register(self.ops.len());
         self.ops.push(op);
         reg
+    }
+
+    fn add_static(&mut self, typ: &dyn Fn(&mut types::StaticArena) -> types::Static) -> Static {
+        let r#type = typ(&mut self.statics.types);
+        let slot = Static(self.statics.slots.len());
+        self.statics.slots.push(r#type);
+        slot
     }
 }
 

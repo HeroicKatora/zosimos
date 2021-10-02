@@ -63,6 +63,7 @@ pub struct Static {
 }
 
 /// A builder for Static types.
+#[derive(Default, Clone)]
 pub(crate) struct StaticArena {
     /// The map from 'node' in (the explored part of) the graph to the index we have named it.
     interner: HashMap<StaticKind, Static>,
@@ -80,6 +81,7 @@ pub enum Layouter {
 pub(crate) enum StaticKind {
     Float,
     Double,
+    Vec2,
     Mat2(Layouter),
     Mat3(Layouter),
     Mat4(Layouter),
@@ -115,11 +117,11 @@ impl StaticArena {
 }
 
 impl StaticKind {
-    pub fn for_dependencies(mut self, mut ft: &mut dyn FnMut(Static)) {
+    pub fn for_dependencies(mut self, ft: &mut dyn FnMut(Static)) {
         self.visit_dependencies(&mut |&mut dep| ft(dep));
     }
 
-    pub fn visit_dependencies(&mut self, mut ft: &mut dyn FnMut(&mut Static)) {
+    pub fn visit_dependencies(&mut self, ft: &mut dyn FnMut(&mut Static)) {
         match self {
             StaticKind::Array { base, .. } => {
                 ft(base)

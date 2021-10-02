@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::buffer::{BufferLayout, Descriptor, RowMatrix};
-use crate::command::{High, Rectangle, Register, Target};
+use crate::command::{High, Rectangle, Register, Statics, Target};
 use crate::encoder::{Encoder, RegisterMap};
 use crate::pool::{Pool, PoolKey};
 use crate::{run, shaders, types};
@@ -30,6 +30,8 @@ pub struct Program {
     pub(crate) textures: ImageBufferPlan,
     /// The input/output type of this program.
     pub(crate) function: types::Function,
+    /// The types of all registered statics.
+    pub(crate) statics: Statics,
 }
 
 /// Describes a function call in more common terms.
