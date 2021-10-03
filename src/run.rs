@@ -179,6 +179,7 @@ pub struct RetireError {
 #[derive(Debug)]
 pub enum RetireErrorKind {
     NoSuchOutput,
+    BadInstruction,
 }
 
 impl Image {
@@ -842,8 +843,16 @@ impl Execution {
     }
 
     /// Stop the execution.
+    ///
+    /// Discards all resources that are still held like buffers, the device, etc.
     pub fn retire(self) -> Result<(), RetireError> {
-        todo!()
+        let mut pool = Pool::new();
+
+        let retire = self.retire_gracefully(&mut pool);
+        retire.finish_by_discarding();
+
+        drop(pool);
+        Ok(())
     }
 
     /// Stop the execution, depositing all resources into the provided pool.
