@@ -1251,8 +1251,15 @@ impl Retire<'_> {
     }
 
     /// Determine the pool key that will be preferred when calling `output`.
-    pub fn output_key(&self, _: Register) -> Result<PoolKey, RetireError> {
-        todo!()
+    pub fn output_key(&self, reg: Register) -> Result<Option<PoolKey>, RetireError> {
+        let index = self.execution.io_map.outputs
+            .get(&reg)
+            .copied()
+            .ok_or_else(|| RetireError {
+                inner: RetireErrorKind::NoSuchOutput,
+            })?;
+
+        Ok(self.execution.buffers[index].key)
     }
 
     /// Drop any temporary buffers that had been allocated during execution.
