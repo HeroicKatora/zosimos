@@ -327,10 +327,7 @@ fn run_fractal_noise(pool: &mut Pool) {
 
     let mut commands = CommandBuffer::default();
     let generated = commands
-        .distribution_fractal_noise(
-            descriptor,
-            command::FractalNoise::with_octaves(4),
-        )
+        .distribution_fractal_noise(descriptor, command::FractalNoise::with_octaves(4))
         .unwrap();
 
     let (output, _outformat) = commands.output(generated).expect("Valid for output");

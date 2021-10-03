@@ -965,7 +965,10 @@ impl<'trgt> DeferredBufferInitContentBuilder<'trgt> {
     }
 
     pub fn build(self) -> BufferInitContent {
-        BufferInitContent::Defer { start: self.start, end: self.buf.len() }
+        BufferInitContent::Defer {
+            start: self.start,
+            end: self.buf.len(),
+        }
     }
 }
 
