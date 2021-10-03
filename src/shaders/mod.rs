@@ -5,6 +5,7 @@ use std::borrow::Cow;
 pub mod bilinear;
 pub mod box3;
 pub mod distribution_normal2d;
+pub mod fractal_noise;
 pub mod inject;
 pub mod oklab;
 pub mod palette;
@@ -45,6 +46,8 @@ pub(crate) enum FragmentShaderKey {
     Convert,
     /// The generic distribution normal 2d.
     DistributionNormal2d,
+    /// Generic fractal brownian noise.
+    FractalNoise,
     /// Sample discrete colors from a palette.
     Palette,
     /// A bilinear function of colors.
@@ -62,6 +65,7 @@ pub(crate) enum FragmentShader {
     PaintOnTop(PaintOnTopKind),
     LinearColorMatrix(LinearColorTransform),
     Normal2d(DistributionNormal2d),
+    FractalNoise(FractalNoise),
     Palette(self::palette::Shader),
     Bilinear(self::bilinear::Shader),
     Inject(self::inject::Shader),
@@ -75,6 +79,7 @@ impl FragmentShader {
             FragmentShader::PaintOnTop(kind) => kind,
             FragmentShader::LinearColorMatrix(shader) => shader,
             FragmentShader::Normal2d(normal) => normal,
+            FragmentShader::FractalNoise(noise) => noise,
             FragmentShader::Palette(palette) => palette,
             FragmentShader::Bilinear(bilinear) => bilinear,
             FragmentShader::Inject(inject) => inject,
@@ -128,4 +133,5 @@ impl FragmentShaderData for LinearColorTransform {
 }
 
 pub(crate) use self::distribution_normal2d::Shader as DistributionNormal2d;
+pub(crate) use self::fractal_noise::Shader as FractalNoise;
 pub(crate) use self::palette::Shader as PaletteShader;
