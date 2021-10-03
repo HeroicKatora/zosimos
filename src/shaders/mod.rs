@@ -1,5 +1,5 @@
 use crate::buffer::RowMatrix;
-use crate::program::{BufferInitContent, DeferredBufferInitContentBuilder};
+use crate::program::BufferInitContent;
 use std::borrow::Cow;
 
 pub mod bilinear;

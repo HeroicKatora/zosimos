@@ -1,6 +1,4 @@
-use super::{
-    BufferInitContent, DeferredBufferInitContentBuilder, FragmentShaderData, FragmentShaderKey,
-};
+use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey};
 use std::borrow::Cow;
 
 /// a linear transformation on rgb color.
@@ -78,7 +76,7 @@ impl FragmentShaderData for Shader {
             amplitude_damping,
             grid_scale,
         } = self;
-        let mut buffer_content = DeferredBufferInitContentBuilder::new(buffer);
+        let mut buffer_content = BufferInitContent::builder(buffer);
         buffer_content.extend_from_pods(&[grid_scale[0], grid_scale[1]]);
         buffer_content.extend_from_pods(&[*initial_amplitude]);
         buffer_content.extend_from_pods(&[*amplitude_damping]);

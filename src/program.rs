@@ -407,7 +407,7 @@ pub(crate) enum BufferInitContent {
 }
 
 #[derive(Debug)]
-pub(crate) struct DeferredBufferInitContentBuilder<'trgt> {
+pub(crate) struct BufferInitContentBuilder<'trgt> {
     buf: &'trgt mut Vec<u8>,
     start: usize,
 }
@@ -953,13 +953,7 @@ impl Launcher<'_> {
     }
 }
 
-impl<'trgt> DeferredBufferInitContentBuilder<'trgt> {
-    /// Start allocating data into a buffer
-    pub fn new(buf: &'trgt mut Vec<u8>) -> Self {
-        let start = buf.len();
-        Self { buf, start }
-    }
-
+impl<'trgt> BufferInitContentBuilder<'trgt> {
     pub fn extend_from_pods(&mut self, data: &[impl bytemuck::Pod]) {
         self.buf.extend_from_slice(bytemuck::cast_slice(data));
     }
@@ -979,6 +973,12 @@ impl BufferInitContent {
         buf.extend_from_slice(bytemuck::cast_slice(data));
         let end = buf.len();
         BufferInitContent::Defer { start, end }
+    }
+
+    /// Start allocating data into a buffer
+    pub fn builder(buf: &mut Vec<u8>) -> BufferInitContentBuilder<'_> {
+        let start = buf.len();
+        BufferInitContentBuilder { buf, start }
     }
 
     /// Get a reference to the binary data, given the allocator/buffer.
