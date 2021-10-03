@@ -723,7 +723,7 @@ impl Program {
             descriptors: run::Descriptors::default(),
             buffers,
             capabilities,
-            io_map,
+            io_map: io_map.into(),
         })
     }
 
@@ -913,6 +913,7 @@ impl Launcher<'_> {
         // Unbalanced operands shouldn't happen.
         // This is part of validation layer but cheap and we always do it.
         encoder.finalize()?;
+        let io_map = encoder.io_map();
 
         let init = run::InitialState {
             instructions: encoder.instructions.into(),
@@ -920,6 +921,7 @@ impl Launcher<'_> {
             queue,
             buffers,
             binary_data: encoder.binary_data,
+            io_map,
         };
 
         Ok(run::Execution::new(init))
