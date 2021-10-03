@@ -62,6 +62,8 @@ fn integration() {
 
     run_distribution_u8(&mut pool);
 
+    run_fractal_noise(&mut pool);
+
     run_transmute(&mut pool, pool_background.clone());
 
     run_palette(&mut pool, pool_background.clone());
@@ -313,6 +315,39 @@ fn run_distribution_u8(pool: &mut Pool) {
     }
 
     util::assert_reference_image(layout, "distribution_u8.png.crc");
+}
+
+fn run_fractal_noise(pool: &mut Pool) {
+    let mut layout = image::DynamicImage::new_rgba8(400, 400);
+
+    let descriptor = Descriptor {
+        layout: (&layout).into(),
+        texel: buffer::Texel::with_srgb_image(&layout),
+    };
+
+    let mut commands = CommandBuffer::default();
+    let generated = commands
+        .distribution_fractal_noise(
+            descriptor,
+            command::FractalNoise::with_octaves(4),
+        )
+        .unwrap();
+
+    let (output, _outformat) = commands.output(generated).expect("Valid for output");
+
+    let result = run_once_with_output(commands, pool, vec![], retire_with_one_image(output));
+
+    let image_generated = pool.entry(result).unwrap();
+
+    match layout {
+        image::DynamicImage::ImageRgba8(ref mut buffer) => {
+            let bytes = image_generated.as_bytes().expect("Not a byte image");
+            bytemuck::cast_slice_mut(&mut *buffer).copy_from_slice(bytes);
+        }
+        _ => unreachable!(),
+    }
+
+    util::assert_reference_image(layout, "distribution_fractal2d.png.crc");
 }
 
 fn run_transmute(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {

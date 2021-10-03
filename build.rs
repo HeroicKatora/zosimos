@@ -89,6 +89,12 @@ fn main() -> Result<(), BuildError> {
             name_overwrite: None,
         },
         SimpleSource {
+            path: "src/shaders/fractal_noise.frag",
+            kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
+        },
+        SimpleSource {
             path: "src/shaders/palette.frag",
             kind: ShaderKind::Fragment,
             entry: "main",

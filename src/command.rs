@@ -8,6 +8,7 @@ use crate::program::{
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
+pub use crate::shaders::fractal_noise::Shader as FractalNoise;
 use crate::shaders::{self, FragmentShader, PaintOnTopKind};
 
 use std::collections::HashMap;
@@ -72,6 +73,8 @@ pub(crate) enum ConstructOp {
     Bilinear(Bilinear),
     /// A 2d normal distribution.
     DistributionNormal(shaders::DistributionNormal2d),
+    /// Fractal noise
+    DistributionNoise(shaders::FractalNoise),
     // TODO: can optimize this repr for the common case.
     Solid(Vec<u8>),
 }
@@ -938,6 +941,27 @@ impl CommandBuffer {
         }))
     }
 
+    /// A 2d image with fractal brownian noise.
+    ///
+    /// The parameters are controlled through the `distribution` parameter. Output contains
+    /// in each of the 4 color channels uncorrelated, 1 dimensional fractal perlin noise.
+    pub fn distribution_fractal_noise(
+        &mut self,
+        describe: Descriptor,
+        distribution: shaders::FractalNoise,
+    ) -> Result<Register, CommandError> {
+        if !describe.is_consistent() {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(describe),
+            });
+        }
+
+        Ok(self.push(Op::Construct {
+            desc: describe,
+            op: ConstructOp::DistributionNoise(distribution),
+        }))
+    }
+
     /// Evaluate a bilinear function over a 2d image.
     ///
     /// For each color channel, the parameter contains intervals of values that define how its
@@ -1076,6 +1100,14 @@ impl CommandBuffer {
                                 dst: Target::Discard(texture),
                                 fn_: Function::PaintFullScreen {
                                     shader: FragmentShader::Normal2d(distribution.clone()),
+                                },
+                            })
+                        }
+                        ConstructOp::DistributionNoise(ref noise_params) => {
+                            high_ops.push(High::Construct {
+                                dst: Target::Discard(texture),
+                                fn_: Function::PaintFullScreen {
+                                    shader: FragmentShader::FractalNoise(noise_params.clone()),
                                 },
                             })
                         }

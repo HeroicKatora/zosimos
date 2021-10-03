@@ -407,6 +407,12 @@ pub(crate) enum BufferInitContent {
 }
 
 #[derive(Debug)]
+pub(crate) struct DeferredBufferInitContentBuilder<'trgt> {
+    buf: &'trgt mut Vec<u8>,
+    start: usize,
+}
+
+#[derive(Debug)]
 pub(crate) struct ShaderDescriptor {
     pub name: &'static str,
     pub source_spirv: Cow<'static, [u32]>,
@@ -944,6 +950,22 @@ impl Launcher<'_> {
         };
 
         Ok(run::Execution::new(init))
+    }
+}
+
+impl<'trgt> DeferredBufferInitContentBuilder<'trgt> {
+    /// Start allocating data into a buffer
+    pub fn new(buf: &'trgt mut Vec<u8>) -> Self {
+        let start = buf.len();
+        Self { buf, start }
+    }
+
+    pub fn extend_from_pods(&mut self, data: &[impl bytemuck::Pod]) {
+        self.buf.extend_from_slice(bytemuck::cast_slice(data));
+    }
+
+    pub fn build(self) -> BufferInitContent {
+        BufferInitContent::Defer { start: self.start, end: self.buf.len() }
     }
 }
 
