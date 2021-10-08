@@ -27,7 +27,7 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     /// The allocate binary data for runtime execution.
     pub(crate) binary_data: Vec<u8>,
 
-    // Replicated fields from `run::Descriptors` but only length.
+    // Fields from `run::Descriptors` that simulate the length.
     bind_groups: usize,
     bind_group_layouts: usize,
     buffers: usize,

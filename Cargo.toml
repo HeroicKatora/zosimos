@@ -33,22 +33,11 @@ version = "1"
 default-features = false
 
 [dependencies.wgpu]
-version = "0.10.1"
+version = "0.11"
 features = ["spirv"]
-
-# FIXME: these are required for the patch overrides
-[dependencies.naga]
-version = "=0.6.0"
-[dependencies.wgpu-hal]
-version = "=0.10.1"
 
 [build-dependencies]
 shaderc = "0.7"
-
-[patch.crates-io]
-naga = { git = "https://github.com/gfx-rs/naga", rev = "60d0bf850b5bfeb87aeb5a0d4db6bb4059f80290" }
-wgpu-hal = { git = "https://github.com/gfx-rs/wgpu" }
-wgpu = { git = "https://github.com/gfx-rs/wgpu" }
 
 ## Local, Testing dependencies.
 
