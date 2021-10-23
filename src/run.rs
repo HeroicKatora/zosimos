@@ -173,7 +173,7 @@ pub struct BadInstruction {
 
 #[derive(Debug)]
 pub struct RetireError {
-    inner: RetireErrorKind
+    inner: RetireErrorKind,
 }
 
 #[derive(Debug)]
@@ -1237,7 +1237,10 @@ impl Retire<'_> {
     /// Return the image as viewed inside the pool. This is not arbitrary. See [`output_key`] for
     /// more details (WIP).
     pub fn output(&mut self, reg: Register) -> Result<PoolImage<'_>, RetireError> {
-        let index = self.execution.io_map.outputs
+        let index = self
+            .execution
+            .io_map
+            .outputs
             .get(&reg)
             .copied()
             .ok_or_else(|| RetireError {
@@ -1261,7 +1264,10 @@ impl Retire<'_> {
 
     /// Determine the pool key that will be preferred when calling `output`.
     pub fn output_key(&self, reg: Register) -> Result<Option<PoolKey>, RetireError> {
-        let index = self.execution.io_map.outputs
+        let index = self
+            .execution
+            .io_map
+            .outputs
             .get(&reg)
             .copied()
             .ok_or_else(|| RetireError {
