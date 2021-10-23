@@ -30,7 +30,7 @@ pub struct Executable {
     /// Input/Output buffers used for execution.
     pub(crate) buffers: Vec<Image>,
     /// The map from registers to the index in image data.
-    pub(crate) io_map: IoMap,
+    pub(crate) io_map: Arc<IoMap>,
     /// The capabilities required from devices to execute this.
     pub(crate) capabilities: Capabilities,
 }
@@ -49,7 +49,7 @@ pub struct Environment<'pool> {
     pool: &'pool mut Pool,
     gpu: Gpu,
     buffers: Vec<Image>,
-    inputs: HashMap<Register, usize>,
+    io_map: Arc<IoMap>,
 }
 
 /// A running `Executable`.
@@ -60,6 +60,7 @@ pub struct Execution {
     pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
     pub(crate) buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
+    pub(crate) io_map: Arc<IoMap>,
 }
 
 pub(crate) struct InitialState {
@@ -68,6 +69,7 @@ pub(crate) struct InitialState {
     pub(crate) queue: Queue,
     pub(crate) buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
+    pub(crate) io_map: IoMap,
 }
 
 /// An image owned by the execution state but compatible with extracting it.
@@ -84,7 +86,9 @@ pub(crate) struct Image {
 
 #[derive(Default)]
 pub struct IoMap {
+    /// Map input registers to their index in `buffers`.
     pub(crate) inputs: HashMap<Register, usize>,
+    /// Map output registers to their index in `buffers`.
     pub(crate) outputs: HashMap<Register, usize>,
 }
 
@@ -168,7 +172,15 @@ pub struct BadInstruction {
 }
 
 #[derive(Debug)]
-pub enum RetireError {}
+pub struct RetireError {
+    inner: RetireErrorKind,
+}
+
+#[derive(Debug)]
+pub enum RetireErrorKind {
+    NoSuchOutput,
+    BadInstruction,
+}
 
 impl Image {
     /// Create an image without binary data, promising to set it up later.
@@ -197,7 +209,7 @@ impl Executable {
             pool,
             gpu,
             buffers: self.buffers.iter().map(Image::clone_like).collect(),
-            inputs: self.io_map.inputs.clone(),
+            io_map: self.io_map.clone(),
         })
     }
 
@@ -211,6 +223,7 @@ impl Executable {
             command_encoder: None,
             buffers: env.buffers,
             binary_data: self.binary_data.clone(),
+            io_map: self.io_map.clone(),
         })
     }
 
@@ -224,6 +237,7 @@ impl Executable {
             command_encoder: None,
             buffers: env.buffers,
             binary_data: self.binary_data,
+            io_map: self.io_map.clone(),
         })
     }
 
@@ -292,6 +306,7 @@ impl Executable {
 impl Environment<'_> {
     pub fn bind(&mut self, reg: Register, key: PoolKey) -> Result<(), StartError> {
         let &idx = self
+            .io_map
             .inputs
             .get(&reg)
             .ok_or_else(|| StartError::InternalCommandError(line!()))?;
@@ -332,6 +347,7 @@ impl Execution {
             buffers: init.buffers,
             command_encoder: None,
             binary_data: init.binary_data,
+            io_map: Arc::new(init.io_map),
         }
     }
 
@@ -842,8 +858,16 @@ impl Execution {
     }
 
     /// Stop the execution.
+    ///
+    /// Discards all resources that are still held like buffers, the device, etc.
     pub fn retire(self) -> Result<(), RetireError> {
-        todo!()
+        let mut pool = Pool::new();
+
+        let retire = self.retire_gracefully(&mut pool);
+        retire.finish_by_discarding();
+
+        drop(pool);
+        Ok(())
     }
 
     /// Stop the execution, depositing all resources into the provided pool.
@@ -1228,10 +1252,20 @@ impl Retire<'_> {
     ///
     /// Return the image as viewed inside the pool. This is not arbitrary. See [`output_key`] for
     /// more details (WIP).
-    pub fn output(&mut self, _: Register) -> Result<PoolImage<'_>, RetireError> {
+    pub fn output(&mut self, reg: Register) -> Result<PoolImage<'_>, RetireError> {
+        let index = self
+            .execution
+            .io_map
+            .outputs
+            .get(&reg)
+            .copied()
+            .ok_or_else(|| RetireError {
+                inner: RetireErrorKind::NoSuchOutput,
+            })?;
+
         // FIXME: don't take some random image, use the right one..
         // Also: should we leave the actual image? This would allow restarting the pipeline.
-        let image = self.execution.buffers.pop().unwrap();
+        let image = &mut self.execution.buffers[index];
 
         let descriptor = Descriptor {
             layout: image.data.layout().clone(),
@@ -1239,14 +1273,24 @@ impl Retire<'_> {
         };
 
         let mut pool_image = self.pool.declare(descriptor);
-        pool_image.replace(image.data);
+        pool_image.swap(&mut image.data);
 
         Ok(pool_image.into())
     }
 
     /// Determine the pool key that will be preferred when calling `output`.
-    pub fn output_key(&self, _: Register) -> Result<PoolKey, RetireError> {
-        todo!()
+    pub fn output_key(&self, reg: Register) -> Result<Option<PoolKey>, RetireError> {
+        let index = self
+            .execution
+            .io_map
+            .outputs
+            .get(&reg)
+            .copied()
+            .ok_or_else(|| RetireError {
+                inner: RetireErrorKind::NoSuchOutput,
+            })?;
+
+        Ok(self.execution.buffers[index].key)
     }
 
     /// Drop any temporary buffers that had been allocated during execution.
