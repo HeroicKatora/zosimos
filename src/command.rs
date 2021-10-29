@@ -11,6 +11,7 @@ pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
 pub use crate::shaders::fractal_noise::Shader as FractalNoise;
 use crate::shaders::{self, FragmentShader, PaintOnTopKind};
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 /// A reference to one particular value.
@@ -669,9 +670,7 @@ impl CommandBuffer {
         channel: ColorChannel,
     ) -> Result<Register, CommandError> {
         let desc = self.describe_reg(src)?;
-        let texel = desc
-            .channel_texel(channel)
-            .ok_or_else(|| CommandError::OTHER)?;
+        let texel = desc.channel_texel(channel).ok_or(CommandError::OTHER)?;
 
         let layout = buffer::RowLayoutDescription {
             width: desc.layout.width(),
@@ -680,15 +679,14 @@ impl CommandBuffer {
             row_stride: (texel.samples.bits.bytes() as u64) * u64::from(desc.layout.width()),
         };
 
-        let layout =
-            buffer::BufferLayout::with_row_layout(layout).ok_or_else(|| CommandError::OTHER)?;
+        let layout = buffer::BufferLayout::with_row_layout(layout).ok_or(CommandError::OTHER)?;
 
         // Check that we can actually extract that channel.
         // This could be unimplemented if the position of a particular channel is not yet a stable
         // detail. Also, we might introduce 'virtual' channels such as `Luminance` on an RGB image
         // where such channels are computed by linear combination instead of a binary incidence
         // vector. Then there might be colors where this does not exist.
-        let channel = ChannelPosition::new(channel).ok_or_else(|| CommandError::OTHER)?;
+        let channel = ChannelPosition::new(channel).ok_or(CommandError::OTHER)?;
 
         let op = Op::Unary {
             src,
@@ -751,7 +749,7 @@ impl CommandBuffer {
         let desc_below = self.describe_reg(below)?;
         let expected_texel = desc_below
             .channel_texel(channel)
-            .ok_or_else(|| CommandError::OTHER)?;
+            .ok_or(CommandError::OTHER)?;
         let mut desc_above = self.describe_reg(above)?.clone();
 
         if desc_above.texel.samples.parts.num_components()
@@ -789,7 +787,7 @@ impl CommandBuffer {
         }
 
         // Find where to insert, see `extract` for this step.
-        let channel = ChannelPosition::new(channel).ok_or_else(|| CommandError::OTHER)?;
+        let channel = ChannelPosition::new(channel).ok_or(CommandError::OTHER)?;
 
         let op = Op::Binary {
             lhs: below,
@@ -816,14 +814,14 @@ impl CommandBuffer {
 
         // FIXME: check that channels are actually in indices' color type.
         let x_coord = if let Some(coord) = config.width {
-            let pos = ChannelPosition::new(coord).ok_or_else(|| CommandError::TYPE_ERR)?;
+            let pos = ChannelPosition::new(coord).ok_or(CommandError::TYPE_ERR)?;
             pos.into_vec4()
         } else {
             [0.0; 4]
         };
 
         let y_coord = if let Some(coord) = config.height {
-            let pos = ChannelPosition::new(coord).ok_or_else(|| CommandError::TYPE_ERR)?;
+            let pos = ChannelPosition::new(coord).ok_or(CommandError::TYPE_ERR)?;
             pos.into_vec4()
         } else {
             [0.0; 4]
@@ -836,7 +834,7 @@ impl CommandBuffer {
             row_stride: (idx_desc.layout.width() * u32::from(desc.layout.bytes_per_texel)).into(),
             texel_stride: desc.layout.bytes_per_texel.into(),
         })
-        .ok_or_else(|| CommandError::OTHER)?;
+        .ok_or(CommandError::OTHER)?;
 
         let op = Op::Binary {
             lhs: palette,
@@ -1000,7 +998,11 @@ impl CommandBuffer {
             return Err(CommandError::TYPE_ERR);
         }
 
-        if !(RowMatrix::new(affine.transformation).det().abs() >= f32::EPSILON) {
+        if let Some(Ordering::Less) = RowMatrix::new(affine.transformation)
+            .det()
+            .abs()
+            .partial_cmp(&f32::EPSILON)
+        {
             return Err(CommandError::OTHER);
         }
 
@@ -1072,8 +1074,8 @@ impl CommandBuffer {
         for (idx, op) in self.ops.iter().enumerate() {
             let liveness = first_use[idx]..last_use[idx];
             let descriptor = self
-                .describe_reg(if let &Op::Output { src } = op {
-                    src
+                .describe_reg(if let Op::Output { src } = op {
+                    *src
                 } else {
                     Register(idx)
                 })
@@ -1141,7 +1143,7 @@ impl CommandBuffer {
                         }
                         UnaryOp::ChromaticAdaptation(adaptation) => {
                             // Determine matrix for converting to xyz, then adapt, then back.
-                            let adapt = RowMatrix::new(adaptation.into_matrix()?);
+                            let adapt = RowMatrix::new(adaptation.to_matrix()?);
                             let output = adapt.multiply_right(adaptation.to_xyz_matrix.into());
                             let matrix = adaptation.from_xyz_matrix.multiply_right(output);
 
@@ -1182,7 +1184,7 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Function::PaintFullScreen {
-                                    shader: color.into_shader(),
+                                    shader: color.to_shader(),
                                 },
                             });
                         }
@@ -1202,7 +1204,7 @@ impl CommandBuffer {
                             })
                         }
                         UnaryOp::Derivative(derivative) => {
-                            let shader = derivative.method.into_shader(derivative.direction)?;
+                            let shader = derivative.method.to_shader(derivative.direction)?;
 
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
                             high_ops.push(High::Construct {
@@ -1344,14 +1346,14 @@ impl CommandBuffer {
 }
 
 impl ColorConversion {
-    pub(crate) fn into_shader(&self) -> FragmentShader {
+    pub(crate) fn to_shader(&self) -> FragmentShader {
         match self {
             ColorConversion::Xyz {
                 to_xyz_matrix,
                 from_xyz_matrix,
             } => {
-                let from = from_xyz_matrix.inv().into();
-                let matrix = to_xyz_matrix.multiply_right(from).into();
+                let from = from_xyz_matrix.inv();
+                let matrix = to_xyz_matrix.multiply_right(from.into()).into();
 
                 FragmentShader::LinearColorMatrix(shaders::LinearColorTransform { matrix })
             }
@@ -1359,7 +1361,7 @@ impl ColorConversion {
                 FragmentShader::Oklab(shaders::oklab::Shader::with_encode(*to_xyz_matrix))
             }
             ColorConversion::OklabToXyz { from_xyz_matrix } => {
-                let from_xyz_matrix = from_xyz_matrix.inv().into();
+                let from_xyz_matrix = from_xyz_matrix.inv();
                 FragmentShader::Oklab(shaders::oklab::Shader::with_decode(from_xyz_matrix))
             }
         }
@@ -1367,7 +1369,7 @@ impl ColorConversion {
 }
 
 impl ChromaticAdaptation {
-    pub(crate) fn into_matrix(&self) -> Result<[f32; 9], CompileError> {
+    pub(crate) fn to_matrix(&self) -> Result<[f32; 9], CompileError> {
         use palette::{
             chromatic_adaptation::{Method, TransformMatrix},
             white_point as wp,
@@ -1427,7 +1429,7 @@ impl ChromaticAdaptation {
 
 #[rustfmt::skip]
 impl DerivativeMethod {
-    fn into_shader(&self, direction: Direction) -> Result<FragmentShader, CompileError> {
+    fn to_shader(&self, direction: Direction) -> Result<FragmentShader, CompileError> {
         use DerivativeMethod::*;
         use shaders::box3;
         match self {

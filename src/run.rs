@@ -247,7 +247,7 @@ impl Executable {
     /// validate that the buffer descriptors are okay.
     fn check_satisfiable(&self, env: &mut Environment) -> Result<(), StartError> {
         let mut used_keys = HashSet::new();
-        for (_, &input) in &self.io_map.inputs {
+        for &input in self.io_map.inputs.values() {
             let buffer = env
                 .buffers
                 .get(input)
@@ -285,7 +285,7 @@ impl Executable {
         }
 
         // Okay, checks done, let's patch up the state.
-        for (_, &input) in &self.io_map.inputs {
+        for &input in self.io_map.inputs.values() {
             let buffer = &mut env.buffers[input];
 
             // Unwrap okay, check this earlier.
@@ -295,7 +295,7 @@ impl Executable {
             pool_img.trade(&mut buffer.data);
         }
 
-        for (_, &output) in &self.io_map.outputs {
+        for &output in self.io_map.outputs.values() {
             env.buffers[output].data.host_allocate();
         }
 
@@ -424,7 +424,7 @@ impl Execution {
             }
             Low::Shader(desc) => {
                 let shader;
-                if !std::env::var("STEALTH_PAINT_PASSTHROUGH").is_ok() {
+                if std::env::var("STEALTH_PAINT_PASSTHROUGH").is_err() {
                     let desc = wgpu::ShaderModuleDescriptor {
                         label: Some(desc.name),
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
@@ -603,11 +603,10 @@ impl Execution {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let source = self
-                    .buffers
-                    .get(source_image.0)
-                    .ok_or(StepError::InvalidInstruction(line!()))?;
-                let source = &source.data;
+                let source = match self.buffers.get(source_image.0) {
+                    None => return Err(StepError::InvalidInstruction(line!())),
+                    Some(source) => &source.data,
+                };
 
                 if source.as_bytes().is_none() {
                     return Err(StepError::InvalidInstruction(line!()));
@@ -768,16 +767,15 @@ impl Execution {
                     None => return Err(StepError::InvalidInstruction(line!())),
                 };
 
-                let source = self
-                    .descriptors
-                    .buffers
-                    .get(source_buffer.0)
-                    .ok_or(StepError::InvalidInstruction(line!()))?;
-                let target = self
-                    .descriptors
-                    .buffers
-                    .get(target_buffer.0)
-                    .ok_or(StepError::InvalidInstruction(line!()))?;
+                let source = match self.descriptors.buffers.get(source_buffer.0) {
+                    Some(source) => source,
+                    None => return Err(StepError::InvalidInstruction(line!())),
+                };
+
+                let target = match self.descriptors.buffers.get(target_buffer.0) {
+                    Some(target) => target,
+                    None => return Err(StepError::InvalidInstruction(line!())),
+                };
 
                 encoder.copy_buffer_to_buffer(source, 0, target, 0, size);
 
@@ -872,7 +870,7 @@ impl Execution {
 
     /// Stop the execution, depositing all resources into the provided pool.
     #[must_use = "You won't get the ids of outputs."]
-    pub fn retire_gracefully<'pool>(self, pool: &'pool mut Pool) -> Retire<'pool> {
+    pub fn retire_gracefully(self, pool: &mut Pool) -> Retire<'_> {
         self.gpu.device.stop_capture();
         Retire {
             execution: self,
@@ -921,8 +919,8 @@ impl Descriptors {
     ) -> Result<wgpu::BindingResource<'_>, StepError> {
         use program::BindingResource::{Buffer, Sampler, TextureView};
         // eprintln!("{:?}", desc);
-        match desc {
-            &Buffer {
+        match *desc {
+            Buffer {
                 buffer_idx,
                 offset,
                 size,
@@ -937,12 +935,12 @@ impl Descriptors {
                     size,
                 }))
             }
-            &Sampler(idx) => self
+            Sampler(idx) => self
                 .sampler
                 .get(idx)
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))
                 .map(wgpu::BindingResource::Sampler),
-            &TextureView(idx) => self
+            TextureView(idx) => self
                 .texture_views
                 .get(idx)
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))
@@ -1096,11 +1094,12 @@ impl Descriptors {
         buffer: DeviceBuffer,
         layout: &BufferLayout,
     ) -> Result<wgpu::ImageCopyBuffer<'_>, StepError> {
+        let buffer = match self.buffers.get(buffer.0) {
+            None => return Err(StepError::InvalidInstruction(line!())),
+            Some(buffer) => buffer,
+        };
         Ok(wgpu::ImageCopyBufferBase {
-            buffer: self
-                .buffers
-                .get(buffer.0)
-                .ok_or(StepError::InvalidInstruction(line!()))?,
+            buffer,
             layout: wgpu::ImageDataLayout {
                 bytes_per_row: NonZeroU32::new(layout.bytes_per_row),
                 offset: 0,
@@ -1110,11 +1109,12 @@ impl Descriptors {
     }
 
     fn texture(&self, texture: DeviceTexture) -> Result<wgpu::ImageCopyTexture<'_>, StepError> {
+        let texture = match self.textures.get(texture.0) {
+            None => return Err(StepError::InvalidInstruction(line!())),
+            Some(texture) => texture,
+        };
         Ok(wgpu::ImageCopyTextureBase {
-            texture: self
-                .textures
-                .get(texture.0)
-                .ok_or(StepError::InvalidInstruction(line!()))?,
+            texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
@@ -1250,8 +1250,8 @@ impl StepError {
 impl Retire<'_> {
     /// Move the output image corresponding to `reg` into the pool.
     ///
-    /// Return the image as viewed inside the pool. This is not arbitrary. See [`output_key`] for
-    /// more details (WIP).
+    /// Return the image as viewed inside the pool. This is not arbitrary. See
+    /// [`output_key`](Self::output_key) for more details (WIP).
     pub fn output(&mut self, reg: Register) -> Result<PoolImage<'_>, RetireError> {
         let index = self
             .execution
@@ -1259,7 +1259,7 @@ impl Retire<'_> {
             .outputs
             .get(&reg)
             .copied()
-            .ok_or_else(|| RetireError {
+            .ok_or(RetireError {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
@@ -1286,7 +1286,7 @@ impl Retire<'_> {
             .outputs
             .get(&reg)
             .copied()
-            .ok_or_else(|| RetireError {
+            .ok_or(RetireError {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
@@ -1296,8 +1296,8 @@ impl Retire<'_> {
     /// Drop any temporary buffers that had been allocated during execution.
     ///
     /// This leaves only IO resources alive, potentially reducing the amount of allocated memory
-    /// space. In particular if you plan on calling [`finish`] where they would otherwise stay
-    /// allocated indefinitely (until the underlying pool itself dropped, that is).
+    /// space. In particular if you plan on calling [`finish`](Self::finish) where they would
+    /// otherwise stay allocated indefinitely (until the underlying pool itself dropped, that is).
     pub fn prune(&mut self) {
         // FIXME: not implemented.
         // But also we don't put any image into the pool yet.
@@ -1309,8 +1309,8 @@ impl Retire<'_> {
     /// Be careful not to cause leaky behavior, that is clean up any such temporary buffers when
     /// they can no longer be used.
     ///
-    /// You might wish to call [`prune`] to prevent such buffers from staying allocated in the pool
-    /// in the first place.
+    /// You might wish to call [`prune`](Self::prune) to prevent such buffers from staying
+    /// allocated in the pool in the first place.
     pub fn finish(self) {
         self.pool.reinsert_device(self.execution.gpu);
     }
@@ -1318,8 +1318,8 @@ impl Retire<'_> {
     /// Explicitly discard all remaining items.
     ///
     /// The effect of this is the same as merely dropping it however it is much more explicit. In
-    /// many cases you may want to call [`finish`] instead, ensuring that remaining resources that
-    /// _can_ be reused are kept alive and can be re-acquired in future runs.
+    /// many cases you may want to call [`finish`](Self::finish) instead, ensuring that remaining
+    /// resources that _can_ be reused are kept alive and can be re-acquired in future runs.
     pub fn finish_by_discarding(self) {
         // Yes, we want to drop everything.
         drop(self);

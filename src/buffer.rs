@@ -362,20 +362,19 @@ pub enum Primaries {
 
 /// The whitepoint/standard illuminant.
 ///
-/// ```text
-/// Illuminant 	X 	Y 	Z
-/// A   	1.09850 	1.00000 	0.35585
-/// B   	0.99072 	1.00000 	0.85223
-/// C   	0.98074 	1.00000 	1.18232
-/// D50 	0.96422 	1.00000 	0.82521
-/// D55 	0.95682 	1.00000 	0.92149
-/// D65 	0.95047 	1.00000 	1.08883
-/// D75 	0.94972 	1.00000 	1.22638
-/// E   	1.00000 	1.00000 	1.00000
-/// F2  	0.99186 	1.00000 	0.67393
-/// F7  	0.95041 	1.00000 	1.08747
-/// F11 	1.00962 	1.00000 	0.64350
-/// ```
+/// | Illuminant | X       | Y       | Z       |
+/// |------------|---------|---------|---------|
+/// | A          | 1.09850 | 1.00000 | 0.35585 |
+/// | B          | 0.99072 | 1.00000 | 0.85223 |
+/// | C          | 0.98074 | 1.00000 | 1.18232 |
+/// | D50        | 0.96422 | 1.00000 | 0.82521 |
+/// | D55        | 0.95682 | 1.00000 | 0.92149 |
+/// | D65        | 0.95047 | 1.00000 | 1.08883 |
+/// | D75        | 0.94972 | 1.00000 | 1.22638 |
+/// | E          | 1.00000 | 1.00000 | 1.00000 |
+/// | F2         | 0.99186 | 1.00000 | 0.67393 |
+/// | F7         | 0.95041 | 1.00000 | 1.08747 |
+/// | F11        | 1.00962 | 1.00000 | 0.64350 |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Whitepoint {
@@ -540,10 +539,10 @@ impl SampleParts {
     }
 }
 
+type ImageAllocator = fn(u32, u32, &[u8]) -> Option<image::DynamicImage>;
+
 impl Samples {
-    pub(crate) fn as_image_allocator(
-        &self,
-    ) -> Option<fn(u32, u32, &[u8]) -> Option<image::DynamicImage>> {
+    pub(crate) fn as_image_allocator(&self) -> Option<ImageAllocator> {
         use SampleBits as B;
         use SampleParts as P;
 
@@ -668,24 +667,24 @@ impl Color {
     /// Note that one can always combine a color space with an alpha component.
     pub fn is_consistent(&self, parts: SampleParts) -> bool {
         use SampleParts::*;
-        match (self, parts) {
-            (Color::Rgb { .. }, R | G | B | Rgb | Rgba | Rgb_ | _Rgb | Bgr_ | _Bgr) => true,
-            (Color::Oklab, LCh | LChA) => true,
+        matches!(
+            (self, parts),
+            (Color::Rgb { .. }, R | G | B | Rgb | Rgba | Rgb_ | _Rgb | Bgr_ | _Bgr)
+            | (Color::Oklab, LCh | LChA)
             // With scalars pseudo color, everything goes.
             // Essentially, the user assigns which meaning each channel has.
-            (Color::Scalars { .. }, _) => true,
-            _ => false,
-        }
+            | (Color::Scalars { .. }, _)
+        )
     }
 }
 
 #[rustfmt::skip]
 impl Primaries {
-    pub(crate) fn to_xyz(&self, white: Whitepoint) -> RowMatrix {
+    pub(crate) fn to_xyz(self, white: Whitepoint) -> RowMatrix {
         use Primaries::*;
         // Rec.BT.601
         // https://en.wikipedia.org/wiki/Color_spaces_with_RGB_primaries#Specifications_with_RGB_primaries
-        let xy: [[f32; 2]; 3] = match *self {
+        let xy: [[f32; 2]; 3] = match self {
             Bt601_525 | Smpte240 => [[0.63, 0.34], [0.31, 0.595], [0.155, 0.07]],
             Bt601_625 => [[0.64, 0.33], [0.29, 0.6], [0.15, 0.06]],
             Bt709 => [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06]],
@@ -694,7 +693,7 @@ impl Primaries {
 
         // A column of CIE XYZ intensities for that primary.
         let xyz = |[x, y]: [f32; 2]| {
-            return [x / y, 1.0, (1.0 - x - y)/y];
+            [x / y, 1.0, (1.0 - x - y)/y]
         };
 
         let xyz_r = xyz(xy[0]);
@@ -795,6 +794,7 @@ impl RowMatrix {
         ])
     }
 
+    #[allow(clippy::many_single_char_names)]
     pub(crate) fn transpose(self) -> Self {
         let [a, b, c, d, e, f, g, h, i] = self.into_inner();
 
