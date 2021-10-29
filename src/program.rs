@@ -984,7 +984,7 @@ impl BufferInitContent {
     }
 
     /// Get a reference to the binary data, given the allocator/buffer.
-    pub fn as_slice<'lt>(&'lt self, buffer: &'lt [u8]) -> &'lt [u8] {
+    pub fn as_slice<'lt>(&'lt self, buffer: &'lt Vec<u8>) -> &'lt [u8] {
         match self {
             BufferInitContent::Owned(ref data) => data,
             &BufferInitContent::Defer { start, end } => &buffer[start..end],

@@ -998,12 +998,13 @@ impl CommandBuffer {
             return Err(CommandError::TYPE_ERR);
         }
 
-        if let Some(Ordering::Less) = RowMatrix::new(affine.transformation)
+        match RowMatrix::new(affine.transformation)
             .det()
             .abs()
             .partial_cmp(&f32::EPSILON)
         {
-            return Err(CommandError::OTHER);
+            Some(Ordering::Greater | Ordering::Equal) => {}
+            _ => return Err(CommandError::OTHER),
         }
 
         match affine.sampling {
