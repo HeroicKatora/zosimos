@@ -476,7 +476,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             texture: reg_texture,
         } = self.buffer_plan.get(idx)?;
 
-        if let Some(_) = self.register_map.get(&idx) {
+        if self.register_map.get(&idx).is_some() {
             return Ok(());
         }
 
@@ -526,11 +526,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         };
 
         let texture = self.ensure_allocate_texture(reg_texture)?;
-        let staging = if let Some(staging) = self.staging_map.get(&reg_texture) {
-            Some(staging.device)
-        } else {
-            None
-        };
+        let staging = self
+            .staging_map
+            .get(&reg_texture)
+            .map(|staging| staging.device);
 
         let map_entry = RegisterMap {
             buffer,
@@ -544,7 +543,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         };
 
         // TODO do a match instead?
-        let in_map = self.register_map.entry(idx).or_insert(map_entry.clone());
+        let in_map = self
+            .register_map
+            .entry(idx)
+            .or_insert_with(|| map_entry.clone());
         *in_map = map_entry.clone();
 
         self.buffer_map.insert(
@@ -614,9 +616,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 reg_texture,
                 StagingTexture {
                     device,
-                    format: staging.clone(),
+                    format: staging,
                     stage_kind: st_parameter.stage_kind,
-                    parameter: st_parameter.parameter.clone(),
+                    parameter: st_parameter.parameter,
                     temporary_attachment_buffer_for_encoding_remove_if_possible: fallback,
                 },
             );
@@ -660,7 +662,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             source_image,
             size,
             offset: (0, 0),
-            target_buffer: target_buffer,
+            target_buffer,
             target_layout: regmap.buffer_layout,
         })?;
 
@@ -724,8 +726,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         if let Some(staging) = self.staging_map.get(&idx) {
             // eprintln!("{} {:?}", idx.0, staging);
             // Try to use the cached version of this pipeline.
-            let pipeline = if let Some(pipeline) = self.staged_to_pipelines.get(&idx) {
-                pipeline.clone()
+            let pipeline = if let Some(&pipeline) = self.staged_to_pipelines.get(&idx) {
+                pipeline
             } else {
                 let fn_ = Function::ToLinearOpto {
                     parameter: staging.parameter,
@@ -768,8 +770,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             // eprintln!("{} {:?}", idx.0, staging);
             // Try to use the cached version of this pipeline.
-            let pipeline = if let Some(pipeline) = self.staged_from_pipelines.get(&idx) {
-                pipeline.clone()
+            let pipeline = if let Some(&pipeline) = self.staged_from_pipelines.get(&idx) {
+                pipeline
             } else {
                 let fn_ = Function::FromLinearOpto {
                     parameter: staging.parameter,
@@ -1273,7 +1275,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let group = self.bind_groups;
         let descriptor = BindGroupDescriptor {
             layout_idx: self.make_paint_group_layout(count),
-            entries: entries,
+            entries,
             sparse: vec![],
         };
 
@@ -1358,7 +1360,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let buffer = self.buffers;
                 let content = self.ingest_data(data);
                 self.push(Low::BufferInit(BufferDescriptorInit {
-                    content: content,
+                    content,
                     usage: BufferUsage::Uniform,
                 }))?;
                 DeviceBuffer(buffer)
@@ -1502,7 +1504,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     ) -> Result<SimpleRenderPipeline, LaunchError> {
         match function {
             Function::PaintToSelection { texture, selection, target: target_coords, viewport, shader } => {
-                let (tex_width, tex_height) = self.texture_map[&texture].format.size;
+                let (tex_width, tex_height) = self.texture_map[texture].format.size;
 
                 let vertex = self.vertex_shader(
                     Some(VertexShader::Noop),

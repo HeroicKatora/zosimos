@@ -126,11 +126,8 @@ impl Pool {
     }
 
     fn select_device_key(&mut self, _: &program::Capabilities) -> Option<DefaultKey> {
-        for (key, _) in &self.devices {
-            // FIXME: check device against capabilities.
-            return Some(key);
-        }
-        None
+        // FIXME: check device against capabilities.
+        self.devices.keys().next()
     }
 
     /// Get a mutable handle of an image in the pool.

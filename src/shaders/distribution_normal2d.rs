@@ -1,5 +1,6 @@
 use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey};
 use std::borrow::Cow;
+use std::f32::consts::PI as PIf32;
 
 /// a linear transformation on rgb color.
 pub const SHADER: &[u8] = include_bytes!(concat!(
@@ -25,16 +26,8 @@ impl Shader {
         let d0 = if var0 == 0.0 { 0.0 } else { 1.0 / var0 };
         let d1 = if var1 == 0.0 { 0.0 } else { 1.0 / var1 };
 
-        let f0 = if var0 == 0.0 {
-            1.0
-        } else {
-            2.0 * 3.14159265 * var0
-        };
-        let f1 = if var1 == 0.0 {
-            1.0
-        } else {
-            2.0 * 3.14159265 * var1
-        };
+        let f0 = if var0 == 0.0 { 1.0 } else { 2.0 * PIf32 * var0 };
+        let f1 = if var1 == 0.0 { 1.0 } else { 2.0 * PIf32 * var1 };
 
         Shader {
             expectation: [0.0, 0.0],
@@ -100,7 +93,7 @@ impl Shader {
         Shader {
             expectation: [0.0, 0.0],
             covariance_inverse: Mat2 { row_major },
-            pseudo_determinant: 2.0 * 3.14159265 * length_sq,
+            pseudo_determinant: 2.0 * PIf32 * length_sq,
         }
     }
 }

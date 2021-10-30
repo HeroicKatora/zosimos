@@ -128,7 +128,7 @@ fn run_affine(
             -((foreground.layout.height() / 2) as f32),
         )
         // Rotate 45°
-        .rotate(3.145159265 / 4.)
+        .rotate(std::f32::consts::PI / 4.)
         // Move origin to the background center.
         .shift(
             (background.layout.width() / 2) as f32,

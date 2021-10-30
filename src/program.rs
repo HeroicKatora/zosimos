@@ -699,7 +699,7 @@ impl Program {
     pub fn minimal_device_descriptor() -> wgpu::DeviceDescriptor<'static> {
         wgpu::DeviceDescriptor {
             label: None,
-            features: if !std::env::var("STEALTH_PAINT_PASSTHROUGH").is_ok() {
+            features: if std::env::var("STEALTH_PAINT_PASSTHROUGH").is_err() {
                 wgpu::Features::empty()
             } else {
                 wgpu::Features::SPIRV_SHADER_PASSTHROUGH
@@ -760,7 +760,7 @@ impl Program {
         pool_plan: Option<&ImagePoolPlan>,
     ) -> Result<Encoder, LaunchError> {
         let mut encoder = Encoder::default();
-        encoder.enable_capabilities(&capabilities);
+        encoder.enable_capabilities(capabilities);
 
         encoder.set_buffer_plan(&self.textures);
         if let Some(pool_plan) = pool_plan {
@@ -897,7 +897,7 @@ impl Launcher<'_> {
     /// pre-determine the keys that will be used.
     pub fn bind_remaining_outputs(mut self) -> Result<Self, LaunchError> {
         for high in &self.program.ops {
-            if let &High::Output { src: register, dst } = high {
+            if let High::Output { src: register, dst } = *high {
                 let assigned = &self.program.textures.by_register[register.0];
                 let descriptor = &self.program.textures.texture[assigned.texture.0];
                 let key = self.pool_plan.choose_output(&mut *self.pool, descriptor);
@@ -914,7 +914,7 @@ impl Launcher<'_> {
 
         // For all inputs check that they have now been supplied.
         for high in &self.program.ops {
-            if let &High::Input(register, _) = high {
+            if let High::Input(register, _) = *high {
                 if self.pool_plan.get_texture(register).is_none() {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
@@ -986,7 +986,7 @@ impl BufferInitContent {
     /// Get a reference to the binary data, given the allocator/buffer.
     pub fn as_slice<'lt>(&'lt self, buffer: &'lt Vec<u8>) -> &'lt [u8] {
         match self {
-            BufferInitContent::Owned(ref data) => &data,
+            BufferInitContent::Owned(ref data) => data,
             &BufferInitContent::Defer { start, end } => &buffer[start..end],
         }
     }
