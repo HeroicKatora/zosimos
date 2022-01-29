@@ -298,6 +298,9 @@ pub(crate) enum Low {
         size: (u32, u32),
         target_image: Texture,
     },
+
+    StackFrame(run::Frame),
+    StackPop,
 }
 
 /// Create a bind group.

@@ -61,6 +61,12 @@ pub struct Execution {
     pub(crate) buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
     pub(crate) io_map: Arc<IoMap>,
+    pub(crate) debug_stack: Vec<Frame>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Frame {
+    name: String,
 }
 
 pub(crate) struct InitialState {
@@ -224,6 +230,7 @@ impl Executable {
             buffers: env.buffers,
             binary_data: self.binary_data.clone(),
             io_map: self.io_map.clone(),
+            debug_stack: vec![],
         })
     }
 
@@ -238,6 +245,7 @@ impl Executable {
             buffers: env.buffers,
             binary_data: self.binary_data,
             io_map: self.io_map.clone(),
+            debug_stack: vec![],
         })
     }
 
@@ -348,6 +356,7 @@ impl Execution {
             command_encoder: None,
             binary_data: init.binary_data,
             io_map: Arc::new(init.io_map),
+            debug_stack: vec![],
         }
     }
 
@@ -358,15 +367,6 @@ impl Execution {
 
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
         let instruction_pointer = self.machine.instruction_pointer;
-
-        /*
-        // eprintln!(
-            "{:?}",
-            self.machine
-                .instructions
-                .get(self.machine.instruction_pointer)
-        );
-        */
 
         match self.step_inner() {
             Ok(sync) => Ok(sync),
@@ -379,6 +379,29 @@ impl Execution {
     }
 
     fn step_inner(&mut self) -> Result<SyncPoint<'_>, StepError> {
+        struct DumpFrame<'stack> {
+            stack: Option<&'stack mut Vec<Frame>>,
+        }
+
+        impl Drop for DumpFrame<'_> {
+            fn drop(&mut self) {
+                if !std::thread::panicking() {
+                    return;
+                }
+
+                if let Some(frames) = self.stack.as_ref() {
+                    eprintln!("Dump of logical stack:");
+                    for frame in frames.iter().rev() {
+                        eprintln!("{:?}", frame);
+                    }
+                }
+            }
+        }
+
+        let mut _dump_on_panic = DumpFrame {
+            stack: Some(&mut self.debug_stack),
+        };
+
         match self.machine.next_instruction()? {
             Low::BindGroupLayout(desc) => {
                 let mut entry_buffer = vec![];
@@ -684,6 +707,8 @@ impl Execution {
                     })
                 };
 
+                drop(_dump_on_panic);
+
                 Ok(SyncPoint {
                     future: Some(DevicePolled {
                         future: Box::pin(box_me),
@@ -839,6 +864,8 @@ impl Execution {
                     })
                 };
 
+                drop(_dump_on_panic);
+
                 Ok(SyncPoint {
                     future: Some(DevicePolled {
                         future: Box::pin(box_me),
@@ -846,6 +873,20 @@ impl Execution {
                     }),
                     marker: core::marker::PhantomData,
                 })
+            }
+            Low::StackFrame(frame) => {
+                if let Some(ref mut frames) = _dump_on_panic.stack {
+                    frames.push(frame.clone());
+                }
+
+                Ok(SyncPoint::NO_SYNC)
+            }
+            Low::StackPop => {
+                if let Some(ref mut frames) = _dump_on_panic.stack {
+                    let _ = frames.pop();
+                }
+
+                Ok(SyncPoint::NO_SYNC)
             }
             inner => {
                 return Err(StepError::BadInstruction(BadInstruction {
@@ -1010,7 +1051,7 @@ impl Descriptors {
                     strip_index_format: None,
                     front_face: wgpu::FrontFace::Cw,
                     cull_mode: None,
-                    clamp_depth: false,
+                    unclipped_depth: false,
                     polygon_mode: wgpu::PolygonMode::Fill,
                     conservative: false,
                 },
@@ -1022,6 +1063,13 @@ impl Descriptors {
                 alpha_to_coverage_enabled: false,
             },
             fragment: Some(self.fragment_state(&desc.fragment, fragments)?),
+            // TODO: could be an efficient way to paint multiple times, with _different_ sets of
+            // parameters. As opposed to rebinding buffers between paints.
+            //
+            // Add to the list of vertex, tessellation control, tessellation
+            // evaluation, geometry, and fragment shader built-ins:
+            // highp int gl_ViewIndex;
+            multiview: None,
         })
     }
 

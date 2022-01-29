@@ -336,6 +336,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 }
             }
             Low::WriteImageToBuffer { .. } | Low::ReadBuffer { .. } => {}
+            // No validation for stack frame shuffling.
+            // TODO: should we simulate stack height?
+            Low::StackFrame(_) | Low::StackPop => {}
         }
 
         self.instructions.extend_one(low);
@@ -958,10 +961,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             let mut entries = vec![wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler {
-                    filtering: true,
-                    comparison: false,
-                },
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             }];
 
@@ -1048,20 +1048,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: 33,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler {
-                        filtering: true,
-                        comparison: false,
-                    },
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 });
             } else {
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: 34,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler {
-                        filtering: false,
-                        comparison: false,
-                    },
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 });
             }
