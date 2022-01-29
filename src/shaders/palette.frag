@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_scalar_block_layout : require
 layout (location = 0) in vec2 uv;
 layout (location = 0) out vec4 f_color;
 
@@ -6,7 +7,7 @@ layout (set = 1, binding = 0) uniform sampler texture_sampler;
 layout (set = 1, binding = 1) uniform texture2D lhs;
 layout (set = 1, binding = 2) uniform texture2D rhs;
 
-layout (set = 2, binding = 0) uniform FragmentPushConstants {
+layout (set = 2, binding = 0, std430) uniform FragmentPushConstants {
   mat4x2 channels;
 } u_platte;
 
