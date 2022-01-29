@@ -140,6 +140,11 @@ pub struct ImageBufferDescriptors<'a> {
     pub(crate) layout: &'a BufferLayout,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct Frame {
+    pub(crate) name: String,
+}
+
 /// A gpu buffer associated with an image buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceBuffer(pub(crate) usize);
@@ -770,7 +775,18 @@ impl Program {
             encoder.set_pool_plan(pool_plan);
         }
 
+
         for high in &self.ops {
+            let with_stack_frame = match high {
+                High::StackPush(_) | High::StackPop => false,
+                other => {
+                    encoder.push(Low::StackFrame(run::Frame {
+                        name: format!("Operation: {:#?}", other),
+                    }))?;
+                    true
+                },
+            };
+
             match high {
                 &High::Done(_) => {
                     // TODO: should deallocate textures that aren't live anymore.
@@ -865,6 +881,18 @@ impl Program {
 
                     encoder.copy_buffer_to_staging(*dst)?;
                 }
+                High::StackPush(frame) => {
+                    encoder.push(Low::StackFrame(run::Frame {
+                        name: frame.name.clone(),
+                    }))?;
+                }
+                High::StackPop => {
+                    encoder.push(Low::StackPop)?;
+                }
+            }
+
+            if with_stack_frame {
+                encoder.push(Low::StackPop)?;
             }
         }
 
@@ -961,6 +989,16 @@ impl Launcher<'_> {
 impl<'trgt> BufferInitContentBuilder<'trgt> {
     pub fn extend_from_pods(&mut self, data: &[impl bytemuck::Pod]) {
         self.buf.extend_from_slice(bytemuck::cast_slice(data));
+    }
+
+    /// Align to the given power-of-two.
+    pub fn align_by_exponent(&mut self, by: u8) {
+        let align = 1usize << by;
+        let len = self.buf.len();
+        if len % align != 0 {
+            let add = align - len % align;
+            self.buf.resize(len + add, 0);
+        }
     }
 
     pub fn build(self) -> BufferInitContent {

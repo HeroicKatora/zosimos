@@ -66,7 +66,9 @@ pub struct Execution {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Frame {
-    name: String,
+    // Used through Debug
+    #[allow(dead_code)]
+    pub(crate) name: String,
 }
 
 pub(crate) struct InitialState {
@@ -391,8 +393,8 @@ impl Execution {
 
                 if let Some(frames) = self.stack.as_ref() {
                     eprintln!("Dump of logical stack:");
-                    for frame in frames.iter().rev() {
-                        eprintln!("{:?}", frame);
+                    for (idx, frame) in frames.iter().rev().enumerate() {
+                        eprintln!("{:4}: {}", idx, frame.name);
                     }
                 }
             }
