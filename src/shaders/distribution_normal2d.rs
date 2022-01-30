@@ -107,6 +107,7 @@ impl FragmentShaderData for Shader {
         Cow::Borrowed(SHADER)
     }
 
+    #[rustfmt::skip]
     fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
         let Shader {
             expectation: exp,
@@ -114,7 +115,12 @@ impl FragmentShaderData for Shader {
             pseudo_determinant: det,
         } = self;
 
-        let rgb_data: [f32; 7] = [exp[0], exp[1], inv[0], inv[1], inv[2], inv[3], *det];
+        let rgb_data: [f32; 8] = [
+            exp[0], exp[1],
+            inv[0], inv[1], inv[2], inv[3],
+            *det,
+            0.0
+        ];
 
         Some(BufferInitContent::new(buffer, &rgb_data))
     }

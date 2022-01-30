@@ -417,7 +417,7 @@ fn run_palette(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descripto
         height_base: 0,
     };
 
-    let sampled = commands.palette(ramp, palette, input).unwrap();
+    let sampled = commands.palette(input, palette, ramp).unwrap();
 
     let (output, _outformat) = commands.output(sampled).expect("Valid for output");
 

@@ -4,7 +4,8 @@ use crate::buffer::{
 };
 use crate::pool::PoolImage;
 use crate::program::{
-    CompileError, Function, ImageBufferAssignment, ImageBufferPlan, Program, QuadTarget, Texture,
+    CompileError, Frame, Function, ImageBufferAssignment, ImageBufferPlan, Program, QuadTarget,
+    Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
@@ -40,7 +41,7 @@ pub struct CommandBuffer {
     ops: Vec<Op>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum Op {
     /// i := in()
     Input { desc: Descriptor },
@@ -109,6 +110,10 @@ pub(crate) enum High {
     Done(Register),
     /// Copy binary data from a buffer to another.
     Copy { src: Register, dst: Register },
+    /// Push one high-level function marker.
+    StackPush(Frame),
+    /// Pop a high-level function marker.
+    StackPop,
 }
 
 /// The target image texture of a paint operation (pipeline).
@@ -1085,6 +1090,10 @@ impl CommandBuffer {
             let ImageBufferAssignment { buffer: _, texture } =
                 textures.allocate_for(descriptor, liveness);
 
+            high_ops.push(High::StackPush(Frame {
+                name: format!("Command: {:#?}", op),
+            }));
+
             match op {
                 Op::Input { desc } => {
                     high_ops.push(High::Input(Register(idx), desc.clone()));
@@ -1320,6 +1329,7 @@ impl CommandBuffer {
             }
 
             high_ops.push(High::Done(Register(idx)));
+            high_ops.push(High::StackPop);
         }
 
         Ok(Program {

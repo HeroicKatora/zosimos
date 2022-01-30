@@ -81,6 +81,7 @@ impl FragmentShaderData for Shader {
         buffer_content.extend_from_pods(&[*initial_amplitude]);
         buffer_content.extend_from_pods(&[*amplitude_damping]);
         buffer_content.extend_from_pods(&[*num_octaves]);
+        buffer_content.align_by_exponent(3);
 
         Some(buffer_content.build())
     }
