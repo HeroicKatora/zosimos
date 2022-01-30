@@ -775,7 +775,6 @@ impl Program {
             encoder.set_pool_plan(pool_plan);
         }
 
-
         for high in &self.ops {
             let with_stack_frame = match high {
                 High::StackPush(_) | High::StackPop => false,
@@ -784,7 +783,7 @@ impl Program {
                         name: format!("Operation: {:#?}", other),
                     }))?;
                     true
-                },
+                }
             };
 
             match high {

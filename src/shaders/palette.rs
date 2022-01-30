@@ -50,6 +50,7 @@ impl FragmentShaderData for Shader {
         Cow::Borrowed(SHADER)
     }
 
+    #[rustfmt::skip]
     fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
         let mat4x2 = [
             self.x_coord[0], self.y_coord[0], 0.0, 0.0,

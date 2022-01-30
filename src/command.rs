@@ -4,7 +4,7 @@ use crate::buffer::{
 };
 use crate::pool::PoolImage;
 use crate::program::{
-    CompileError, Function, Frame, ImageBufferAssignment, ImageBufferPlan, Program, QuadTarget,
+    CompileError, Frame, Function, ImageBufferAssignment, ImageBufferPlan, Program, QuadTarget,
     Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
