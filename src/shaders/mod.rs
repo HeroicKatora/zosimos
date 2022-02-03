@@ -1,6 +1,7 @@
 use crate::buffer::RowMatrix;
 use crate::program::BufferInitContent;
 use std::borrow::Cow;
+use std::sync::Arc;
 
 pub mod bilinear;
 pub mod box3;
@@ -21,9 +22,49 @@ pub const FRAG_MIX_RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv
 /// a linear transformation on rgb color.
 pub const FRAG_LINEAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/linear.frag.v"));
 
+/// Holds binary representation of a shader's argument.
+///
+/// This, also, exposes all other publicly available methods to configure the `ShaderInvocation`
+/// that will occur when executing the provided shader.
+pub struct ShaderData<'lt> {
+    data_buffer: &'lt mut Vec<u8>,
+    /// Which region of the data buffer corresponds to the initializer for the buffer binding.
+    /// Is `None` if the shader does not have a buffer binding.
+    content: &'lt mut Option<BufferInitContent>,
+}
+
+/// A simple shader invocation.
+///
+/// This represents _one_ instance of a shader invocation. The compilation will evaluate the
+/// methods to determine how the invocation is executed by the runtime pipeline.
+pub trait ShaderInvocation: Send + Sync {
+    /// Shared, binary shader SPIR-V source.
+    ///
+    /// It is more efficient if invocations sharing the same shader source return clones of the
+    /// exact same allocated source.
+    fn spirv_source(&self) -> Arc<[u8]>;
+
+    /// Configure this invocation, such as providing bind buffer data as binary.
+    ///
+    /// See `ShaderData` for more information. All configuration is performed by calling its
+    /// methods, the object is provided by surrounding runtime. You shouldn't depend on the exact
+    /// timing of this call relative to other invocations as such ordering may be fragile and
+    /// depend on optimization reordering performed during encoding of commands. More specific
+    /// guarantees may be provided at a later version of the library.
+    fn shader_data(&self, _: ShaderData<'_>);
+
+    /// Provide a debug representation.
+    fn debug(&self) -> &dyn core::fmt::Debug {
+        static REPLACEMENT: &'static str = "No debug data for shader invocation";
+        &REPLACEMENT
+    }
+}
+
 /// A simplification of a fragment shader interface.
 pub(crate) trait FragmentShaderData: core::fmt::Debug {
-    /// The unique key identifying this shader module.
+    /// The unique key identifying this shader pipeline setup.
+    /// If two invocations return the same key then they are optimized and _not_ recompiled.
+    /// Instead, we reuse setup from a previous shader module creation.
     fn key(&self) -> Option<FragmentShaderKey>;
     /// The SPIR-V shader source code.
     fn spirv_source(&self) -> Cow<'static, [u8]>;
@@ -31,8 +72,38 @@ pub(crate) trait FragmentShaderData: core::fmt::Debug {
     fn binary_data(&self, _: &mut Vec<u8>) -> Option<BufferInitContent> {
         None
     }
+    /// Number of argument images consumed by the shader.
+    /// This must match the number of arguments provided as `High::PushOperand`.
     fn num_args(&self) -> u32 {
         1
+    }
+}
+
+struct DynamicShader {
+    invocation: Box<dyn ShaderInvocation>,
+    spirv: Arc<[u8]>,
+}
+
+impl core::fmt::Debug for DynamicShader {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(f, "{:?}", self.invocation.debug())
+    }
+}
+
+impl FragmentShaderData for DynamicShader {
+    fn key(&self) -> Option<FragmentShaderKey> {
+        Some(FragmentShaderKey::Dynamic(self.spirv.as_ptr() as usize))
+    }
+    fn spirv_source(&self) -> Cow<'static, [u8]> {
+        Cow::Owned(self.spirv.to_vec())
+    }
+    fn binary_data(&self, data_buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
+        let mut content = None;
+        self.invocation.shader_data(ShaderData {
+            data_buffer,
+            content: &mut content,
+        });
+        content
     }
 }
 
@@ -58,6 +129,9 @@ pub(crate) enum FragmentShaderKey {
     OklabTransform(bool),
     /// A convolution with a 3-by-3 box function.
     Box3,
+    /// The key is the address of some dynamic object, unique for the duration of the pipeline.
+    /// One shouldn't rely on uniqueness of soundness.
+    Dynamic(usize),
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -41,6 +41,9 @@ pub struct CommandBuffer {
     ops: Vec<Op>,
 }
 
+pub trait Command {
+}
+
 #[derive(Clone, Debug)]
 enum Op {
     /// i := in()
