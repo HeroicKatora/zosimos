@@ -1,3 +1,7 @@
+mod dynamic;
+
+pub use self::dynamic::{ShaderCommand, ShaderData, ShaderSource};
+
 use crate::buffer::{
     self, BufferLayout, ChannelPosition, Color, ColorChannel, Descriptor, RowMatrix, SampleParts,
     Texel, Whitepoint,
@@ -8,12 +12,12 @@ use crate::program::{
     Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
-pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
 pub use crate::shaders::fractal_noise::Shader as FractalNoise;
 use crate::shaders::{self, FragmentShader, PaintOnTopKind};
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// A reference to one particular value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -39,9 +43,6 @@ pub struct Register(pub(crate) usize);
 #[derive(Default)]
 pub struct CommandBuffer {
     ops: Vec<Op>,
-}
-
-pub trait Command {
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +72,18 @@ enum Op {
         op: BinaryOp,
         desc: Descriptor,
     },
+    Dynamic {
+        call: OperandKind,
+        command: DynamicOp,
+        desc: Descriptor,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum OperandKind {
+    Construct,
+    Unary(Register),
+    Binary { lhs: Register, rhs: Register },
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +178,17 @@ pub(crate) enum BinaryOp {
     /// Sample from a palette based on the color value of another image.
     /// Op[T, U] = T
     Palette(shaders::PaletteShader),
+}
+
+#[derive(Clone)]
+struct DynamicOp(Arc<dyn ShaderCommand>);
+
+impl core::fmt::Debug for DynamicOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DynamicOp")
+            .field("info", self.0.debug())
+            .finish()
+    }
 }
 
 /// A rectangle in `u32` space.
@@ -451,6 +475,8 @@ enum CommandErrorKind {
     Unimplemented,
 }
 
+/// Intrinsically defined methods of manipulating images.
+///
 /// FIXME: missing functions
 /// - a way to represent colors as a function of wavelength, then evaluate with the standard
 /// observers.
@@ -460,6 +486,15 @@ enum CommandErrorKind {
 /// - hue shift, transforms on the a*b* circle, such as mobius transform (z-a)/(1-z·adj(a)) i.e or
 ///   other holomorphic functions. Ways to construct mobius transfrom from three key points. That
 ///   is particular relevant for color correction.
+///
+/// For developers aiming to add extensions to the system, see the other impl-block.
+///
+/// The order of arguments is generally
+/// 1. Input argument
+///   a. Configuration of first argument.
+///   b. Configuration of second argument …
+///   c. … (no operator with more argument atm)
+/// 2. Arguments to the command itself
 impl CommandBuffer {
     /// Declare an input.
     ///
@@ -1053,13 +1088,22 @@ impl CommandBuffer {
         for (back_idx, op) in self.ops.iter().rev().enumerate() {
             let idx = self.ops.len() - 1 - back_idx;
             match op {
-                Op::Input { .. } | Op::Construct { .. } => {}
+                Op::Input { .. }
+                | Op::Construct { .. }
+                | Op::Dynamic {
+                    call: OperandKind::Construct,
+                    ..
+                } => {}
                 &Op::Output { src: Register(src) } => {
                     last_use[src] = last_use[src].max(idx);
                     first_use[src] = first_use[src].min(idx);
                 }
                 &Op::Unary {
                     src: Register(src), ..
+                }
+                | &Op::Dynamic {
+                    call: OperandKind::Unary(Register(src)),
+                    ..
                 } => {
                     last_use[src] = last_use[src].max(idx);
                     first_use[src] = first_use[src].min(idx);
@@ -1067,6 +1111,14 @@ impl CommandBuffer {
                 &Op::Binary {
                     lhs: Register(lhs),
                     rhs: Register(rhs),
+                    ..
+                }
+                | &Op::Dynamic {
+                    call:
+                        OperandKind::Binary {
+                            lhs: Register(lhs),
+                            rhs: Register(rhs),
+                        },
                     ..
                 } => {
                     last_use[rhs] = last_use[rhs].max(idx);
@@ -1329,6 +1381,9 @@ impl CommandBuffer {
 
                     reg_to_texture.insert(Register(idx), texture);
                 }
+                _ => {
+                    return Err(CompileError::NotYetImplemented);
+                }
             }
 
             high_ops.push(High::Done(Register(idx)));
@@ -1348,14 +1403,53 @@ impl CommandBuffer {
             Some(Op::Input { desc })
             | Some(Op::Construct { desc, .. })
             | Some(Op::Unary { desc, .. })
-            | Some(Op::Binary { desc, .. }) => Ok(desc),
+            | Some(Op::Binary { desc, .. })
+            | Some(Op::Dynamic { desc, .. }) => Ok(desc),
         }
     }
-
     fn push(&mut self, op: Op) -> Register {
         let reg = Register(self.ops.len());
         self.ops.push(op);
         reg
+    }
+}
+
+/// Impls on `CommandBuffer` that allow defining custom SPIR-V extensions.
+///
+/// Generally, the steps on the dynamic shader are:
+///
+/// 1. Check the kind, get SPIR-v code.
+/// 2. Determine the dynamic typing of the result.
+/// 3. Have the shader create binary representation of its data.
+/// 3. Create a new entry on the command buffer.
+/// 4. Not yet performed: (Validate the SPIR-V module inputs against the data definition)
+impl CommandBuffer {
+    /// Record a _constructor_.
+    pub fn construct_dynamic(&mut self, dynamic: &dyn ShaderCommand) -> Register {
+        let ShaderSource::SpirV(code) = dynamic.source();
+        let mut data = vec![];
+
+        dynamic.data(ShaderData {
+            data_buffer: &mut data,
+            ..todo!()
+        });
+
+        todo!()
+    }
+
+    /// Record a _unary operator_.
+    pub fn unary_dynamic(&mut self, lhs: Register, dynamic: &dyn ShaderCommand) -> Register {
+        todo!()
+    }
+
+    /// Record a _binary operator_.
+    pub fn binary_dynamic(
+        &mut self,
+        lhs: Register,
+        rhs: Register,
+        dynamic: &dyn ShaderCommand,
+    ) -> Register {
+        todo!()
     }
 }
 
