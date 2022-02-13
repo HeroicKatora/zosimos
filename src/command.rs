@@ -13,6 +13,8 @@ use crate::program::{
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::fractal_noise::Shader as FractalNoise;
+pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
+
 use crate::shaders::{self, FragmentShader, PaintOnTopKind};
 
 use std::cmp::Ordering;
