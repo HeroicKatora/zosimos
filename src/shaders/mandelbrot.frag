@@ -8,19 +8,35 @@ layout (set = 1, binding = 0) uniform FragmentColor {
 } u_fragmentParams;
 
 vec2 stepMandelbrot(vec2 rf, vec2 c) {
-    vec2 pow2 = vec2(rf.x*rf.x - rf.y*rf.y, 2*rf.x*rf.y);
-    return pow2 + c;
+    // At least some precision is nice.
+    float real = dot(rf, vec2(rf.x, -rf.y));
+    // (real, 2*rf.x*rf.y) + c
+    return vec2(real + c.x, fma(2*rf.x, rf.y, c.y));
 }
 
 void main() {
     vec2 c = (uv - u_fragmentParams.position) * u_fragmentParams.scale;
 
     vec2 xy = vec2(0.0, 0.0);
-    for (int i = 0; i < 255; i++) {
+    vec2 sum = xy;
+
+    int steps = 2048;
+    for (int i = 0; i < steps; i++) {
+    	sum += xy;
         xy = stepMandelbrot(xy, c);
     }
 
-    float rad = atan(xy.x, xy.y);
+    // Approximates the fixpoints / average of cyclic points
+    sum /= float(steps);
+    // And calculate fixpoint's distance to `c`.
+    sum -= c;
+
+    // Only points within the Mandelbrot set are colored.
     float len = length(xy);
-    f_color = vec4(sin(rad), cos(rad), clamp(3.0 - len, 0.0, 1.0), 1.0);
+    float light = clamp(2.0 - len, 0.0, 0.7);
+
+    // Rescale chromaticity a bit.
+    vec2 vis = sum / 2.0;
+
+    f_color = vec4(light, vis.x - 0.0, vis.y, 1.0);
 }
