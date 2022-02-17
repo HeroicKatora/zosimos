@@ -423,12 +423,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 samples:
                     Samples {
                         bits,
-                        parts: SampleParts::LChA,
+                        parts: parts @ (SampleParts::LChA | SampleParts::LabA),
                     },
                 color: Color::Oklab,
             } => {
                 let parameter = shaders::stage::XyzParameter {
-                    transfer: shaders::stage::Transfer::Oklab,
+                    transfer: match parts {
+                        SampleParts::LChA => shaders::stage::Transfer::Oklab,
+                        SampleParts::LabA => shaders::stage::Transfer::Rgb(Transfer::Linear),
+                        _ => return Err(LaunchError::InternalCommandError(line!())),
+                    },
                     parts: SampleParts::LChA,
                     bits,
                 };

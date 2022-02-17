@@ -405,12 +405,12 @@ vec3 transfer_scene_display_bt2100hlg(vec3 rgb) {
 vec3 transfer_lab_to_lch(vec3 lab) {
   float c = length(lab.yz);
   // Angle but scaled to [0; 1]
-  float h = (atan(lab.z, lab.y) / 3.14159265 / 2.0) + 0.5;
+  float h = (degrees(atan(lab.z, lab.y)) / 360.0) + 0.5;
   return vec3(lab.x, c, h);
 }
 
 vec3 transfer_lch_to_lab(vec3 lch) {
-  float angle = 3.14159265 * 2.0 * (lch.z - 0.5);
+  float angle = radians(360.0 * (lch.z - 0.5));
   return vec3(lch.x, lch.y*cos(angle), lch.y*sin(angle));
 }
 
