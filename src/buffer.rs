@@ -575,20 +575,6 @@ impl Samples {
                 let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
                 Some(image::DynamicImage::ImageRgba8(buffer))
             },
-            Samples {
-                parts: P::Bgr,
-                bits: B::Int8x3,
-            } => |width, height, source| {
-                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
-                Some(image::DynamicImage::ImageBgr8(buffer))
-            },
-            Samples {
-                parts: P::Bgra,
-                bits: B::Int8x4,
-            } => |width, height, source| {
-                let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
-                Some(image::DynamicImage::ImageBgra8(buffer))
-            },
             // TODO: quite a lot of duplication below. Can we somehow reduce that?
             Samples {
                 parts: P::Luma,
@@ -1049,14 +1035,6 @@ impl From<&'_ image::DynamicImage> for Samples {
                 bits: SampleBits::Int8x4,
                 parts: SampleParts::Rgba,
             },
-            ImageBgr8(_) => Samples {
-                bits: SampleBits::Int8x3,
-                parts: SampleParts::Bgr,
-            },
-            ImageBgra8(_) => Samples {
-                bits: SampleBits::Int8x4,
-                parts: SampleParts::Bgra,
-            },
             ImageRgb16(_) => Samples {
                 bits: SampleBits::Int16x3,
                 parts: SampleParts::Rgb,
@@ -1065,6 +1043,7 @@ impl From<&'_ image::DynamicImage> for Samples {
                 bits: SampleBits::Int16x4,
                 parts: SampleParts::Rgba,
             },
+            _ => unreachable!("Promise, we match the rest"),
         }
     }
 }
