@@ -12,8 +12,8 @@ use crate::program::{
     Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
-pub use crate::shaders::fractal_noise::Shader as FractalNoise;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
+pub use crate::shaders::fractal_noise::Shader as FractalNoise;
 
 use crate::shaders::{self, FragmentShader, PaintOnTopKind, ShaderInvocation};
 
@@ -1379,12 +1379,12 @@ impl CommandBuffer {
                         OperandKind::Construct => {
                             arguments = &[][..];
                             reg_to_texture.insert(Register(idx), texture);
-                        },
+                        }
                         OperandKind::Unary(reg) => {
                             op_unary = [reg_to_texture[reg]];
                             arguments = &op_unary[..];
                             reg_to_texture.insert(Register(idx), texture);
-                        },
+                        }
                         OperandKind::Binary { lhs, rhs } => {
                             op_binary = [reg_to_texture[lhs], reg_to_texture[rhs]];
                             arguments = &op_binary[..];
@@ -1402,7 +1402,7 @@ impl CommandBuffer {
                             shader: FragmentShader::Dynamic(command.clone()),
                         },
                     })
-                },
+                }
                 // In case we add a new case.
                 #[allow(unreachable_patterns)]
                 _ => {
