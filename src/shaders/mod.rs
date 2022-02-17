@@ -26,7 +26,9 @@ pub const FRAG_LINEAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/l
 ///
 /// This represents _one_ instance of a shader invocation. The compilation will evaluate the
 /// methods to determine how the invocation is executed by the runtime pipeline.
-#[derive(Debug)]
+///
+/// FIXME: deriving PartialEq may be inferior to an actual implementation.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ShaderInvocation {
     /// The shader source, shared between all instances of this similar invocation.
     pub(crate) spirv: Arc<[u8]>,
@@ -116,6 +118,7 @@ pub(crate) enum FragmentShader {
     Inject(self::inject::Shader),
     Oklab(self::oklab::Shader),
     Box3(self::box3::Shader),
+    Dynamic(ShaderInvocation),
 }
 
 impl FragmentShader {
@@ -130,6 +133,7 @@ impl FragmentShader {
             FragmentShader::Inject(inject) => inject,
             FragmentShader::Oklab(oklab) => oklab,
             FragmentShader::Box3(box3) => box3,
+            FragmentShader::Dynamic(dynamic) => dynamic,
         }
     }
 }

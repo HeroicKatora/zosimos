@@ -15,11 +15,10 @@ pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::fractal_noise::Shader as FractalNoise;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
 
-use crate::shaders::{self, FragmentShader, PaintOnTopKind};
+use crate::shaders::{self, FragmentShader, PaintOnTopKind, ShaderInvocation};
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// A reference to one particular value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -76,7 +75,8 @@ enum Op {
     },
     Dynamic {
         call: OperandKind,
-        command: DynamicOp,
+        /// The planned shader invocation.
+        command: ShaderInvocation,
         desc: Descriptor,
     },
 }
@@ -180,17 +180,6 @@ pub(crate) enum BinaryOp {
     /// Sample from a palette based on the color value of another image.
     /// Op[T, U] = T
     Palette(shaders::PaletteShader),
-}
-
-#[derive(Clone)]
-struct DynamicOp(Arc<dyn ShaderCommand>);
-
-impl core::fmt::Debug for DynamicOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DynamicOp")
-            .field("info", self.0.debug())
-            .finish()
-    }
 }
 
 /// A rectangle in `u32` space.
@@ -1383,6 +1372,36 @@ impl CommandBuffer {
 
                     reg_to_texture.insert(Register(idx), texture);
                 }
+                Op::Dynamic { call, command, .. } => {
+                    let (op_unary, op_binary, arguments);
+
+                    match call {
+                        OperandKind::Construct => {
+                            arguments = &[][..];
+                        },
+                        OperandKind::Unary(reg) => {
+                            op_unary = [reg_to_texture[reg]];
+                            arguments = &op_unary[..];
+                        },
+                        OperandKind::Binary { lhs, rhs } => {
+                            op_binary = [reg_to_texture[lhs], reg_to_texture[rhs]];
+                            arguments = &op_binary[..];
+                        }
+                    }
+
+                    for &operand in arguments {
+                        high_ops.push(High::PushOperand(operand));
+                    }
+
+                    high_ops.push(High::Construct {
+                        dst: Target::Discard(texture),
+                        fn_: Function::PaintFullScreen {
+                            shader: FragmentShader::Dynamic(command.clone()),
+                        },
+                    })
+                },
+                // In case we add a new case.
+                #[allow(unreachable_patterns)]
                 _ => {
                     return Err(CompileError::NotYetImplemented);
                 }
@@ -1428,15 +1447,32 @@ impl CommandBuffer {
 impl CommandBuffer {
     /// Record a _constructor_.
     pub fn construct_dynamic(&mut self, dynamic: &dyn ShaderCommand) -> Register {
-        let ShaderSource::SpirV(code) = dynamic.source();
         let mut data = vec![];
+        let mut content = None;
 
-        dynamic.data(ShaderData {
+        let source = dynamic.source();
+        let desc = dynamic.data(ShaderData {
             data_buffer: &mut data,
-            ..todo!()
+            content: &mut content,
         });
 
-        todo!()
+        self.push(Op::Dynamic {
+            call: OperandKind::Construct,
+            // FIXME: maybe this conversion should be delayed.
+            // In particular, converting source to SPIR-V may take some form of 'compiler' argument
+            // that's only available during `compile` phase.
+            command: ShaderInvocation {
+                spirv: match source {
+                    ShaderSource::SpirV(spirv) => spirv,
+                },
+                shader_data: match content {
+                    None => None,
+                    Some(c) => Some(c.as_slice(&data).into()),
+                },
+                num_args: 0,
+            },
+            desc,
+        })
     }
 
     /// Record a _unary operator_.

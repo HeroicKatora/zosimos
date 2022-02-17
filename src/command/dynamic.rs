@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::buffer::Descriptor;
 use crate::program::BufferInitContent;
 
 /// A custom shader implementing a command.
@@ -17,7 +18,7 @@ pub trait ShaderCommand: Send + Sync {
     /// timing of this call relative to other invocations as such ordering may be fragile and
     /// depend on optimization reordering performed during encoding of commands. More specific
     /// guarantees may be provided at a later version of the library.
-    fn data(&self, _: ShaderData<'_>);
+    fn data(&self, _: ShaderData<'_>) -> Descriptor;
 
     /// Provide a debug representation.
     fn debug(&self) -> &dyn core::fmt::Debug {
@@ -44,4 +45,7 @@ pub struct ShaderData<'lt> {
 }
 
 impl ShaderData<'_> {
+    pub fn set_data(&mut self, data: &[impl bytemuck::Pod]) {
+        *self.content = Some(BufferInitContent::new(&mut self.data_buffer, data));
+    }
 }
