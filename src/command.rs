@@ -1378,14 +1378,17 @@ impl CommandBuffer {
                     match call {
                         OperandKind::Construct => {
                             arguments = &[][..];
+                            reg_to_texture.insert(Register(idx), texture);
                         },
                         OperandKind::Unary(reg) => {
                             op_unary = [reg_to_texture[reg]];
                             arguments = &op_unary[..];
+                            reg_to_texture.insert(Register(idx), texture);
                         },
                         OperandKind::Binary { lhs, rhs } => {
                             op_binary = [reg_to_texture[lhs], reg_to_texture[rhs]];
                             arguments = &op_binary[..];
+                            reg_to_texture.insert(Register(idx), texture);
                         }
                     }
 

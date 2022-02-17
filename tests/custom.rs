@@ -2,7 +2,7 @@
 #[path = "util.rs"]
 mod util;
 
-use stealth_paint::buffer::Descriptor;
+use stealth_paint::buffer::{self, Descriptor};
 use stealth_paint::command::{self, CommandBuffer, ShaderCommand};
 use stealth_paint::pool::Pool;
 use stealth_paint::program::Program;
@@ -18,10 +18,9 @@ fn mandelbrot() {
     }
 
     impl Mandelbrot {
-        fn new(image: &image::DynamicImage) -> Self {
+        fn new(descriptor: Descriptor) -> Self {
             pub const SHADER_ENCODE: &[u8] =
                 include_bytes!(concat!(env!("OUT_DIR"), "/spirv/mandelbrot.frag.v"));
-            let descriptor = Descriptor::with_srgb_image(&image);
 
             Mandelbrot {
                 scale: (3.0, 3.0),
@@ -61,11 +60,25 @@ fn mandelbrot() {
         .expect("to get a device");
 
     // Actual program begins here.
-    let target = image::DynamicImage::ImageRgba8(image::RgbaImage::new(400, 400));
-    let mut commands = CommandBuffer::default();
-    let result = commands.construct_dynamic(&Mandelbrot::new(&target));
+    let target = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4000, 4000));
 
-    let (output, _outformat) = commands.output(result).expect("Valid for output");
+    let mut commands = CommandBuffer::default();
+    let brot = commands.construct_dynamic(&Mandelbrot::new(Descriptor {
+        layout: buffer::BufferLayout::from(&target),
+        texel: buffer::Texel {
+            color: buffer::Color::Oklab,
+            block: buffer::Block::Pixel,
+            samples: buffer::Samples {
+                bits: buffer::SampleBits::Int8x4,
+                parts: buffer::SampleParts::LChA,
+            },
+        }
+    }));
+
+    let srgb = commands.color_convert(brot, buffer::Texel::with_srgb_image(&target))
+        .expect("Valid for color conversion");
+    let (output, _outformat) = commands.output(srgb)
+        .expect("Valid for output");
 
     let result = run_once_with_output(
         commands,
