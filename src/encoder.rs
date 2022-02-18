@@ -59,22 +59,26 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     output_map: HashMap<Register, Texture>,
     /// The Bind Group layer Descriptor used in fragment shader, set=1.
     /// This is keyed by the number of descriptors for that layout.
-    paint_group_layout: HashMap<usize, usize>,
+    paint_group_layout: HashMap<usize, BindGroupLayoutIdx>,
     /// The Bind Group Descriptor used in vertex buffer, set=0.
-    quad_group_layout: Option<usize>,
+    quad_group_layout: Option<BindGroupLayoutIdx>,
     /// The Bind Group Descriptor for set=2, used for parameters of fragment shader.
-    fragment_data_group_layout: Option<usize>,
+    fragment_data_group_layout: Option<BindGroupLayoutIdx>,
     /// The Pipeline Descriptor used in generic paint shaders.
     /// Will use the quad group and fragment data group layouts.
-    paint_pipeline_layout: Option<usize>,
+    paint_pipeline_layout: Option<PipelineLayoutIdx>,
     /// The Bind Group Descriptor layout for the staging fragment shader.
     /// Alternative for the fragment data group.
     /// Since there is a limit on the number of active storage textures, we have one layout for
     /// each potential usage.
-    stage_group_layout: HashMap<u32, usize>,
-    known_samplers: HashMap<SamplerDescriptor, usize>,
-    fragment_shaders: HashMap<shaders::FragmentShaderKey, usize>,
-    vertex_shaders: HashMap<VertexShader, usize>,
+    stage_group_layout: HashMap<u32, BindGroupLayoutIdx>,
+    /// Memoized Sampler definitions, mapping to their index.
+    known_samplers: HashMap<SamplerDescriptor, SamplerIdx>,
+    /// Memoized fragment shaders, mapping to their index.
+    fragment_shaders: HashMap<shaders::FragmentShaderKey, ShaderIdx>,
+    /// Memoized vertex shaders, mapping to their index.
+    vertex_shaders: HashMap<VertexShader, ShaderIdx>,
+    /// Memoized buffer containing the simple quad.
     simple_quad_buffer: Option<DeviceBuffer>,
     /// The render pipeline state for staging a texture.
     staged_to_pipelines: HashMap<Texture, SimpleRenderPipeline>,
@@ -94,6 +98,46 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     staging_map: HashMap<Texture, StagingTexture>,
     // Arena style allocators.
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+struct BindGroupIdx(usize);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+struct BindGroupLayoutIdx(usize);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+struct BufferIdx(usize);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+struct CommandBufferIdx(usize);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+struct PipelineLayoutIdx(usize);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+struct RenderPipelineIdx(usize);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+struct SamplerIdx(usize);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+struct ShaderIdx(usize);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+struct TextureIdx(usize);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+struct TextureViewIdx(usize);
 
 /// The GPU buffers associated with a register.
 /// Supplements the buffer_plan by giving direct mappings to each device resource index in an
@@ -910,7 +954,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(id)
     }
 
-    fn make_quad_bind_group(&mut self) -> usize {
+    fn make_quad_bind_group(&mut self) -> BindGroupLayoutIdx {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
         *self.quad_group_layout.get_or_insert_with(|| {
@@ -930,11 +974,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             instructions.extend_one(Low::BindGroupLayout(descriptor));
             let descriptor_id = *bind_group_layouts;
             *bind_group_layouts += 1;
-            descriptor_id
+            BindGroupLayoutIdx(descriptor_id)
         })
     }
 
-    fn make_generic_fragment_bind_group(&mut self) -> usize {
+    fn make_generic_fragment_bind_group(&mut self) -> BindGroupLayoutIdx {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
         *self.fragment_data_group_layout.get_or_insert_with(|| {
@@ -954,11 +998,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             instructions.extend_one(Low::BindGroupLayout(descriptor));
             let descriptor_id = *bind_group_layouts;
             *bind_group_layouts += 1;
-            descriptor_id
+            BindGroupLayoutIdx(descriptor_id)
         })
     }
 
-    fn make_paint_group_layout(&mut self, count: usize) -> usize {
+    fn make_paint_group_layout(&mut self, count: usize) -> BindGroupLayoutIdx {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
         *self.paint_group_layout.entry(count).or_insert_with(|| {
@@ -987,11 +1031,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             let descriptor_id = *bind_group_layouts;
             *bind_group_layouts += 1;
-            descriptor_id
+            BindGroupLayoutIdx(descriptor_id)
         })
     }
 
-    fn make_stage_group(&mut self, binding: u32) -> usize {
+    fn make_stage_group(&mut self, binding: u32) -> BindGroupLayoutIdx {
         use shaders::stage::StageKind;
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
@@ -1068,19 +1112,19 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             instructions.extend_one(Low::BindGroupLayout(descriptor));
             let descriptor_id = *bind_group_layouts;
             *bind_group_layouts += 1;
-            descriptor_id
+            BindGroupLayoutIdx(descriptor_id)
         })
     }
 
-    fn make_paint_layout(&mut self, desc: &SimpleRenderPipelineDescriptor) -> usize {
+    fn make_paint_layout(&mut self, desc: &SimpleRenderPipelineDescriptor) -> PipelineLayoutIdx {
         let quad_bind_group = self.make_quad_bind_group();
 
-        let mut bind_group_layouts = vec![quad_bind_group];
+        let mut bind_group_layouts = vec![quad_bind_group.0];
 
         match desc.fragment_texture {
             TextureBind::Textures(0) => {}
             TextureBind::Textures(count) => {
-                bind_group_layouts.push(self.make_paint_group_layout(count))
+                bind_group_layouts.push(self.make_paint_group_layout(count).0)
             }
             TextureBind::PreComputedGroup { layout, .. } => {
                 bind_group_layouts.push(layout);
@@ -1100,10 +1144,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 instructions.extend_one(Low::PipelineLayout(descriptor));
                 let descriptor_id = *layouts;
                 *layouts += 1;
-                descriptor_id
+                PipelineLayoutIdx(descriptor_id)
             })
         } else {
-            bind_group_layouts.push(self.make_generic_fragment_bind_group());
+            bind_group_layouts.push(self.make_generic_fragment_bind_group().0);
 
             let layouts = &mut self.pipeline_layouts;
             let instructions = &mut self.instructions;
@@ -1116,22 +1160,22 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             instructions.extend_one(Low::PipelineLayout(descriptor));
             let descriptor_id = *layouts;
             *layouts += 1;
-            descriptor_id
+            PipelineLayoutIdx(descriptor_id)
         }
     }
 
-    fn shader(&mut self, desc: ShaderDescriptor) -> Result<usize, LaunchError> {
+    fn shader(&mut self, desc: ShaderDescriptor) -> Result<ShaderIdx, LaunchError> {
         self.instructions.extend_one(Low::Shader(desc));
         let idx = self.shaders;
         self.shaders += 1;
-        Ok(idx)
+        Ok(ShaderIdx(idx))
     }
 
     fn fragment_shader(
         &mut self,
         kind: Option<shaders::FragmentShaderKey>,
         source: Cow<'static, [u32]>,
-    ) -> Result<usize, LaunchError> {
+    ) -> Result<ShaderIdx, LaunchError> {
         if let Some(&shader) = kind.and_then(|k| self.fragment_shaders.get(&k)) {
             return Ok(shader);
         }
@@ -1146,7 +1190,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         &mut self,
         kind: Option<VertexShader>,
         source: Cow<'static, [u32]>,
-    ) -> Result<usize, LaunchError> {
+    ) -> Result<ShaderIdx, LaunchError> {
         if let Some(&shader) = kind.and_then(|k| self.vertex_shaders.get(&k)) {
             return Ok(shader);
         }
@@ -1187,7 +1231,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         &mut self,
         desc: &SimpleRenderPipelineDescriptor,
     ) -> Result<usize, LaunchError> {
-        let layout = self.make_paint_layout(desc);
+        let PipelineLayoutIdx(layout) = self.make_paint_layout(desc);
         let format = match desc.pipeline_target {
             PipelineTarget::Texture(texture) => {
                 let format = self.texture_map[&texture].format.format;
@@ -1233,7 +1277,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(pipeline)
     }
 
-    fn make_sampler(&mut self, descriptor: SamplerDescriptor) -> usize {
+    fn make_sampler(&mut self, descriptor: SamplerDescriptor) -> SamplerIdx {
         let instructions = &mut self.instructions;
         let sampler = &mut self.sampler;
         *self
@@ -1247,7 +1291,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     resize_filter: desc.resize_filter,
                 }));
                 *sampler += 1;
-                sampler_id
+                SamplerIdx(sampler_id)
             })
     }
 
@@ -1257,7 +1301,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Some(i) => i,
         };
 
-        let sampler = self.make_sampler(SamplerDescriptor {
+        let SamplerIdx(sampler) = self.make_sampler(SamplerDescriptor {
             address_mode: wgpu::AddressMode::default(),
             border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
             resize_filter: wgpu::FilterMode::Nearest,
@@ -1271,8 +1315,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         }
 
         let group = self.bind_groups;
+        let BindGroupLayoutIdx(layout_idx) = self.make_paint_group_layout(count);
         let descriptor = BindGroupDescriptor {
-            layout_idx: self.make_paint_group_layout(count),
+            layout_idx,
             entries,
             sparse: vec![],
         };
@@ -1306,7 +1351,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             sparse = vec![(binding, BindingResource::TextureView(image_id))];
 
             // FIXME: unnecessary duplication.
-            let sampler = self.make_sampler(SamplerDescriptor {
+            let SamplerIdx(sampler) = self.make_sampler(SamplerDescriptor {
                 address_mode: wgpu::AddressMode::default(),
                 border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
                 resize_filter: wgpu::FilterMode::Nearest,
@@ -1327,7 +1372,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         } else {
             sparse = vec![(binding, BindingResource::TextureView(image_id))];
 
-            let sampler = self.make_sampler(SamplerDescriptor {
+            let SamplerIdx(sampler) = self.make_sampler(SamplerDescriptor {
                 address_mode: wgpu::AddressMode::default(),
                 border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
                 resize_filter: wgpu::FilterMode::Nearest,
@@ -1337,8 +1382,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         }
 
         let group = self.bind_groups;
+        let BindGroupLayoutIdx(layout_idx) = self.make_stage_group(binding);
         let descriptor = BindGroupDescriptor {
-            layout_idx: self.make_stage_group(binding),
+            layout_idx,
             entries: vec![],
             sparse,
         };
@@ -1409,11 +1455,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             }
         };
 
-        let vertex_layout = self.make_quad_bind_group();
+        let BindGroupLayoutIdx(vertex_layout) = self.make_quad_bind_group();
         let vertex_bind = self.make_bound_buffer(descriptor.vertex_bind_data, vertex_layout)?;
 
         // FIXME: this builds the layout even when it is not required.
-        let vertex_layout = self.make_generic_fragment_bind_group();
+        let BindGroupLayoutIdx(vertex_layout) = self.make_generic_fragment_bind_group();
         let fragment_bind = self.make_bound_buffer(descriptor.fragment_bind_data, vertex_layout)?;
 
         Ok(SimpleRenderPipeline {
@@ -1504,7 +1550,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Function::PaintToSelection { texture, selection, target: target_coords, viewport, shader } => {
                 let (tex_width, tex_height) = self.texture_map[texture].format.size;
 
-                let vertex = self.vertex_shader(
+                let ShaderIdx(vertex) = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
@@ -1512,7 +1558,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let key = shader.key();
                 let spirv = shader.spirv_source();
 
-                let fragment = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
+                let ShaderIdx(fragment) = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
 
                 let buffer: [[f32; 2]; 8];
                 // FIXME: there seems to be two floats padding after each vec2.
@@ -1548,7 +1594,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 })
             },
             Function::PaintFullScreen { shader } => {
-                let vertex = self.vertex_shader(
+                let ShaderIdx(vertex) = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
@@ -1556,7 +1602,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let key = shader.key();
                 let spirv = shader.spirv_source();
 
-                let fragment = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
+                let ShaderIdx(fragment) = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
                 let fragment_bind_data = shader.binary_data(&mut self.binary_data)
                     .map(|data| BufferBind::Planned { data })
                     .unwrap_or(BufferBind::None);
@@ -1575,11 +1621,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 })
             },
             Function::ToLinearOpto { parameter, stage_kind } => {
-                let vertex = self.vertex_shader(
+                let ShaderIdx(vertex) = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
-                let fragment = self.fragment_shader(
+                let ShaderIdx(fragment) = self.fragment_shader(
                     Some(shaders::FragmentShaderKey::Convert),
                     shader_include_to_spirv(stage_kind.decode_src()))?;
 
@@ -1587,7 +1633,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 // FIXME: see below, shaderc requires renamed entry points to "main".
                 let _entry_point = stage_kind.encode_entry_point();
 
-                let layout = self.make_stage_group(stage_kind.decode_binding());
+                let BindGroupLayoutIdx(layout) = self.make_stage_group(stage_kind.decode_binding());
 
                 let group = self.make_opto_fragment_group(
                     stage_kind.decode_binding(),
@@ -1620,11 +1666,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 })
             }
             Function::FromLinearOpto { parameter, stage_kind } => {
-                let vertex = self.vertex_shader(
+                let ShaderIdx(vertex) = self.vertex_shader(
                     Some(VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
-                let fragment = self.fragment_shader(
+                let ShaderIdx(fragment) = self.fragment_shader(
                     Some(shaders::FragmentShaderKey::Convert),
                     shader_include_to_spirv(stage_kind.encode_src()))?;
 
@@ -1632,7 +1678,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 // FIXME: see below, shaderc requires renamed entry points to "main".
                 let _entry_point = stage_kind.decode_entry_point();
 
-                let layout = self.make_stage_group(stage_kind.encode_binding());
+                let BindGroupLayoutIdx(layout) = self.make_stage_group(stage_kind.encode_binding());
 
                 let group = self.make_opto_fragment_group(
                     stage_kind.encode_binding(),
