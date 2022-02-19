@@ -96,6 +96,8 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     buffer_map: HashMap<Buffer, BufferMap>,
     /// Describes which intermediate textures have been mapped to the GPU.
     staging_map: HashMap<Texture, StagingTexture>,
+    /// Delayed copy commands for images.
+    register_logical_state: RegisterLogicalState,
     // Arena style allocators.
 }
 
@@ -206,6 +208,51 @@ struct BufferMap {
     layout: BufferLayout,
 }
 
+/// Logical image state and which commands need to be performed to catch up.
+///
+/// The encoder keeps track of the logical state of a register/texture, which is the state visible
+/// to the outside that should _appear_ to have been scheduled. In reality, we aim to perform as
+/// little copies as possible, in particular considering the physical allocation map of registers.
+///
+/// If the program instructs us to copy a texture from register A to B then it may happen that, due
+/// to lifetime analysis, these are actually allocated to the same gpu texture. So, this copy may
+/// be elided outright.
+/// 
+/// Or, the program may instruct us to unstage a texture (copy the linear-representation image to
+/// the memory visible buffer), only to stage it due the next operation. This can be elided, or
+/// more precisely we may delay the copy until the unstaged memory representation is being used. In
+/// other words, we track commands that should have been inserted and ensure they happen:
+///
+/// - before commands that read from their output
+/// - before commands that clobber their inputs
+///
+/// As a side effect we may group multiple commands into the same command run.
+#[derive(Default)]
+struct RegisterLogicalState {
+    /// A list of commands we need to perform now to avoid output/clobber conditions.
+    /// Filled by the methods `before_clobber`/`before_consume` and the recursive effect they may
+    /// have.
+    eager_commands: Vec<Low>,
+}
+
+#[derive(Clone, Debug)]
+struct DelayedImageCopy {
+}
+
+/// Some logically tracked resource about to be overwritten.
+#[derive(Clone, Debug)]
+enum Clobber {
+    Buffer(DeviceBuffer),
+    Texture(DeviceTexture),
+}
+
+/// Some logically tracked resource about to be read.
+#[derive(Clone, Debug)]
+enum Consume {
+    Buffer(DeviceBuffer),
+    Texture(DeviceTexture),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum VertexShader {
     Noop,
@@ -294,12 +341,105 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.pool_plan = plan.clone();
     }
 
+    pub(crate) fn begin_stack_frame(&mut self, frame: run::Frame) -> Result<(), LaunchError> {
+        self.push(Low::StackFrame(frame))
+    }
+
+    pub(crate) fn end_stack_frame(&mut self) -> Result<(), LaunchError> {
+        self.push(Low::StackPop)
+    }
+
+    pub(crate) fn begin_render_pass(&mut self, pass: RenderPassDescriptor) -> Result<(), LaunchError> {
+        let clobbers = pass.textures
+            .iter()
+            .map(|texture| {
+                let texture = self.texture_map
+                    .get(texture)
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
+                    .device;
+                Ok(Clobber::Texture(texture))
+            })
+            .collect::<Result<Vec<Clobber>, _>>()?;
+        self.begin_commands(&clobbers)?;
+        self.push(Low::BeginRenderPass(pass))?;
+        Ok(())
+    }
+
+    pub(crate) fn end_and_run_render_pass(&mut self) -> Result<(), LaunchError> {
+        self.push(Low::EndRenderPass)?;
+        // FIXME: should probably use `end_and_run_render_pass` here, with a list of consumes based
+        // on the render commands that had been provided since starting.
+        self.push(Low::EndCommands)?;
+        self.push(Low::RunTopCommand)?;
+        Ok(())
+    }
+
+    pub(crate) fn copy_buffer_to_buffer(&mut self, src: Register, dst: Register) -> Result<(), LaunchError> {
+        let &RegisterMap {
+            buffer: source_buffer,
+            ref buffer_layout,
+            ..
+        } = self.allocate_register(src)?;
+
+        let size = buffer_layout.u64_len();
+        let target_buffer = self.allocate_register(dst)?.buffer;
+
+        let clobbers = vec![Clobber::Buffer(target_buffer)];
+        self.begin_commands(&clobbers)?;
+        self.push(Low::CopyBufferToBuffer {
+            source_buffer,
+            size,
+            target_buffer,
+        })?;
+
+        let consumed = vec![Consume::Buffer(source_buffer)];
+        self.end_and_run_commands(&consumed)?;
+
+        Ok(())
+    }
+
+    /// Schedule actual command execution.
+    ///
+    /// Before this starts, we 
+    fn begin_commands(
+        &mut self,
+        clobber: &[Clobber],
+    ) -> Result<(), LaunchError> {
+        // First clean associated lazy state.
+        let mut pre_execute = vec![];
+        for c in clobber {
+            pre_execute.append(self.register_logical_state.before_clobber(c));
+        }
+        for low in pre_execute.drain(..) {
+            self.push(low)?;
+        }
+
+        // Then do the _actual_ command start.
+        self.push(Low::BeginCommands)
+    }
+
+    fn end_and_run_commands(
+        &mut self,
+        consumed: &[Consume],
+    ) -> Result<(), LaunchError> {
+        let mut pre_execute = vec![];
+        for c in consumed {
+            pre_execute.append(self.register_logical_state.before_consume(c));
+        }
+        for low in pre_execute.drain(..) {
+            self.push(low)?;
+        }
+
+        self.push(Low::EndCommands)?;
+        self.push(Low::RunTopCommand)
+    }
+
     /// Validate and then add the command to the encoder.
     ///
     /// This ensures we can keep track of the expected state change, and validate the correct order
     /// of commands. More specific sequencing commands will expect correct order or assume it
     /// internally.
-    pub(crate) fn push(&mut self, low: Low) -> Result<(), LaunchError> {
+    fn push(&mut self, low: Low) -> Result<(), LaunchError> {
         match low {
             Low::BindGroupLayout(_) => self.bind_group_layouts += 1,
             Low::BindGroup(_) => self.bind_groups += 1,
@@ -751,8 +891,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             size = self.buffer_plan.get_info(idx)?.descriptor.size();
         };
 
-        // eprintln!("!!! Copying {:?}: to {:?}", idx, target_texture);
-
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyBufferToTexture {
             source_buffer: regmap.buffer,
@@ -761,7 +899,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             size,
             target_texture,
         })?;
-        // eprintln!("buf{:?} -> tex{:?} ({:?})", regmap.buffer, regmap.texture, size);
 
         self.push(Low::EndCommands)?;
         // TODO: maybe also don't run it immediately?
@@ -802,6 +939,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             self.push(Low::BeginRenderPass(RenderPassDescriptor {
                 color_attachments: vec![attachment],
                 depth_stencil: None,
+                textures: vec![idx],
             }))?;
             self.render(pipeline)?;
             self.push(Low::EndRenderPass)?;
@@ -853,6 +991,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             self.push(Low::BeginRenderPass(RenderPassDescriptor {
                 color_attachments: vec![attachment],
                 depth_stencil: None,
+                textures: vec![idx],
             }))?;
             self.render(pipeline)?;
             self.push(Low::EndRenderPass)?;
@@ -877,8 +1016,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             source_texture = regmap.texture;
             size = self.buffer_plan.get_info(idx)?.descriptor.size();
         };
-
-        // eprintln!("!!! Copying {:?}: from {:?}", idx, source_texture);
 
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyTextureToBuffer {
@@ -918,12 +1055,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 size: sizeu64,
                 target_buffer: map_read,
             })?;
-            // eprintln!("buf{:?} -> buf{:?} ({})", regmap.buffer, map_read, sizeu64);
             self.push(Low::EndCommands)?;
-            // TODO: maybe also don't run it immediately?
             self.push(Low::RunTopCommand)?;
         }
-        // eprintln!("buf{:?} -> img{:?} ({:?})", source_buffer, target_image, size);
 
         self.push(Low::ReadBuffer {
             source_buffer,
@@ -949,7 +1083,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let id = self.texture_views;
         self.push(Low::TextureView(descriptor))?;
-        // eprintln!("Texture {:?} (Device {:?}) in View {:?}", dst, texture, id);
 
         Ok(id)
     }
@@ -1775,6 +1908,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         }
 
         Ok(())
+    }
+}
+
+impl RegisterLogicalState {
+    fn before_clobber(&mut self, _: &Clobber) -> &mut Vec<Low> {
+        &mut self.eager_commands
+    }
+
+    fn before_consume(&mut self, _: &Consume) -> &mut Vec<Low> {
+        &mut self.eager_commands
     }
 }
 

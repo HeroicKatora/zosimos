@@ -341,6 +341,7 @@ pub(crate) struct BindGroupLayoutDescriptor {
 pub(crate) struct RenderPassDescriptor {
     pub color_attachments: Vec<ColorAttachmentDescriptor>,
     pub depth_stencil: Option<DepthStencilDescriptor>,
+    pub textures: Vec<Texture>,
 }
 
 #[derive(Debug)]
@@ -779,9 +780,9 @@ impl Program {
             let with_stack_frame = match high {
                 High::StackPush(_) | High::StackPop => false,
                 other => {
-                    encoder.push(Low::StackFrame(run::Frame {
+                    encoder.begin_stack_frame(run::Frame {
                         name: format!("Operation: {:#?}", other),
-                    }))?;
+                    })?;
                     true
                 }
             };
@@ -841,57 +842,37 @@ impl Program {
 
                     // TODO: we need to remember the attachment format here.
                     // This is need to to automatically construct the shader pipeline.
-                    encoder.push(Low::BeginCommands)?;
-                    encoder.push(Low::BeginRenderPass(RenderPassDescriptor {
+                    encoder.begin_render_pass(RenderPassDescriptor {
                         // FIXME: allocation?
                         color_attachments: vec![attachment],
                         depth_stencil: None,
-                    }))?;
+                        textures: vec![dst_texture],
+                    })?;
                     encoder.render(render)?;
-                    encoder.push(Low::EndRenderPass)?;
-                    encoder.push(Low::EndCommands)?;
-
-                    // Actually run it immediately.
-                    // TODO: this might not be the most efficient.
-                    encoder.push(Low::RunTopCommand)?;
-
+                    encoder.end_and_run_render_pass()?;
                     // Post paint, make sure we quantize everything.
                     encoder.copy_texture_to_staging(dst_texture)?;
                 }
                 High::Copy { src, dst } => {
-                    let &RegisterMap {
-                        buffer: source_buffer,
-                        ref buffer_layout,
-                        ..
-                    } = encoder.allocate_register(*src)?;
-                    let size = buffer_layout.u64_len();
-                    let target_buffer = encoder.allocate_register(*dst)?.buffer;
+                    encoder.allocate_register(*src)?;
+                    encoder.allocate_register(*dst)?;
 
                     encoder.copy_staging_to_buffer(*src)?;
-
-                    encoder.push(Low::BeginCommands)?;
-                    encoder.push(Low::CopyBufferToBuffer {
-                        source_buffer,
-                        size,
-                        target_buffer,
-                    })?;
-                    encoder.push(Low::EndCommands)?;
-                    encoder.push(Low::RunTopCommand)?;
-
+                    encoder.copy_buffer_to_buffer(*src, *dst)?;
                     encoder.copy_buffer_to_staging(*dst)?;
                 }
                 High::StackPush(frame) => {
-                    encoder.push(Low::StackFrame(run::Frame {
+                    encoder.begin_stack_frame(run::Frame {
                         name: frame.name.clone(),
-                    }))?;
+                    })?;
                 }
                 High::StackPop => {
-                    encoder.push(Low::StackPop)?;
+                    encoder.end_stack_frame()?;
                 }
             }
 
             if with_stack_frame {
-                encoder.push(Low::StackPop)?;
+                encoder.end_stack_frame()?;
             }
         }
 
