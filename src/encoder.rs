@@ -135,6 +135,10 @@ struct ShaderIdx(usize);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
+struct SimpleRenderPipelineIdx(usize);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
 struct TextureIdx(usize);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -217,7 +221,7 @@ struct BufferMap {
 /// If the program instructs us to copy a texture from register A to B then it may happen that, due
 /// to lifetime analysis, these are actually allocated to the same gpu texture. So, this copy may
 /// be elided outright.
-/// 
+///
 /// Or, the program may instruct us to unstage a texture (copy the linear-representation image to
 /// the memory visible buffer), only to stage it due the next operation. This can be elided, or
 /// more precisely we may delay the copy until the unstaged memory representation is being used. In
@@ -233,10 +237,20 @@ struct RegisterLogicalState {
     /// Filled by the methods `before_clobber`/`before_consume` and the recursive effect they may
     /// have.
     eager_commands: Vec<Low>,
+    /// Specific Pipelines with register effects. May execute once or multiple times.
+    pipelines: Vec<DelayedPipeline>,
+    /// Clobbers that were registered by pipelines.
+    clobbers: Vec<Clobber>,
+    /// Consumes that were registered by pipelines.
+    consumes: Vec<Consume>,
 }
 
 #[derive(Clone, Debug)]
-struct DelayedImageCopy {
+struct DelayedPipeline {
+    /// Additional outputs clobbered by this pipeline.
+    clobber: core::ops::Range<usize>,
+    /// Additional outputs consumed by this pipeline.
+    consume: core::ops::Range<usize>,
 }
 
 /// Some logically tracked resource about to be overwritten.
@@ -262,10 +276,11 @@ enum VertexShader {
 pub(crate) struct SimpleRenderPipeline {
     pipeline: usize,
     buffer: DeviceBuffer,
-    group: Option<usize>,
-    vertex_bind: Option<usize>,
+    group: Option<BindGroupIdx>,
+    vertex_bind: Option<BindGroupIdx>,
     vertices: u32,
-    fragment_bind: Option<usize>,
+    fragment_bind: Option<BindGroupIdx>,
+    side_effects: SimpleRenderPipelineIdx,
 }
 
 struct SimpleRenderPipelineDescriptor<'data> {
@@ -273,7 +288,7 @@ struct SimpleRenderPipelineDescriptor<'data> {
     /// Bind data for (set 0, binding 0).
     vertex_bind_data: BufferBind<'data>,
     /// Texture for (set 1, binding 0)
-    fragment_texture: TextureBind,
+    fragment_texture: TextureBind<'data>,
     /// Texture for (set 2, binding 0)
     fragment_bind_data: BufferBind<'data>,
     /// The vertex shader to use.
@@ -287,15 +302,19 @@ enum PipelineTarget {
     PreComputedGroup { target_format: wgpu::TextureFormat },
 }
 
-pub(crate) enum TextureBind {
+enum TextureBind<'data> {
     /// Use the currently pushed texture operands.
     /// The arguments are taken from the back of the operand vector.
     Textures(usize),
     PreComputedGroup {
         /// The index of the bind group we're binding to set `1`, the fragment set.
-        group: usize,
+        group: BindGroupIdx,
         /// The layout corresponding to the bind group.
         layout: usize,
+        /// Additional clobbers.
+        clobber: &'data [Clobber],
+        /// Additional consumes.
+        consumed: &'data [Consume],
     },
 }
 
@@ -349,11 +368,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.push(Low::StackPop)
     }
 
-    pub(crate) fn begin_render_pass(&mut self, pass: RenderPassDescriptor) -> Result<(), LaunchError> {
-        let clobbers = pass.textures
+    pub(crate) fn begin_render_pass(
+        &mut self,
+        pass: RenderPassDescriptor,
+    ) -> Result<(), LaunchError> {
+        let clobbers = pass
+            .textures
             .iter()
             .map(|texture| {
-                let texture = self.texture_map
+                let texture = self
+                    .texture_map
                     .get(texture)
                     .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
                     .device;
@@ -367,14 +391,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     pub(crate) fn end_and_run_render_pass(&mut self) -> Result<(), LaunchError> {
         self.push(Low::EndRenderPass)?;
-        // FIXME: should probably use `end_and_run_render_pass` here, with a list of consumes based
-        // on the render commands that had been provided since starting.
-        self.push(Low::EndCommands)?;
-        self.push(Low::RunTopCommand)?;
-        Ok(())
+        // FIXME: list of consumed inputs based on the render commands that had been provided since
+        // starting.
+        self.end_and_run_commands(&[])
     }
 
-    pub(crate) fn copy_buffer_to_buffer(&mut self, src: Register, dst: Register) -> Result<(), LaunchError> {
+    pub(crate) fn copy_buffer_to_buffer(
+        &mut self,
+        src: Register,
+        dst: Register,
+    ) -> Result<(), LaunchError> {
         let &RegisterMap {
             buffer: source_buffer,
             ref buffer_layout,
@@ -400,11 +426,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     /// Schedule actual command execution.
     ///
-    /// Before this starts, we 
-    fn begin_commands(
-        &mut self,
-        clobber: &[Clobber],
-    ) -> Result<(), LaunchError> {
+    /// Before this starts, we
+    fn begin_commands(&mut self, clobber: &[Clobber]) -> Result<(), LaunchError> {
         // First clean associated lazy state.
         let mut pre_execute = vec![];
         for c in clobber {
@@ -418,10 +441,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.push(Low::BeginCommands)
     }
 
-    fn end_and_run_commands(
-        &mut self,
-        consumed: &[Consume],
-    ) -> Result<(), LaunchError> {
+    fn end_and_run_commands(&mut self, consumed: &[Consume]) -> Result<(), LaunchError> {
         let mut pre_execute = vec![];
         for c in consumed {
             pre_execute.append(self.register_logical_state.before_consume(c));
@@ -1428,7 +1448,33 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             })
     }
 
-    fn make_bind_group_sampled_texture(&mut self, count: usize) -> Result<usize, LaunchError> {
+    /// FIXME: really, we need to allocate here?
+    /// What if we made `consumed` a dyn-Iterator.
+    fn make_bind_group_consumes(&mut self, count: usize) -> Result<Vec<Consume>, LaunchError> {
+        let start_of_operands = match self.operands.len().checked_sub(count) {
+            None => return Err(LaunchError::InternalCommandError(line!())),
+            Some(i) => i,
+        };
+
+        self.operands[start_of_operands..]
+            .iter()
+            .map(|texture| {
+                let texture = self
+                    .texture_map
+                    .get(&texture)
+                    // The texture was never allocated. Has it been initialized?
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
+                    .device;
+
+                Ok(Consume::Texture(texture))
+            })
+            .collect()
+    }
+
+    fn make_bind_group_sampled_texture(
+        &mut self,
+        count: usize,
+    ) -> Result<BindGroupIdx, LaunchError> {
         let start_of_operands = match self.operands.len().checked_sub(count) {
             None => return Err(LaunchError::InternalCommandError(line!())),
             Some(i) => i,
@@ -1456,23 +1502,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         };
 
         self.push(Low::BindGroup(descriptor))?;
-        Ok(group)
+        Ok(BindGroupIdx(group))
     }
 
     fn make_opto_fragment_group(
         &mut self,
         binding: u32,
         // The staging texture, whose staging texture is bound to IO-storage image.
-        texture: Texture,
+        texture: DeviceTexture,
         // The non-staging texture which we bind to the sampler.
         view: Option<Texture>,
-    ) -> Result<usize, LaunchError> {
-        let texture = self
-            .staging_map
-            .get(&texture)
-            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
-            .device;
-
+    ) -> Result<BindGroupIdx, LaunchError> {
         // FIXME: could be cached.
         let image_id = self.texture_views;
         self.push(Low::TextureView(TextureViewDescriptor { texture }))?;
@@ -1523,14 +1563,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         };
 
         self.push(Low::BindGroup(descriptor))?;
-        Ok(group)
+        Ok(BindGroupIdx(group))
     }
 
     fn make_bound_buffer(
         &mut self,
         bind: BufferBind<'_>,
         layout_idx: usize,
-    ) -> Result<Option<usize>, LaunchError> {
+    ) -> Result<Option<BindGroupIdx>, LaunchError> {
         let buffer = match bind {
             BufferBind::None => return Ok(None),
             BufferBind::Set { data } => {
@@ -1564,7 +1604,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         };
 
         self.push(Low::BindGroup(descriptor))?;
-        Ok(Some(group))
+        Ok(Some(BindGroupIdx(group)))
     }
 
     /// Render the pipeline, after all customization and buffers were bound..
@@ -1575,14 +1615,30 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let pipeline = self.simple_render_pipeline(&descriptor)?;
         let buffer = self.simple_quad_buffer();
 
+        let side_effects;
         let group = match &descriptor.fragment_texture {
-            TextureBind::Textures(0) => None,
+            TextureBind::Textures(0) => {
+                side_effects = self.register_logical_state.register_pipeline(&[], &[]);
+                None
+            }
             &TextureBind::Textures(count) => {
+                let consume = self.make_bind_group_consumes(count)?;
+                side_effects = self.register_logical_state.register_pipeline(&consume, &[]);
+
                 let group = self.make_bind_group_sampled_texture(count)?;
                 // eprintln!("Using Texture {:?} as group {:?}", texture, group);
                 Some(group)
             }
-            &TextureBind::PreComputedGroup { group, .. } => {
+            &TextureBind::PreComputedGroup {
+                group,
+                consumed: group_consume,
+                clobber: group_clobber,
+                ..
+            } => {
+                side_effects = self
+                    .register_logical_state
+                    .register_pipeline(group_consume, group_clobber);
+
                 // eprintln!("Using Target Group {:?}", group);
                 Some(group)
             }
@@ -1602,6 +1658,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             vertex_bind,
             vertices: 4,
             fragment_bind,
+            side_effects,
         })
     }
 
@@ -1630,12 +1687,13 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             vertex_bind,
             vertices,
             fragment_bind,
+            side_effects,
         } = pipeline;
 
         self.push(Low::SetPipeline(pipeline))?;
 
         let mut group_idx = 0;
-        if let Some(quad) = vertex_bind {
+        if let Some(BindGroupIdx(quad)) = vertex_bind {
             self.push(Low::SetBindGroup {
                 group: quad,
                 index: group_idx,
@@ -1644,7 +1702,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             group_idx += 1;
         }
 
-        if let Some(group) = group {
+        if let Some(BindGroupIdx(group)) = group {
             self.push(Low::SetBindGroup {
                 group,
                 index: group_idx,
@@ -1658,7 +1716,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             slot: 0,
         })?;
 
-        if let Some(bind) = fragment_bind {
+        if let Some(BindGroupIdx(bind)) = fragment_bind {
             self.push(Low::SetBindGroup {
                 group: bind,
                 index: group_idx,
@@ -1768,9 +1826,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 let BindGroupLayoutIdx(layout) = self.make_stage_group(stage_kind.decode_binding());
 
+                let texture = self
+                    .staging_map
+                    .get(&target)
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
+                    .device;
+
                 let group = self.make_opto_fragment_group(
                     stage_kind.decode_binding(),
-                    target,
+                    texture,
                     None,
                 )?;
 
@@ -1784,6 +1848,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment_texture: TextureBind::PreComputedGroup {
                         group,
                         layout,
+                        consumed: &[
+                            Consume::Texture(texture),
+                        ],
+                        // Does not have side-effects on any buffer or texture.
+                        clobber: &[],
                     },
                     fragment_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
@@ -1813,9 +1882,21 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 let BindGroupLayoutIdx(layout) = self.make_stage_group(stage_kind.encode_binding());
 
+                let target_texture = self
+                    .staging_map
+                    .get(&target)
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
+                    .device;
+
+                let source_texture = self
+                    .texture_map
+                    .get(&target)
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
+                    .device;
+
                 let group = self.make_opto_fragment_group(
                     stage_kind.encode_binding(),
-                    target,
+                    target_texture,
                     Some(target),
                 )?;
 
@@ -1831,6 +1912,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment_texture: TextureBind::PreComputedGroup {
                         group,
                         layout,
+                        consumed: &[Consume::Texture(source_texture)],
+                        clobber: &[Clobber::Texture(target_texture)],
                     },
                     fragment_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
@@ -1912,6 +1995,25 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 }
 
 impl RegisterLogicalState {
+    fn register_pipeline(
+        &mut self,
+        consume: &[Consume],
+        clobber: &[Clobber],
+    ) -> SimpleRenderPipelineIdx {
+        let consume_start = self.consumes.len();
+        self.consumes.extend_from_slice(consume);
+        let clobber_start = self.clobbers.len();
+        self.clobbers.extend_from_slice(clobber);
+
+        let pipeline = self.pipelines.len();
+        self.pipelines.push(DelayedPipeline {
+            consume: consume_start..self.consumes.len(),
+            clobber: clobber_start..self.clobbers.len(),
+        });
+
+        SimpleRenderPipelineIdx(pipeline)
+    }
+
     fn before_clobber(&mut self, _: &Clobber) -> &mut Vec<Low> {
         &mut self.eager_commands
     }
