@@ -146,19 +146,19 @@ pub(crate) struct Frame {
 }
 
 /// A gpu buffer associated with an image buffer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct DeviceBuffer(pub(crate) usize);
 
 /// A gpu texture associated with an image buffer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct DeviceTexture(pub(crate) usize);
 
 /// Identifies one layout based buffer in the render pipeline, by an index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct Buffer(pub(crate) usize);
 
 /// Identifies one descriptor based resource in the render pipeline, by an index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct Texture(pub(crate) usize);
 
 /// A map of features which we may use during encoding.
@@ -258,6 +258,15 @@ pub(crate) enum Low {
     RunTopToBot(usize),
     /// Run multiple commands at once.
     RunBotToTop(usize),
+
+    /// Discard some commands.
+    /// This is technically a synthetic command that should not appear in a fully optimized
+    /// program. However, building the commands has several side effects that may matter.
+    /// The encoder will initially add this instead of a RunTopCommand when it notes that a
+    /// pipeline/command execution has no effect. A further optimizer pass can then remove all
+    /// non-effectful previous commands that might have built the command in question.
+    PopCommands(usize),
+
     /// Read a buffer into host image data.
     /// Will map the buffer then do row-wise writes.
     WriteImageToBuffer {

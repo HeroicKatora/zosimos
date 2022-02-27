@@ -53,6 +53,8 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     trace_pool_plan: bool,
     /// How we mapped registers to images in the pool.
     pool_plan: ImagePoolPlan,
+
+    // Fields related to memoization of some inputs.
     /// Declare where we put our input registers.
     input_map: HashMap<Register, Texture>,
     /// Declare where we intend to write our outputs.
@@ -84,8 +86,16 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     staged_to_pipelines: HashMap<Texture, SimpleRenderPipeline>,
     /// The render pipeline state for undoing staging a texture.
     staged_from_pipelines: HashMap<Texture, SimpleRenderPipeline>,
+
+    // Fields related to tracking command resource usage.
     /// The texture operands collected for the next render preparation.
     operands: Vec<Texture>,
+    /// The currently knowns consumes of commands that are being built (not yet executed).
+    partial_command_consumes: Vec<Consume>,
+    /// The currently knowns clobbers of commands that are being built (not yet executed).
+    partial_command_clobbers: Vec<Clobber>,
+    /// Delayed copy commands for images.
+    register_logical_state: RegisterLogicalState,
 
     // Fields regarding the status of registers.
     /// Describes how registers where mapped to buffers.
@@ -96,8 +106,6 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     buffer_map: HashMap<Buffer, BufferMap>,
     /// Describes which intermediate textures have been mapped to the GPU.
     staging_map: HashMap<Texture, StagingTexture>,
-    /// Delayed copy commands for images.
-    register_logical_state: RegisterLogicalState,
     // Arena style allocators.
 }
 
@@ -117,6 +125,12 @@ struct BufferIdx(usize);
 #[repr(transparent)]
 struct CommandBufferIdx(usize);
 
+/// The ID of a command execution in this basic block.
+/// Ordered by the order in which they were scheduled.
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+struct ExecuteId(usize);
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 struct PipelineLayoutIdx(usize);
@@ -135,7 +149,7 @@ struct ShaderIdx(usize);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-struct SimpleRenderPipelineIdx(usize);
+struct LogicalSideEffectIdx(usize);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -150,6 +164,7 @@ struct TextureViewIdx(usize);
 /// encoder process.
 #[derive(Clone, Debug)]
 pub(crate) struct RegisterMap {
+    pub(crate) logical_texture: Texture,
     pub(crate) texture: DeviceTexture,
     pub(crate) buffer: DeviceBuffer,
     /// A device buffer with (COPY_DST | MAP_READ) for reading back the texture.
@@ -231,22 +246,34 @@ struct BufferMap {
 /// - before commands that clobber their inputs
 ///
 /// As a side effect we may group multiple commands into the same command run.
+///
+/// This contains a DAG of (pending) command execution effects. This is traversed to find dependent
+/// but not-yet-scheduled commands. The effect is provided by `Clobber` (incoming edges) while the
+/// needs are provided by `Consume` (outgoing edges). Clobbers hold additional information as they
+/// will also inform the `RegisterLogicalState` of the kind of the logical resource behind their
+/// device resource. We then track which of the device representations is considered 'fresh' for a
+/// specific logical resource.
 #[derive(Default)]
 struct RegisterLogicalState {
-    /// A list of commands we need to perform now to avoid output/clobber conditions.
-    /// Filled by the methods `before_clobber`/`before_consume` and the recursive effect they may
-    /// have.
-    eager_commands: Vec<Low>,
     /// Specific Pipelines with register effects. May execute once or multiple times.
-    pipelines: Vec<DelayedPipeline>,
+    side_effects: Vec<DelayedSideEffects>,
     /// Clobbers that were registered by pipelines.
     clobbers: Vec<Clobber>,
     /// Consumes that were registered by pipelines.
     consumes: Vec<Consume>,
+    /// Informs us which consumes would bind to which execution.
+    clobber_map: HashMap<Consume, ExecuteId>,
+    /// Executed pipelines in order that they were tracked.
+    scheduled: Vec<LogicalSideEffectIdx>,
+    /// The past-the-end of *executed* pipelines.
+    past_executed_id: ExecuteId,
+    /// Buffer for a list of commands we need to perform now to avoid output/clobber conditions.
+    /// Filled by the methods `resolve` (or any recursive effect it may have).
+    eager_commands: Vec<Low>,
 }
 
 #[derive(Clone, Debug)]
-struct DelayedPipeline {
+struct DelayedSideEffects {
     /// Additional outputs clobbered by this pipeline.
     clobber: core::ops::Range<usize>,
     /// Additional outputs consumed by this pipeline.
@@ -254,14 +281,28 @@ struct DelayedPipeline {
 }
 
 /// Some logically tracked resource about to be overwritten.
+///
+/// This tracks the logical state as well, which is updated to reflect the fact that its logical
+/// state is now present in the buffer/texture.
 #[derive(Clone, Debug)]
 enum Clobber {
-    Buffer(DeviceBuffer),
-    Texture(DeviceTexture),
+    Buffer {
+        /// The register which we clobber.
+        texture: Texture,
+        /// The buffer into which we perform the write.
+        device: DeviceBuffer,
+    },
+    Texture {
+        /// The register which we clobber.
+        texture: Texture,
+        /// The texture into which we perform the write.
+        device: DeviceTexture,
+    },
 }
 
 /// Some logically tracked resource about to be read.
-#[derive(Clone, Debug)]
+/// A resource for which clobber/consume is tracked, and for which those effects may be delayed.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum Consume {
     Buffer(DeviceBuffer),
     Texture(DeviceTexture),
@@ -280,7 +321,7 @@ pub(crate) struct SimpleRenderPipeline {
     vertex_bind: Option<BindGroupIdx>,
     vertices: u32,
     fragment_bind: Option<BindGroupIdx>,
-    side_effects: SimpleRenderPipelineIdx,
+    side_effects: LogicalSideEffectIdx,
 }
 
 struct SimpleRenderPipelineDescriptor<'data> {
@@ -376,12 +417,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             .textures
             .iter()
             .map(|texture| {
-                let texture = self
+                let device = self
                     .texture_map
                     .get(texture)
                     .ok_or_else(|| LaunchError::InternalCommandError(line!()))?
                     .device;
-                Ok(Clobber::Texture(texture))
+                Ok(Clobber::Texture {
+                    texture: *texture,
+                    device,
+                })
             })
             .collect::<Result<Vec<Clobber>, _>>()?;
         self.begin_commands(&clobbers)?;
@@ -402,6 +446,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         dst: Register,
     ) -> Result<(), LaunchError> {
         let &RegisterMap {
+            logical_texture: texture,
             buffer: source_buffer,
             ref buffer_layout,
             ..
@@ -410,7 +455,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let size = buffer_layout.u64_len();
         let target_buffer = self.allocate_register(dst)?.buffer;
 
-        let clobbers = vec![Clobber::Buffer(target_buffer)];
+        let clobbers = vec![Clobber::Buffer {
+            texture,
+            device: target_buffer,
+        }];
+
         self.begin_commands(&clobbers)?;
         self.push(Low::CopyBufferToBuffer {
             source_buffer,
@@ -426,31 +475,24 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     /// Schedule actual command execution.
     ///
-    /// Before this starts, we
+    /// Gently reminds us we should provide the clobbers of this command (including pipelines,
+    /// copies, etc) by requiring an argument listing them.
     fn begin_commands(&mut self, clobber: &[Clobber]) -> Result<(), LaunchError> {
-        // First clean associated lazy state.
-        let mut pre_execute = vec![];
-        for c in clobber {
-            pre_execute.append(self.register_logical_state.before_clobber(c));
-        }
-        for low in pre_execute.drain(..) {
-            self.push(low)?;
-        }
-
+        self.partial_command_clobbers.extend_from_slice(clobber);
         // Then do the _actual_ command start.
         self.push(Low::BeginCommands)
     }
 
     fn end_and_run_commands(&mut self, consumed: &[Consume]) -> Result<(), LaunchError> {
-        let mut pre_execute = vec![];
-        for c in consumed {
-            pre_execute.append(self.register_logical_state.before_consume(c));
-        }
-        for low in pre_execute.drain(..) {
-            self.push(low)?;
-        }
-
+        self.partial_command_consumes.extend_from_slice(consumed);
         self.push(Low::EndCommands)?;
+
+        // All inputs and outputs are known now, register this.
+        let commands_idx = self.register_logical_state.register_pipeline(
+            &self.partial_command_consumes,
+            &self.partial_command_clobbers,
+        );
+
         self.push(Low::RunTopCommand)
     }
 
@@ -523,7 +565,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 self.command_buffers -= 1;
             }
-            Low::RunBotToTop(num) | Low::RunTopToBot(num) => {
+            Low::RunBotToTop(num) | Low::RunTopToBot(num) | Low::PopCommands(num) => {
                 if num >= self.command_buffers {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
@@ -743,6 +785,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             .map(|staging| staging.device);
 
         let map_entry = RegisterMap {
+            logical_texture: reg_texture,
             buffer,
             texture,
             map_read: Some(map_read),
@@ -1913,7 +1956,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                         group,
                         layout,
                         consumed: &[Consume::Texture(source_texture)],
-                        clobber: &[Clobber::Texture(target_texture)],
+                        clobber: &[Clobber::Texture {
+                            texture: target,
+                            device: target_texture,
+                        }],
                     },
                     fragment_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
@@ -1995,31 +2041,145 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 }
 
 impl RegisterLogicalState {
+    /// Register a set of side effects on resources.
     fn register_pipeline(
         &mut self,
         consume: &[Consume],
         clobber: &[Clobber],
-    ) -> SimpleRenderPipelineIdx {
+    ) -> LogicalSideEffectIdx {
         let consume_start = self.consumes.len();
         self.consumes.extend_from_slice(consume);
         let clobber_start = self.clobbers.len();
         self.clobbers.extend_from_slice(clobber);
 
-        let pipeline = self.pipelines.len();
-        self.pipelines.push(DelayedPipeline {
+        let pipeline = self.side_effects.len();
+        self.side_effects.push(DelayedSideEffects {
             consume: consume_start..self.consumes.len(),
             clobber: clobber_start..self.clobbers.len(),
         });
 
-        SimpleRenderPipelineIdx(pipeline)
+        LogicalSideEffectIdx(pipeline)
     }
 
-    fn before_clobber(&mut self, _: &Clobber) -> &mut Vec<Low> {
-        &mut self.eager_commands
+    /// Schedule execution of a specific set of side effects.
+    ///
+    /// Consumes the consumes, puts all clobbered resources into a new fresh state etc.
+    /// The pipeline isn't executed immediately, we're made aware of the stack though.
+    fn schedule_pipeline(&mut self, LogicalSideEffectIdx(effect): LogicalSideEffectIdx)
+        -> Result<ExecuteId, LaunchError>
+    {
+        let DelayedSideEffects { consume, clobber } = self.side_effects.get(effect)
+            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+        // Bind to all consumes currently open.
+        for consume in &self.consumes[consume.clone()] {
+            if let Some(exec) = self.clobber_map.get(consume) {
+                todo!()
+            } else {
+                // Consume without preceding effect that wrote it.
+                // 'Uninitialized' use of the resource.
+                return Err(LaunchError::InternalCommandError(line!()));
+            }
+        }
+
+        // Create symmetric other end of clobber edges.
+        // Note: 'atomic' with regards to the effect on failure.
+        let mut consume_side = vec![];
+        for clobber in &self.clobbers[clobber.clone()] {
+            consume_side.push(match clobber {
+                &Clobber::Buffer { texture, device } => {
+                    todo!("{:?}", texture);
+                    Consume::Buffer(device)
+                }
+                &Clobber::Texture { texture, device } => {
+                    todo!("{:?}", texture);
+                    Consume::Texture(device)
+                }
+            });
+        }
+
+        let id = ExecuteId(self.scheduled.len());
+        self.scheduled.push(LogicalSideEffectIdx(effect));
+
+        // Mark all clobbers to be available for consumption.
+        consume_side
+            .into_iter()
+            .for_each(|consume| {
+                self.clobber_map.insert(consume, id);
+            });
+
+        Ok(id)
     }
 
-    fn before_consume(&mut self, _: &Consume) -> &mut Vec<Low> {
-        &mut self.eager_commands
+    /// Check if a copy operation would be a logical no-op.
+    ///
+    /// This takes as input the target of the copy, the source is equivalently given by any fresh
+    /// representation of the logical resource. Will return an `Err` if there is no such fresh
+    /// representation.
+    ///
+    /// Images are held in multiple representations: buffers on the host, buffers on the gpu,
+    /// textures on the gpu, a linear color texture on the gpu.
+    ///
+    /// To consume one specific version, we must perform a copy from a fresh representation (one
+    /// that was written to last). After such a copy we have more than one fresh representation.
+    /// The encoder may happen to receive instructions to perform a copy from one fresh
+    /// representation to another. These instructions can be elided completely.
+    ///
+    /// This is in general a hard problem if we also consider copies from _different_ logical
+    /// resources as there is no uniquely minimal solution. As a consequence we don't track this
+    /// yet and just perform a greedy algorithm: The first initialization wins, other copies get
+    /// elided.
+    ///
+    /// Example for unclear minimization. Either 3. or 4. can be elided together with their
+    /// original copy. Which is better may depend on their original workload, latency introduced by
+    /// blocking other executions, …
+    ///
+    /// ```
+    /// 1. Buffer_A --> Buffer_B
+    /// 2. Texture_A --> Texture_B
+    /// 3. Buffer_B --> Texture_B
+    /// 4. Texture_B --> Buffer_B
+    /// ```
+    fn is_copy_fresh(&self, clobber: &[Clobber]) -> Result<bool, LaunchError> {
+        todo!()
+    }
+
+    /// Schedule execution of commands necessary to prepare the consume items provided.
+    fn resolve(&mut self, consumes: &[Consume]) -> Result<&mut Vec<Low>, LaunchError> {
+        // All dependencies are a DAG based on consume/clobber pairs as (hyper-) edges.
+        // Resolve all nodes that are reachable from the given inputs.
+        // For simplicity, we will schedule all pending commands even if not necessary for this
+        // resolution. This will keep them in order and reduces our problem to simply finding the
+        // maximum ID of all executions that feed these consumes.
+        //
+        // TODO: prepare a dependency graph of executions for a later optimization pass. The rough
+        // idea would be:
+        // - Bunch commands together, with some limit on the amount of work in one such group.
+        // - Reorder executions such that these bunches are as big as possible under the
+        //   constraints of the dependency graph order.
+        let mut max_id = None;
+        for consume in consumes {
+            // No clobber writing this consume? That means it is uninitialized.
+            let &ExecuteId(id) = self
+                .clobber_map
+                .get(consume)
+                .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+            max_id = max_id.max(Some(id));
+        }
+
+        self.eager_commands.clear();
+
+        // There may not be anything to do.
+        if let Some(max_id) = max_id {
+            let ExecuteId(past_id) = self.past_executed_id;
+            // Schedule all unscheduled commands.
+            let range = past_id.min(max_id)..max_id;
+            self.eager_commands.push(Low::RunBotToTop(range.len()));
+            self.past_executed_id = ExecuteId(past_id.max(max_id));
+        }
+
+        Ok(&mut self.eager_commands)
     }
 }
 

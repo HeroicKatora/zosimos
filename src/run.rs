@@ -617,6 +617,13 @@ impl Execution {
                 self.gpu.queue.submit(commands);
                 Ok(SyncPoint::NO_SYNC)
             }
+            &Low::PopCommands(many) => {
+                if many > self.descriptors.command_buffers.len() {
+                    return Err(StepError::InvalidInstruction(line!()));
+                }
+
+                Ok(SyncPoint::NO_SYNC)
+            }
             &Low::WriteImageToBuffer {
                 source_image,
                 offset,
