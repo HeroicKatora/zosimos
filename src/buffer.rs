@@ -306,9 +306,7 @@ pub enum Color {
     /// model in the vastly more complex CIECAM02.
     ///
     /// Reference: <https://www.magnetkern.de/srlab2.html>
-    SrLab2 {
-        whitepoint: Whitepoint,
-    },
+    SrLab2 { whitepoint: Whitepoint },
 }
 
 /// Transfer functions from encoded chromatic samples to physical quantity.
