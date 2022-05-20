@@ -592,13 +592,13 @@ impl CommandBuffer {
             (
                 Color::Rgb {
                     primary,
-                    whitepoint: Whitepoint::D65,
+                    whitepoint: rgb_wp,
                     ..
                 },
                 Color::SrLab2 { whitepoint },
             ) => {
                 conversion = ColorConversion::XyzToSrLab2 {
-                    to_xyz_matrix: primary.to_xyz(Whitepoint::D65),
+                    to_xyz_matrix: primary.to_xyz(*rgb_wp),
                     whitepoint: *whitepoint,
                 };
             }
@@ -606,12 +606,12 @@ impl CommandBuffer {
                 Color::SrLab2 { whitepoint },
                 Color::Rgb {
                     primary,
-                    whitepoint: Whitepoint::D65,
+                    whitepoint: rgb_wp,
                     ..
                 },
             ) => {
                 conversion = ColorConversion::SrLab2ToXyz {
-                    from_xyz_matrix: primary.to_xyz(Whitepoint::D65),
+                    from_xyz_matrix: primary.to_xyz(*rgb_wp),
                     whitepoint: *whitepoint,
                 };
             }

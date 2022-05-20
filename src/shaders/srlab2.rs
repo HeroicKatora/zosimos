@@ -52,8 +52,13 @@ impl FragmentShaderData for Shader {
     /// Encode the shader's data into the buffer, returning the descriptor to that.
     fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
         let data = self.matrix.into_mat3x3_std140();
+        let wp = self.whitepoint.to_xyz();
 
-        Some(BufferInitContent::new(buffer, &data))
+        let mut content = BufferInitContent::builder(buffer);
+        content.extend_from_pods(&[wp]);
+        content.align_by_exponent(4);
+        content.extend_from_pods(&[data]);
+        Some(content.build())
     }
 
     fn num_args(&self) -> u32 {
