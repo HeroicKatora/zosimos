@@ -1,32 +1,35 @@
 use std::borrow::Cow;
 
 use super::{BufferInitContent, Direction, FragmentShaderData, FragmentShaderKey};
-use crate::buffer::RowMatrix;
+use crate::buffer::{RowMatrix, Whitepoint};
 
 /// a linear transformation on rgb color.
 pub const SHADER_ENCODE: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/spirv/oklab_encode.frag.v"));
+    include_bytes!(concat!(env!("OUT_DIR"), "/spirv/srlab2_encode.frag.v"));
 pub const SHADER_DECODE: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/spirv/oklab_decode.frag.v"));
+    include_bytes!(concat!(env!("OUT_DIR"), "/spirv/srlab2_decode.frag.v"));
 
 /// The palette shader, computing texture coordinates from an input color.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Shader {
-    xyz_transform: RowMatrix,
+    matrix: RowMatrix,
+    whitepoint: Whitepoint,
     direction: Direction,
 }
 
 impl Shader {
-    pub fn with_encode(xyz_transform: RowMatrix) -> Self {
+    pub fn with_encode(matrix: RowMatrix, whitepoint: Whitepoint) -> Self {
         Shader {
-            xyz_transform,
+            matrix,
+            whitepoint,
             direction: Direction::Encode,
         }
     }
 
-    pub fn with_decode(xyz_transform: RowMatrix) -> Self {
+    pub fn with_decode(matrix: RowMatrix, whitepoint: Whitepoint) -> Self {
         Shader {
-            xyz_transform,
+            matrix,
+            whitepoint,
             direction: Direction::Decode,
         }
     }
@@ -35,7 +38,7 @@ impl Shader {
 impl FragmentShaderData for Shader {
     /// The unique key identifying this shader module.
     fn key(&self) -> Option<FragmentShaderKey> {
-        Some(FragmentShaderKey::OklabTransform(self.direction))
+        Some(FragmentShaderKey::Srlab2Transform(self.direction))
     }
 
     /// The SPIR-V shader source code.
@@ -48,7 +51,8 @@ impl FragmentShaderData for Shader {
 
     /// Encode the shader's data into the buffer, returning the descriptor to that.
     fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
-        let data = self.xyz_transform.into_mat3x3_std140();
+        let data = self.matrix.into_mat3x3_std140();
+
         Some(BufferInitContent::new(buffer, &data))
     }
 

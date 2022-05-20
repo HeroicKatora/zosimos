@@ -295,6 +295,20 @@ pub enum Color {
         /// You can simply use `Linear` if you do not want to encode and rgb texel.
         transfer: Transfer,
     },
+    /// A LAB space based on contemporary perceptual understanding.
+    ///
+    /// > The newly defined SRLAB2 color model is a compromise between the simplicity of CIELAB and
+    /// the correctness of CIECAM02.
+    ///
+    /// By combining whitepoint adaption in the (more) precise model of CIECAM02 while performing
+    /// the transfer function in the cone response space, this achieves a good uniformity by
+    /// simply modelling the human perception properly. It just leaves out the surround luminance
+    /// model in the vastly more complex CIECAM02.
+    ///
+    /// Reference: <https://www.magnetkern.de/srlab2.html>
+    SrLab2 {
+        whitepoint: Whitepoint,
+    },
 }
 
 /// Transfer functions from encoded chromatic samples to physical quantity.
@@ -657,6 +671,7 @@ impl Color {
             (self, parts),
             (Color::Rgb { .. }, R | G | B | Rgb | Rgba | Rgb_ | _Rgb | Bgr_ | _Bgr)
             | (Color::Oklab, LCh | LChA)
+            | (Color::SrLab2 { .. } , LCh | LChA)
             // With scalars pseudo color, everything goes.
             // Essentially, the user assigns which meaning each channel has.
             | (Color::Scalars { .. }, _)
