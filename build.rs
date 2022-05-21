@@ -119,6 +119,18 @@ fn main() -> Result<(), BuildError> {
             name_overwrite: Some("oklab_decode"),
         },
         SimpleSource {
+            path: "src/shaders/srlab2.frag",
+            kind: ShaderKind::Fragment,
+            entry: "srlab2_encode",
+            name_overwrite: Some("srlab2_encode"),
+        },
+        SimpleSource {
+            path: "src/shaders/srlab2.frag",
+            kind: ShaderKind::Fragment,
+            entry: "srlab2_decode",
+            name_overwrite: Some("srlab2_decode"),
+        },
+        SimpleSource {
             path: "src/shaders/box3.frag",
             kind: ShaderKind::Fragment,
             entry: "main",

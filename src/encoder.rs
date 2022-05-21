@@ -429,7 +429,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             } => {
                 let parameter = shaders::stage::XyzParameter {
                     transfer: match parts {
-                        SampleParts::LChA => shaders::stage::Transfer::Oklab,
+                        SampleParts::LChA => shaders::stage::Transfer::LabLch,
                         SampleParts::LabA => shaders::stage::Transfer::Rgb(Transfer::Linear),
                         _ => return Err(LaunchError::InternalCommandError(line!())),
                     },
@@ -438,6 +438,39 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 };
 
                 // FIXME: duplicate code.
+                let result = parameter.linear_format();
+                let stage_kind = parameter
+                    .stage_kind()
+                    // Unsupported format.
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                staging = Some(StagingDescriptor {
+                    stage_kind,
+                    parameter,
+                });
+
+                result
+            }
+            // FIXME: very, very duplicate code.
+            Texel {
+                block: Block::Pixel,
+                samples:
+                    Samples {
+                        bits,
+                        parts: parts @ (SampleParts::LChA | SampleParts::LabA),
+                    },
+                color: Color::SrLab2 { .. },
+            } => {
+                let parameter = shaders::stage::XyzParameter {
+                    transfer: match parts {
+                        SampleParts::LChA => shaders::stage::Transfer::LabLch,
+                        SampleParts::LabA => shaders::stage::Transfer::Rgb(Transfer::Linear),
+                        _ => return Err(LaunchError::InternalCommandError(line!())),
+                    },
+                    parts: SampleParts::LChA,
+                    bits,
+                };
+
                 let result = parameter.linear_format();
                 let stage_kind = parameter
                     .stage_kind()

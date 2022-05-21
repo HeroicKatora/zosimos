@@ -106,7 +106,7 @@ const uint TRANSFER_Smpte2084 = 8;
 const uint TRANSFER_Bt2100Pq = 9;
 const uint TRANSFER_Bt2100Hlg = 10;
 const uint TRANSFER_LinearScene = 11;
-const uint TRANSFER_Oklab = 0x100;
+const uint TRANSFER_LabLch = 0x100;
 
 uint get_transfer() {
   return parameter.space.x;
@@ -755,7 +755,7 @@ vec4 parts_transfer(vec4 linear, uint fnk) {
   case TRANSFER_Bt2100Hlg:
   // FIXME: unimplemented.
   return linear;
-  case TRANSFER_Oklab:
+  case TRANSFER_LabLch:
   return vec4(transfer_lab_to_lch(linear.xyz), linear.a);
   }
   return linear;
@@ -786,7 +786,7 @@ vec4 parts_untransfer(vec4 nonlin, uint fnk) {
   case TRANSFER_Bt2100Hlg:
   // FIXME: unimplemented.
   return nonlin;
-  case TRANSFER_Oklab:
+  case TRANSFER_LabLch:
   return vec4(transfer_lch_to_lab(nonlin.xyz), nonlin.a);
   }
   return nonlin;

@@ -9,7 +9,7 @@ use wgpu::TextureFormat;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Transfer {
     Rgb(RgbTransfer),
-    Oklab,
+    LabLch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,7 +159,7 @@ impl Transfer {
     pub fn as_u32(self) -> u32 {
         match self {
             Transfer::Rgb(t) => t as u32,
-            Transfer::Oklab => 0x100,
+            Transfer::LabLch => 0x100,
         }
     }
 }

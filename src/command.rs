@@ -12,8 +12,8 @@ use crate::program::{
     Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
-pub use crate::shaders::fractal_noise::Shader as FractalNoise;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
+pub use crate::shaders::fractal_noise::Shader as FractalNoise;
 
 use crate::shaders::{self, FragmentShader, PaintOnTopKind, ShaderInvocation};
 
@@ -249,6 +249,18 @@ pub(crate) enum ColorConversion {
     OklabToXyz {
         /// The matrix converting from XYZ to target.
         from_xyz_matrix: RowMatrix,
+    },
+    XyzToSrLab2 {
+        /// The matrix converting source to XYZ.
+        to_xyz_matrix: RowMatrix,
+        /// The SrLAb2 target whitepoint.
+        whitepoint: Whitepoint,
+    },
+    SrLab2ToXyz {
+        /// The matrix converting from XYZ to target.
+        from_xyz_matrix: RowMatrix,
+        /// The SrLAb2 source whitepoint.
+        whitepoint: Whitepoint,
     },
 }
 
@@ -531,6 +543,10 @@ impl CommandBuffer {
         // almost correct, but not all GPUs will support all texel kinds. In particular
         // some channel orders or bit-field channels are likely to be unsupported. In these
         // cases, we will later add some temporary conversion.
+
+        // FIXME: this is growing a bit ugly with non-rgb color spaces. We should find a more
+        // general way to handle these, and in particular also handle non-rgb-to-non-rgb because
+        // that's already happening in the command encoder anyways..
         match (&desc_src.texel.color, &texel.color) {
             (
                 Color::Rgb {
@@ -571,6 +587,32 @@ impl CommandBuffer {
             ) => {
                 conversion = ColorConversion::OklabToXyz {
                     from_xyz_matrix: primary.to_xyz(Whitepoint::D65),
+                };
+            }
+            (
+                Color::Rgb {
+                    primary,
+                    whitepoint: rgb_wp,
+                    ..
+                },
+                Color::SrLab2 { whitepoint },
+            ) => {
+                conversion = ColorConversion::XyzToSrLab2 {
+                    to_xyz_matrix: primary.to_xyz(*rgb_wp),
+                    whitepoint: *whitepoint,
+                };
+            }
+            (
+                Color::SrLab2 { whitepoint },
+                Color::Rgb {
+                    primary,
+                    whitepoint: rgb_wp,
+                    ..
+                },
+            ) => {
+                conversion = ColorConversion::SrLab2ToXyz {
+                    from_xyz_matrix: primary.to_xyz(*rgb_wp),
+                    whitepoint: *whitepoint,
                 };
             }
             _ => {
@@ -1379,12 +1421,12 @@ impl CommandBuffer {
                         OperandKind::Construct => {
                             arguments = &[][..];
                             reg_to_texture.insert(Register(idx), texture);
-                        },
+                        }
                         OperandKind::Unary(reg) => {
                             op_unary = [reg_to_texture[reg]];
                             arguments = &op_unary[..];
                             reg_to_texture.insert(Register(idx), texture);
-                        },
+                        }
                         OperandKind::Binary { lhs, rhs } => {
                             op_binary = [reg_to_texture[lhs], reg_to_texture[rhs]];
                             arguments = &op_binary[..];
@@ -1402,7 +1444,7 @@ impl CommandBuffer {
                             shader: FragmentShader::Dynamic(command.clone()),
                         },
                     })
-                },
+                }
                 // In case we add a new case.
                 #[allow(unreachable_patterns)]
                 _ => {
@@ -1512,6 +1554,23 @@ impl ColorConversion {
             ColorConversion::OklabToXyz { from_xyz_matrix } => {
                 let from_xyz_matrix = from_xyz_matrix.inv();
                 FragmentShader::Oklab(shaders::oklab::Shader::with_decode(from_xyz_matrix))
+            }
+            ColorConversion::XyzToSrLab2 {
+                to_xyz_matrix,
+                whitepoint,
+            } => FragmentShader::SrLab2(shaders::srlab2::Shader::with_encode(
+                *to_xyz_matrix,
+                *whitepoint,
+            )),
+            ColorConversion::SrLab2ToXyz {
+                from_xyz_matrix,
+                whitepoint,
+            } => {
+                let from_xyz_matrix = from_xyz_matrix.inv();
+                FragmentShader::SrLab2(shaders::srlab2::Shader::with_decode(
+                    from_xyz_matrix,
+                    *whitepoint,
+                ))
             }
         }
     }

@@ -10,6 +10,7 @@ pub mod fractal_noise;
 pub mod inject;
 pub mod oklab;
 pub mod palette;
+pub mod srlab2;
 pub mod stage;
 
 /// A vertex box shader, rendering a sole quad with given vertex and uv coordinate system.
@@ -80,6 +81,13 @@ impl FragmentShaderData for ShaderInvocation {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub(crate) enum Direction {
+    Encode = 0,
+    Decode = 1,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum FragmentShaderKey {
     PaintOnTop(PaintOnTopKind),
@@ -99,7 +107,9 @@ pub(crate) enum FragmentShaderKey {
     /// A shader mixing two colors, logically injecting ones channel into the other.
     Inject,
     /// A shader transforming between XYZ and Oklab color space.
-    OklabTransform(bool),
+    OklabTransform(Direction),
+    /// A shader transforming between XYZ and SrLab2 color space.
+    Srlab2Transform(Direction),
     /// A convolution with a 3-by-3 box function.
     Box3,
     /// The key is the address of some dynamic object, unique for the duration of the pipeline.
@@ -117,6 +127,7 @@ pub(crate) enum FragmentShader {
     Bilinear(self::bilinear::Shader),
     Inject(self::inject::Shader),
     Oklab(self::oklab::Shader),
+    SrLab2(self::srlab2::Shader),
     Box3(self::box3::Shader),
     Dynamic(ShaderInvocation),
 }
@@ -132,6 +143,7 @@ impl FragmentShader {
             FragmentShader::Bilinear(bilinear) => bilinear,
             FragmentShader::Inject(inject) => inject,
             FragmentShader::Oklab(oklab) => oklab,
+            FragmentShader::SrLab2(srlab2) => srlab2,
             FragmentShader::Box3(box3) => box3,
             FragmentShader::Dynamic(dynamic) => dynamic,
         }

@@ -36,11 +36,7 @@ fn mandelbrot() {
         }
 
         fn data(&self, mut data: command::ShaderData<'_>) -> Descriptor {
-            data.set_data(&[
-                self.scale.0,
-                self.scale.1,
-                0.6, 0.5,
-            ]);
+            data.set_data(&[self.scale.0, self.scale.1, 0.6, 0.5]);
 
             self.descriptor.clone()
         }
@@ -72,20 +68,15 @@ fn mandelbrot() {
                 bits: buffer::SampleBits::Int8x4,
                 parts: buffer::SampleParts::LChA,
             },
-        }
+        },
     }));
 
-    let srgb = commands.color_convert(brot, buffer::Texel::with_srgb_image(&target))
+    let srgb = commands
+        .color_convert(brot, buffer::Texel::with_srgb_image(&target))
         .expect("Valid for color conversion");
-    let (output, _outformat) = commands.output(srgb)
-        .expect("Valid for output");
+    let (output, _outformat) = commands.output(srgb).expect("Valid for output");
 
-    let result = run_once_with_output(
-        commands,
-        &mut pool,
-        vec![],
-        retire_with_one_image(output),
-    );
+    let result = run_once_with_output(commands, &mut pool, vec![], retire_with_one_image(output));
 
     let image = pool.entry(result).unwrap();
     util::assert_reference(image.into(), "mandelbrot.png.crc");
