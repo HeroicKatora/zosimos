@@ -3,7 +3,8 @@ use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
 use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer, Texel};
-use crate::{program, run::Gpu};
+use crate::program::Capabilities;
+use crate::run::{block_on, Gpu};
 
 /// Holds a number of image buffers, their descriptors and meta data.
 ///
@@ -106,7 +107,8 @@ impl Pool {
         device: wgpu::DeviceDescriptor,
     ) -> Result<GpuKey, wgpu::RequestDeviceError> {
         let request = adapter.request_device(&device, None);
-        let (device, queue) = program::block_on(request, None)?;
+        let request = Box::pin(request);
+        let (device, queue) = block_on(request, None)?;
         let gpu_key = self.devices.insert(Gpu { device, queue });
         Ok(GpuKey(gpu_key))
     }
@@ -119,13 +121,13 @@ impl Pool {
         GpuKey(self.devices.insert(gpu))
     }
 
-    pub(crate) fn select_device(&mut self, caps: &program::Capabilities) -> Option<(GpuKey, Gpu)> {
+    pub(crate) fn select_device(&mut self, caps: &Capabilities) -> Option<(GpuKey, Gpu)> {
         let key = self.select_device_key(caps)?;
         let device = self.devices.remove(key).unwrap();
         Some((GpuKey(key), device))
     }
 
-    fn select_device_key(&mut self, _: &program::Capabilities) -> Option<DefaultKey> {
+    fn select_device_key(&mut self, _: &Capabilities) -> Option<DefaultKey> {
         // FIXME: check device against capabilities.
         self.devices.keys().next()
     }

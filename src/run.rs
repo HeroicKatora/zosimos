@@ -1,4 +1,4 @@
-use core::{iter::once, num::NonZeroU32, pin::Pin};
+use core::{future::Future, iter::once, marker::Unpin, num::NonZeroU32, pin::Pin};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -54,8 +54,14 @@ pub struct Environment<'pool> {
 
 /// A running `Executable`.
 pub struct Execution {
+    /// The gpu processor handles.
+    pub(crate) gpu: core::cell::RefCell<Gpu>,
+    /// All the host state of execution.
+    pub(crate) host: Host,
+}
+
+pub(crate) struct Host {
     pub(crate) machine: Machine,
-    pub(crate) gpu: Gpu,
     pub(crate) descriptors: Descriptors,
     pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
     pub(crate) buffers: Vec<Image>,
@@ -119,22 +125,33 @@ pub(crate) struct Gpu {
     pub(crate) queue: Queue,
 }
 
-type DynStep = dyn core::future::Future<Output = Result<Cleanup, StepError>>;
-
-struct DevicePolled<'exe> {
-    future: Pin<Box<DynStep>>,
-    execution: &'exe mut Execution,
+trait WithGpu {
+    fn with_gpu<T>(&self, once: impl FnOnce(&mut Gpu) -> T) -> T;
 }
 
-enum Cleanup {
-    Buffers {
-        buffers: Vec<wgpu::Buffer>,
-        image_data: Vec<Image>,
-    },
+impl WithGpu for core::cell::RefCell<Gpu> {
+    fn with_gpu<T>(&self, once: impl FnOnce(&mut Gpu) -> T) -> T {
+        let mut borrow = self.borrow_mut();
+        once(&mut *borrow)
+    }
+}
+
+impl WithGpu for &'_ core::cell::RefCell<Gpu> {
+    fn with_gpu<T>(&self, once: impl FnOnce(&mut Gpu) -> T) -> T {
+        let mut borrow = self.borrow_mut();
+        once(&mut *borrow)
+    }
+}
+
+type DynStep<'exe> = dyn core::future::Future<Output = Result<(), StepError>> + 'exe;
+
+struct DevicePolled<'exe, T: WithGpu> {
+    future: Pin<Box<DynStep<'exe>>>,
+    gpu: T,
 }
 
 pub struct SyncPoint<'exe> {
-    future: Option<DevicePolled<'exe>>,
+    future: Option<DevicePolled<'exe, &'exe core::cell::RefCell<Gpu>>>,
     marker: core::marker::PhantomData<&'exe mut Execution>,
 }
 
@@ -225,14 +242,16 @@ impl Executable {
         self.check_satisfiable(&mut env)?;
 
         Ok(Execution {
-            machine: Machine::new(Arc::clone(&self.instructions)),
-            gpu: env.gpu,
-            descriptors: Descriptors::default(),
-            command_encoder: None,
-            buffers: env.buffers,
-            binary_data: self.binary_data.clone(),
-            io_map: self.io_map.clone(),
-            debug_stack: vec![],
+            gpu: env.gpu.into(),
+            host: Host {
+                machine: Machine::new(Arc::clone(&self.instructions)),
+                descriptors: Descriptors::default(),
+                command_encoder: None,
+                buffers: env.buffers,
+                binary_data: self.binary_data.clone(),
+                io_map: self.io_map.clone(),
+                debug_stack: vec![],
+            },
         })
     }
 
@@ -240,14 +259,16 @@ impl Executable {
     pub fn launch_once(self, mut env: Environment) -> Result<Execution, StartError> {
         self.check_satisfiable(&mut env)?;
         Ok(Execution {
-            machine: Machine::new(Arc::clone(&self.instructions)),
-            gpu: env.gpu,
-            descriptors: self.descriptors,
-            command_encoder: None,
-            buffers: env.buffers,
-            binary_data: self.binary_data,
-            io_map: self.io_map.clone(),
-            debug_stack: vec![],
+            gpu: env.gpu.into(),
+            host: Host {
+                machine: Machine::new(Arc::clone(&self.instructions)),
+                descriptors: self.descriptors,
+                command_encoder: None,
+                buffers: env.buffers,
+                binary_data: self.binary_data,
+                io_map: self.io_map.clone(),
+                debug_stack: vec![],
+            },
         })
     }
 
@@ -348,39 +369,80 @@ impl Execution {
     pub(crate) fn new(init: InitialState) -> Self {
         init.device.start_capture();
         Execution {
-            machine: Machine::new(init.instructions),
             gpu: Gpu {
                 device: init.device,
                 queue: init.queue,
+            }
+            .into(),
+            host: Host {
+                machine: Machine::new(init.instructions),
+                descriptors: Descriptors::default(),
+                buffers: init.buffers,
+                command_encoder: None,
+                binary_data: init.binary_data,
+                io_map: Arc::new(init.io_map),
+                debug_stack: vec![],
             },
-            descriptors: Descriptors::default(),
-            buffers: init.buffers,
-            command_encoder: None,
-            binary_data: init.binary_data,
-            io_map: Arc::new(init.io_map),
-            debug_stack: vec![],
         }
     }
 
     /// Check if the machine is still running.
     pub fn is_running(&self) -> bool {
-        self.machine.instruction_pointer < self.machine.instructions.len()
+        self.host.machine.instruction_pointer < self.host.machine.instructions.len()
     }
 
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
-        let instruction_pointer = self.machine.instruction_pointer;
+        let instruction_pointer = self.host.machine.instruction_pointer;
 
-        match self.step_inner() {
-            Ok(sync) => Ok(sync),
-            Err(mut error) => {
-                // Add tracing information..
-                error.instruction_pointer = instruction_pointer;
-                Err(error)
+        let gpu = &self.gpu;
+        let host = &mut self.host;
+        let async_step = async move {
+            match host.step_inner(gpu).await {
+                Err(mut error) => {
+                    // Add tracing information..
+                    error.instruction_pointer = instruction_pointer;
+                    Err(error)
+                }
+                other => other,
             }
-        }
+        };
+
+        // TODO: test the waters with one no-waker poll?
+        Ok(SyncPoint {
+            future: Some(DevicePolled {
+                future: Box::pin(async_step),
+                gpu: &self.gpu,
+            }),
+            marker: core::marker::PhantomData,
+        })
     }
 
-    fn step_inner(&mut self) -> Result<SyncPoint<'_>, StepError> {
+    /// Stop the execution.
+    ///
+    /// Discards all resources that are still held like buffers, the device, etc.
+    pub fn retire(self) -> Result<(), RetireError> {
+        let mut pool = Pool::new();
+
+        let retire = self.retire_gracefully(&mut pool);
+        retire.finish_by_discarding();
+
+        drop(pool);
+        Ok(())
+    }
+
+    /// Stop the execution, depositing all resources into the provided pool.
+    #[must_use = "You won't get the ids of outputs."]
+    pub fn retire_gracefully(self, pool: &mut Pool) -> Retire<'_> {
+        self.gpu.with_gpu(|gpu| gpu.device.stop_capture());
+        Retire {
+            execution: self,
+            pool,
+        }
+    }
+}
+
+impl Host {
+    async fn step_inner(&mut self, gpu: impl WithGpu) -> Result<(), StepError> {
         struct DumpFrame<'stack> {
             stack: Option<&'stack mut Vec<Frame>>,
         }
@@ -411,17 +473,17 @@ impl Execution {
                     .descriptors
                     .bind_group_layout(desc, &mut entry_buffer)?;
                 // eprintln!("Made {}: {:?}", self.descriptors.bind_group_layouts.len(), group);
-                let group = self.gpu.device.create_bind_group_layout(&group);
+                let group = gpu.with_gpu(|gpu| gpu.device.create_bind_group_layout(&group));
                 self.descriptors.bind_group_layouts.push(group);
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             Low::BindGroup(desc) => {
                 let mut entry_buffer = vec![];
                 let group = self.descriptors.bind_group(desc, &mut entry_buffer)?;
                 // eprintln!("{}: {:?}", desc.layout_idx, group);
-                let group = self.gpu.device.create_bind_group(&group);
+                let group = gpu.with_gpu(|gpu| gpu.device.create_bind_group(&group));
                 self.descriptors.bind_groups.push(group);
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             Low::Buffer(desc) => {
                 let desc = wgpu::BufferDescriptor {
@@ -431,9 +493,9 @@ impl Execution {
                     mapped_at_creation: false,
                 };
 
-                let buffer = self.gpu.device.create_buffer(&desc);
+                let buffer = gpu.with_gpu(|gpu| gpu.device.create_buffer(&desc));
                 self.descriptors.buffers.push(buffer);
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             Low::BufferInit(desc) => {
                 use wgpu::util::DeviceExt;
@@ -443,9 +505,9 @@ impl Execution {
                     usage: desc.usage.to_wgpu(),
                 };
 
-                let buffer = self.gpu.device.create_buffer_init(&desc);
+                let buffer = gpu.with_gpu(|gpu| gpu.device.create_buffer_init(&desc));
                 self.descriptors.buffers.push(buffer);
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             Low::Shader(desc) => {
                 let shader;
@@ -455,26 +517,26 @@ impl Execution {
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
 
-                    shader = self.gpu.device.create_shader_module(&desc);
+                    shader = gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc));
                 } else {
-                    let desc = wgpu::ShaderModuleDescriptorSpirV {
+                    let desc = wgpu::ShaderModuleDescriptor {
                         label: Some(desc.name),
-                        source: desc.source_spirv.as_ref().into(),
+                        source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
 
                     // SAFETY: who knows. FIXME: once naga's validation is good enough.
-                    shader = unsafe { self.gpu.device.create_shader_module_spirv(&desc) };
+                    shader = gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc));
                 };
 
                 self.descriptors.shaders.push(shader);
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             Low::PipelineLayout(desc) => {
                 let mut entry_buffer = vec![];
                 let layout = self.descriptors.pipeline_layout(desc, &mut entry_buffer)?;
-                let layout = self.gpu.device.create_pipeline_layout(&layout);
+                let layout = gpu.with_gpu(|gpu| gpu.device.create_pipeline_layout(&layout));
                 self.descriptors.pipeline_layouts.push(layout);
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             Low::Sampler(desc) => {
                 let desc = wgpu::SamplerDescriptor {
@@ -491,9 +553,9 @@ impl Execution {
                     anisotropy_clamp: None,
                     border_color: desc.border_color,
                 };
-                let sampler = self.gpu.device.create_sampler(&desc);
+                let sampler = gpu.with_gpu(|gpu| gpu.device.create_sampler(&desc));
                 self.descriptors.sampler.push(sampler);
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             Low::TextureView(desc) => {
                 let texture = self
@@ -513,7 +575,7 @@ impl Execution {
                 };
                 let view = texture.create_view(&desc);
                 self.descriptors.texture_views.push(view);
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             Low::Texture(desc) => {
                 use wgpu::TextureUsages as U;
@@ -542,9 +604,9 @@ impl Execution {
                         }
                     },
                 };
-                let texture = self.gpu.device.create_texture(&desc);
+                let texture = gpu.with_gpu(|gpu| gpu.device.create_texture(&desc));
                 self.descriptors.textures.push(texture);
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             Low::RenderPipeline(desc) => {
                 let mut vertex_buffers = vec![];
@@ -553,9 +615,9 @@ impl Execution {
                 let pipeline =
                     self.descriptors
                         .pipeline(desc, &mut vertex_buffers, &mut fragments)?;
-                let pipeline = self.gpu.device.create_render_pipeline(&pipeline);
+                let pipeline = gpu.with_gpu(|gpu| gpu.device.create_render_pipeline(&pipeline));
                 self.descriptors.render_pipelines.push(pipeline);
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             Low::BeginCommands => {
                 if self.command_encoder.is_some() {
@@ -564,8 +626,9 @@ impl Execution {
 
                 let descriptor = wgpu::CommandEncoderDescriptor { label: None };
 
-                self.command_encoder = Some(self.gpu.device.create_command_encoder(&descriptor));
-                Ok(SyncPoint::NO_SYNC)
+                let encoder = gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+                self.command_encoder = Some(encoder);
+                Ok(())
             }
             Low::BeginRenderPass(descriptor) => {
                 let mut attachment_buf = vec![];
@@ -581,13 +644,13 @@ impl Execution {
                 drop(attachment_buf);
                 self.machine.render_pass(&self.descriptors, pass)?;
 
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             Low::EndCommands => match self.command_encoder.take() {
                 None => Err(StepError::InvalidInstruction(line!())),
                 Some(encoder) => {
                     self.descriptors.command_buffers.push(encoder.finish());
-                    Ok(SyncPoint::NO_SYNC)
+                    Ok(())
                 }
             },
             &Low::RunTopCommand => {
@@ -596,8 +659,8 @@ impl Execution {
                     .command_buffers
                     .pop()
                     .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
-                self.gpu.queue.submit(once(command));
-                Ok(SyncPoint::NO_SYNC)
+                gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                Ok(())
             }
             &Low::RunTopToBot(many) => {
                 if many > self.descriptors.command_buffers.len() {
@@ -605,8 +668,8 @@ impl Execution {
                 }
 
                 let commands = self.descriptors.command_buffers.drain(many..);
-                self.gpu.queue.submit(commands.rev());
-                Ok(SyncPoint::NO_SYNC)
+                gpu.with_gpu(|gpu| gpu.queue.submit(commands.rev()));
+                Ok(())
             }
             &Low::RunBotToTop(many) => {
                 if many > self.descriptors.command_buffers.len() {
@@ -614,8 +677,8 @@ impl Execution {
                 }
 
                 let commands = self.descriptors.command_buffers.drain(many..);
-                self.gpu.queue.submit(commands);
-                Ok(SyncPoint::NO_SYNC)
+                gpu.with_gpu(|gpu| gpu.queue.submit(commands));
+                Ok(())
             }
             &Low::WriteImageToBuffer {
                 source_image,
@@ -652,7 +715,7 @@ impl Execution {
                  * optimization ideas.
                 if layout.bytes_per_row == target_layout.bytes_per_row {
                     // Simply case, just write the whole buffer.
-                    self.gpu.queue.write_buffer(buffer.buffer, 0, data);
+                    gpu.queue.write_buffer(buffer.buffer, 0, data);
                     return Ok(SyncPoint::NO_SYNC)
                 }
                 */
@@ -667,57 +730,36 @@ impl Execution {
                 let bytes_per_texel = target_layout.bytes_per_texel;
                 let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
-                // Complex case, we need to instrument our own copy.
-                let buffers = core::mem::take(&mut self.descriptors.buffers);
-                let mut image_data = core::mem::take(&mut self.buffers);
+                let image = &mut self.buffers[source_image.0].data;
+                let buffer = &self.descriptors.buffers[target_buffer.0];
 
-                let box_me = async move {
-                    {
-                        let image = &mut image_data[source_image.0].data;
-                        let buffer = &buffers[target_buffer.0];
+                let slice = buffer.slice(..);
+                slice
+                    .map_async(wgpu::MapMode::Write)
+                    .await
+                    .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
 
-                        let slice = buffer.slice(..);
-                        slice.map_async(wgpu::MapMode::Write).await.map_err(
-                            |wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()),
-                        )?;
+                let mut data = slice.get_mapped_range_mut();
 
-                        let mut data = slice.get_mapped_range_mut();
+                // TODO: defensive programming, don't assume cast works.
+                let target_pitch = bytes_per_row as usize;
+                let source_pitch = image.layout().bytes_per_row as usize;
 
-                        // TODO: defensive programming, don't assume cast works.
-                        let target_pitch = bytes_per_row as usize;
-                        let source_pitch = image.layout().bytes_per_row as usize;
+                // We've checked that this image can be seen as host bytes.
+                let source: &[u8] = image.as_bytes().unwrap();
+                let target: &mut [u8] = &mut data[..];
 
-                        // We've checked that this image can be seen as host bytes.
-                        let source: &[u8] = image.as_bytes().unwrap();
-                        let target: &mut [u8] = &mut data[..];
+                for x in 0..height {
+                    let source_row = &source[(x as usize * source_pitch)..][..source_pitch];
+                    let target_row = &mut target[(x as usize * target_pitch)..][..target_pitch];
 
-                        for x in 0..height {
-                            let source_row = &source[(x as usize * source_pitch)..][..source_pitch];
-                            let target_row =
-                                &mut target[(x as usize * target_pitch)..][..target_pitch];
+                    target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
+                }
 
-                            target_row[..bytes_to_copy]
-                                .copy_from_slice(&source_row[..bytes_to_copy]);
-                        }
-                    }
+                drop(data);
+                buffer.unmap();
 
-                    buffers[target_buffer.0].unmap();
-
-                    Ok(Cleanup::Buffers {
-                        buffers,
-                        image_data,
-                    })
-                };
-
-                drop(_dump_on_panic);
-
-                Ok(SyncPoint {
-                    future: Some(DevicePolled {
-                        future: Box::pin(box_me),
-                        execution: self,
-                    }),
-                    marker: core::marker::PhantomData,
-                })
+                Ok(())
             }
             &Low::CopyBufferToTexture {
                 source_buffer,
@@ -753,7 +795,7 @@ impl Execution {
 
                 encoder.copy_buffer_to_texture(buffer, texture, extent);
 
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             &Low::CopyTextureToBuffer {
                 source_texture,
@@ -782,7 +824,7 @@ impl Execution {
 
                 encoder.copy_texture_to_buffer(texture, buffer, extent);
 
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             &Low::CopyBufferToBuffer {
                 source_buffer,
@@ -806,7 +848,7 @@ impl Execution {
 
                 encoder.copy_buffer_to_buffer(source, 0, target, 0, size);
 
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             &Low::ReadBuffer {
                 source_buffer,
@@ -815,9 +857,6 @@ impl Execution {
                 size,
                 target_image,
             } => {
-                let buffers = core::mem::take(&mut self.descriptors.buffers);
-                let mut image_data = core::mem::take(&mut self.buffers);
-
                 if offset != (0, 0) {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
@@ -831,93 +870,55 @@ impl Execution {
                 let bytes_per_texel = source_layout.bytes_per_texel;
                 let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
-                let box_me = async move {
-                    {
-                        let buffer = &buffers[source_buffer.0];
-                        let image = &mut image_data[target_image.0].data;
+                let buffer = &self.descriptors.buffers[source_buffer.0];
+                let image = &mut self.buffers[target_image.0].data;
 
-                        let slice = buffer.slice(..);
-                        slice.map_async(wgpu::MapMode::Read).await.map_err(
-                            |wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()),
-                        )?;
+                let slice = buffer.slice(..);
+                slice
+                    .map_async(wgpu::MapMode::Read)
+                    .await
+                    .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
 
-                        let data = slice.get_mapped_range();
+                let data = slice.get_mapped_range();
 
-                        // TODO: defensive programming, don't assume cast works.
-                        let source_pitch = bytes_per_row as usize;
-                        let target_pitch = image.layout().bytes_per_row as usize;
+                // TODO: defensive programming, don't assume cast works.
+                let source_pitch = bytes_per_row as usize;
+                let target_pitch = image.layout().bytes_per_row as usize;
 
-                        let source: &[u8] = &data[..];
-                        let target: &mut [u8] = image.as_bytes_mut().unwrap();
+                let source: &[u8] = &data[..];
+                let target: &mut [u8] = image.as_bytes_mut().unwrap();
 
-                        for x in 0..height {
-                            let source_row = &source[(x as usize * source_pitch)..][..source_pitch];
-                            let target_row =
-                                &mut target[(x as usize * target_pitch)..][..target_pitch];
+                for x in 0..height {
+                    let source_row = &source[(x as usize * source_pitch)..][..source_pitch];
+                    let target_row = &mut target[(x as usize * target_pitch)..][..target_pitch];
 
-                            target_row[..bytes_to_copy]
-                                .copy_from_slice(&source_row[..bytes_to_copy]);
-                        }
-                    }
+                    target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
+                }
 
-                    Ok(Cleanup::Buffers {
-                        buffers,
-                        image_data,
-                    })
-                };
+                drop(data);
+                buffer.unmap();
 
-                drop(_dump_on_panic);
-
-                Ok(SyncPoint {
-                    future: Some(DevicePolled {
-                        future: Box::pin(box_me),
-                        execution: self,
-                    }),
-                    marker: core::marker::PhantomData,
-                })
+                Ok(())
             }
             Low::StackFrame(frame) => {
                 if let Some(ref mut frames) = _dump_on_panic.stack {
                     frames.push(frame.clone());
                 }
 
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             Low::StackPop => {
                 if let Some(ref mut frames) = _dump_on_panic.stack {
                     let _ = frames.pop();
                 }
 
-                Ok(SyncPoint::NO_SYNC)
+                Ok(())
             }
             inner => {
                 return Err(StepError::BadInstruction(BadInstruction {
                     inner: format!("{:?}", inner),
                 }))
             }
-        }
-    }
-
-    /// Stop the execution.
-    ///
-    /// Discards all resources that are still held like buffers, the device, etc.
-    pub fn retire(self) -> Result<(), RetireError> {
-        let mut pool = Pool::new();
-
-        let retire = self.retire_gracefully(&mut pool);
-        retire.finish_by_discarding();
-
-        drop(pool);
-        Ok(())
-    }
-
-    /// Stop the execution, depositing all resources into the provided pool.
-    #[must_use = "You won't get the ids of outputs."]
-    pub fn retire_gracefully(self, pool: &mut Pool) -> Retire<'_> {
-        self.gpu.device.stop_capture();
-        Retire {
-            execution: self,
-            pool,
         }
     }
 }
@@ -1305,6 +1306,7 @@ impl Retire<'_> {
     pub fn output(&mut self, reg: Register) -> Result<PoolImage<'_>, RetireError> {
         let index = self
             .execution
+            .host
             .io_map
             .outputs
             .get(&reg)
@@ -1315,7 +1317,7 @@ impl Retire<'_> {
 
         // FIXME: don't take some random image, use the right one..
         // Also: should we leave the actual image? This would allow restarting the pipeline.
-        let image = &mut self.execution.buffers[index];
+        let image = &mut self.execution.host.buffers[index];
 
         let descriptor = Descriptor {
             layout: image.data.layout().clone(),
@@ -1332,6 +1334,7 @@ impl Retire<'_> {
     pub fn output_key(&self, reg: Register) -> Result<Option<PoolKey>, RetireError> {
         let index = self
             .execution
+            .host
             .io_map
             .outputs
             .get(&reg)
@@ -1340,7 +1343,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        Ok(self.execution.buffers[index].key)
+        Ok(self.execution.host.buffers[index].key)
     }
 
     /// Drop any temporary buffers that had been allocated during execution.
@@ -1362,7 +1365,8 @@ impl Retire<'_> {
     /// You might wish to call [`prune`](Self::prune) to prevent such buffers from staying
     /// allocated in the pool in the first place.
     pub fn finish(self) {
-        self.pool.reinsert_device(self.execution.gpu);
+        let gpu = self.execution.gpu.into_inner();
+        self.pool.reinsert_device(gpu);
     }
 
     /// Explicitly discard all remaining items.
@@ -1381,29 +1385,15 @@ impl SyncPoint<'_> {
     ///
     /// This will also poll the device if required (on native targets).
     pub fn block_on(&mut self) -> Result<(), StepError> {
-        use crate::program::block_on;
         match self.future.take() {
             None => Ok(()),
             Some(polled) => {
-                let execution = polled.execution;
-                match block_on(polled.future, Some(&execution.gpu.device))? {
-                    Cleanup::Buffers {
-                        buffers,
-                        image_data,
-                    } => {
-                        execution.descriptors.buffers = buffers;
-                        execution.buffers = image_data;
-                        Ok(())
-                    }
-                }
+                let DevicePolled { future, gpu } = polled;
+                block_on(future, Some(gpu))?;
+                Ok(())
             }
         }
     }
-
-    const NO_SYNC: Self = SyncPoint {
-        future: None,
-        marker: core::marker::PhantomData,
-    };
 }
 
 impl Drop for SyncPoint<'_> {
@@ -1411,5 +1401,63 @@ impl Drop for SyncPoint<'_> {
         if self.future.is_some() {
             let _ = self.block_on();
         }
+    }
+}
+
+/// Block on an async future that may depend on a device being polled.
+pub(crate) fn block_on<F, T>(future: F, device: Option<&core::cell::RefCell<Gpu>>) -> T
+where
+    F: Future<Output = T> + Unpin,
+    T: 'static,
+{
+    fn spin_block<R>(mut f: impl Future<Output = R> + Unpin) -> R {
+        use core::hint::spin_loop;
+        use core::task::{Context, Poll};
+
+        let mut f = Pin::new(&mut f);
+
+        // create the context
+        let waker = waker_fn::waker_fn(|| {});
+        let mut ctx = Context::from_waker(&waker);
+
+        // poll future in a loop
+        loop {
+            match f.as_mut().poll(&mut ctx) {
+                Poll::Ready(o) => return o,
+                Poll::Pending => spin_loop(),
+            }
+        }
+    }
+
+    if let Some(device) = device.as_ref() {
+        // We have to manually poll the device.  That is, we ensure that it keeps being polled
+        // and each time will also poll the device. This isn't super efficient but a dirty way
+        // to actually finish this future.
+        struct DevicePolled<'dev, F, D: WithGpu> {
+            future: F,
+            device: &'dev D,
+        }
+
+        impl<F, D: WithGpu> Future for DevicePolled<'_, F, D>
+        where
+            F: Future + Unpin,
+        {
+            type Output = F::Output;
+            fn poll(
+                self: core::pin::Pin<&mut Self>,
+                ctx: &mut core::task::Context,
+            ) -> core::task::Poll<F::Output> {
+                self.as_ref()
+                    .device
+                    .with_gpu(|gpu| gpu.device.poll(wgpu::Maintain::Poll));
+                // Ugh, noooo...
+                ctx.waker().wake_by_ref();
+                Pin::new(&mut self.get_mut().future).poll(ctx)
+            }
+        }
+
+        spin_block(DevicePolled { future, device })
+    } else {
+        spin_block(future)
     }
 }

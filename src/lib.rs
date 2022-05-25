@@ -9,6 +9,7 @@
 //!
 //! For steps 3 and 6, input and output, you might find the `image` and `image-canvas` crates
 //! quite helpful for dealing with image formats and describing pre-existing buffers.
+#![forbid(unsafe_code)]
 
 pub mod buffer;
 pub mod command;
