@@ -1,4 +1,4 @@
-use core::{future::Future, num::NonZeroU32, ops::Range};
+use core::{num::NonZeroU32, ops::Range};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -954,7 +954,7 @@ impl Launcher<'_> {
         // Bind remaining outputs.
         self = self.bind_remaining_outputs()?;
 
-        let (device, queue) = match block_on(request, None) {
+        let (device, queue) = match run::block_on(request, None) {
             Ok(tuple) => tuple,
             Err(_) => return Err(LaunchError::InternalCommandError(line!())),
         };
@@ -1113,71 +1113,6 @@ impl LaunchError {
     pub(crate) fn InternalCommandError(line: u32) -> Self {
         LaunchError {
             kind: LaunchErrorKind::FromLine(line),
-        }
-    }
-}
-
-/// Block on an async future that may depend on a device being polled.
-pub(crate) fn block_on<F, T>(future: F, device: Option<&wgpu::Device>) -> T
-where
-    F: Future<Output = T> + 'static,
-    T: 'static,
-{
-    #[cfg(target_arch = "wasm32")]
-    {
-        use core::cell::RefCell;
-        use std::rc::Rc;
-
-        async fn the_thing<T: 'static, F: Future<Output = T> + 'static>(
-            future: F,
-            buffer: Rc<RefCell<Option<T>>>,
-        ) {
-            let result = future.await;
-            *buffer.borrow_mut() = Some(result);
-        }
-
-        let result = Rc::new(RefCell::new(None));
-        let mover = Rc::clone(&result);
-
-        wasm_bindgen_futures::spawn_local(the_thing(future, mover));
-
-        match Rc::try_unwrap(result) {
-            Ok(cell) => match cell.into_inner() {
-                Some(result) => result,
-                None => unreachable!("In this case we shouldn't have returned here"),
-            },
-            _ => unreachable!("There should be no reference to mover left"),
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        if let Some(device) = device {
-            // We have to manually poll the device.  That is, we ensure that it keeps being polled
-            // and each time will also poll the device. This isn't super efficient but a dirty way
-            // to actually finish this future.
-            struct DevicePolled<'dev, F> {
-                future: F,
-                device: &'dev wgpu::Device,
-            }
-
-            impl<F: Future> Future for DevicePolled<'_, F> {
-                type Output = F::Output;
-                fn poll(
-                    self: core::pin::Pin<&mut Self>,
-                    ctx: &mut core::task::Context,
-                ) -> core::task::Poll<F::Output> {
-                    self.as_ref().device.poll(wgpu::Maintain::Poll);
-                    // Ugh, noooo...
-                    ctx.waker().wake_by_ref();
-                    let future = unsafe { self.map_unchecked_mut(|this| &mut this.future) };
-                    future.poll(ctx)
-                }
-            }
-
-            async_io::block_on(DevicePolled { future, device })
-        } else {
-            async_io::block_on(future)
         }
     }
 }
