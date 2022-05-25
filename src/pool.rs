@@ -107,6 +107,7 @@ impl Pool {
         device: wgpu::DeviceDescriptor,
     ) -> Result<GpuKey, wgpu::RequestDeviceError> {
         let request = adapter.request_device(&device, None);
+        let request = Box::pin(request);
         let (device, queue) = block_on(request, None)?;
         let gpu_key = self.devices.insert(Gpu { device, queue });
         Ok(GpuKey(gpu_key))

@@ -1,4 +1,4 @@
-use core::{future::Future, iter::once, num::NonZeroU32, pin::Pin};
+use core::{future::Future, iter::once, marker::Unpin, num::NonZeroU32, pin::Pin};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -251,7 +251,7 @@ impl Executable {
                 binary_data: self.binary_data.clone(),
                 io_map: self.io_map.clone(),
                 debug_stack: vec![],
-            }
+            },
         })
     }
 
@@ -268,7 +268,7 @@ impl Executable {
                 binary_data: self.binary_data,
                 io_map: self.io_map.clone(),
                 debug_stack: vec![],
-            }
+            },
         })
     }
 
@@ -372,7 +372,8 @@ impl Execution {
             gpu: Gpu {
                 device: init.device,
                 queue: init.queue,
-            }.into(),
+            }
+            .into(),
             host: Host {
                 machine: Machine::new(init.instructions),
                 descriptors: Descriptors::default(),
@@ -381,7 +382,7 @@ impl Execution {
                 binary_data: init.binary_data,
                 io_map: Arc::new(init.io_map),
                 debug_stack: vec![],
-            }
+            },
         }
     }
 
@@ -401,7 +402,7 @@ impl Execution {
                     // Add tracing information..
                     error.instruction_pointer = instruction_pointer;
                     Err(error)
-                },
+                }
                 other => other,
             }
         };
@@ -518,13 +519,13 @@ impl Host {
 
                     shader = gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc));
                 } else {
-                    let desc = wgpu::ShaderModuleDescriptorSpirV {
+                    let desc = wgpu::ShaderModuleDescriptor {
                         label: Some(desc.name),
-                        source: desc.source_spirv.as_ref().into(),
+                        source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
 
                     // SAFETY: who knows. FIXME: once naga's validation is good enough.
-                    shader = gpu.with_gpu(|gpu| unsafe { gpu.device.create_shader_module_spirv(&desc) });
+                    shader = gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc));
                 };
 
                 self.descriptors.shaders.push(shader);
@@ -733,9 +734,10 @@ impl Host {
                 let buffer = &self.descriptors.buffers[target_buffer.0];
 
                 let slice = buffer.slice(..);
-                slice.map_async(wgpu::MapMode::Write).await.map_err(
-                    |wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()),
-                )?;
+                slice
+                    .map_async(wgpu::MapMode::Write)
+                    .await
+                    .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
 
                 let mut data = slice.get_mapped_range_mut();
 
@@ -749,11 +751,9 @@ impl Host {
 
                 for x in 0..height {
                     let source_row = &source[(x as usize * source_pitch)..][..source_pitch];
-                    let target_row =
-                        &mut target[(x as usize * target_pitch)..][..target_pitch];
+                    let target_row = &mut target[(x as usize * target_pitch)..][..target_pitch];
 
-                    target_row[..bytes_to_copy]
-                        .copy_from_slice(&source_row[..bytes_to_copy]);
+                    target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
                 }
 
                 drop(data);
@@ -874,9 +874,10 @@ impl Host {
                 let image = &mut self.buffers[target_image.0].data;
 
                 let slice = buffer.slice(..);
-                slice.map_async(wgpu::MapMode::Read).await.map_err(
-                    |wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()),
-                )?;
+                slice
+                    .map_async(wgpu::MapMode::Read)
+                    .await
+                    .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
 
                 let data = slice.get_mapped_range();
 
@@ -889,11 +890,9 @@ impl Host {
 
                 for x in 0..height {
                     let source_row = &source[(x as usize * source_pitch)..][..source_pitch];
-                    let target_row =
-                        &mut target[(x as usize * target_pitch)..][..target_pitch];
+                    let target_row = &mut target[(x as usize * target_pitch)..][..target_pitch];
 
-                    target_row[..bytes_to_copy]
-                        .copy_from_slice(&source_row[..bytes_to_copy]);
+                    target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
                 }
 
                 drop(data);
@@ -1408,20 +1407,19 @@ impl Drop for SyncPoint<'_> {
 /// Block on an async future that may depend on a device being polled.
 pub(crate) fn block_on<F, T>(future: F, device: Option<&core::cell::RefCell<Gpu>>) -> T
 where
-    F: Future<Output = T>,
+    F: Future<Output = T> + Unpin,
     T: 'static,
 {
-    fn spin_block<R>(mut f: impl Future<Output = R>) -> R {
-        use core::task::{Context, Poll};
+    fn spin_block<R>(mut f: impl Future<Output = R> + Unpin) -> R {
         use core::hint::spin_loop;
+        use core::task::{Context, Poll};
 
-        // pin the future to the stack
-        let mut f = unsafe { core::pin::Pin::new_unchecked(&mut f) };
-     
+        let mut f = Pin::new(&mut f);
+
         // create the context
         let waker = waker_fn::waker_fn(|| {});
         let mut ctx = Context::from_waker(&waker);
-     
+
         // poll future in a loop
         loop {
             match f.as_mut().poll(&mut ctx) {
@@ -1440,17 +1438,21 @@ where
             device: &'dev D,
         }
 
-        impl<F: Future, D: WithGpu> Future for DevicePolled<'_, F, D> {
+        impl<F, D: WithGpu> Future for DevicePolled<'_, F, D>
+        where
+            F: Future + Unpin,
+        {
             type Output = F::Output;
             fn poll(
                 self: core::pin::Pin<&mut Self>,
                 ctx: &mut core::task::Context,
             ) -> core::task::Poll<F::Output> {
-                self.as_ref().device.with_gpu(|gpu| gpu.device.poll(wgpu::Maintain::Poll));
+                self.as_ref()
+                    .device
+                    .with_gpu(|gpu| gpu.device.poll(wgpu::Maintain::Poll));
                 // Ugh, noooo...
                 ctx.waker().wake_by_ref();
-                let future = unsafe { self.map_unchecked_mut(|this| &mut this.future) };
-                future.poll(ctx)
+                Pin::new(&mut self.get_mut().future).poll(ctx)
             }
         }
 

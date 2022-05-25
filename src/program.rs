@@ -954,6 +954,7 @@ impl Launcher<'_> {
         // Bind remaining outputs.
         self = self.bind_remaining_outputs()?;
 
+        let request = Box::pin(request);
         let (device, queue) = match run::block_on(request, None) {
             Ok(tuple) => tuple,
             Err(_) => return Err(LaunchError::InternalCommandError(line!())),
