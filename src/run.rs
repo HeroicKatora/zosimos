@@ -1411,6 +1411,26 @@ where
     F: Future<Output = T>,
     T: 'static,
 {
+    fn spin_block<R>(mut f: impl Future<Output = R>) -> R {
+        use core::task::{Context, Poll};
+        use core::hint::spin_loop;
+
+        // pin the future to the stack
+        let mut f = unsafe { core::pin::Pin::new_unchecked(&mut f) };
+     
+        // create the context
+        let waker = waker_fn::waker_fn(|| {});
+        let mut ctx = Context::from_waker(&waker);
+     
+        // poll future in a loop
+        loop {
+            match f.as_mut().poll(&mut ctx) {
+                Poll::Ready(o) => return o,
+                Poll::Pending => spin_loop(),
+            }
+        }
+    }
+
     if let Some(device) = device.as_ref() {
         // We have to manually poll the device.  That is, we ensure that it keeps being polled
         // and each time will also poll the device. This isn't super efficient but a dirty way
@@ -1434,8 +1454,8 @@ where
             }
         }
 
-        async_io::block_on(DevicePolled { future, device })
+        spin_block(DevicePolled { future, device })
     } else {
-        async_io::block_on(future)
+        spin_block(future)
     }
 }

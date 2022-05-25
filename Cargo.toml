@@ -8,12 +8,7 @@ resolver = "2"
 
 [dependencies]
 bytemuck = "1.4"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-async-io = "1.3"
-# Well, we try.
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen-futures = "0.4.19"
+waker-fn = "1.1"
 
 [dependencies.image]
 version = "0.24.0"
