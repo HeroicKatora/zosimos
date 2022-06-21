@@ -211,7 +211,7 @@ impl Image {
     /// Create an image without binary data, promising to set it up later.
     pub(crate) fn with_late_bound(descriptor: &Descriptor) -> Self {
         Image {
-            data: ImageData::LateBound(descriptor.layout.clone()),
+            data: ImageData::LateBound(descriptor.clone()),
             texel: descriptor.texel.clone(),
             // Not related to any pooled image.
             key: None,
@@ -1318,13 +1318,9 @@ impl Retire<'_> {
         // FIXME: don't take some random image, use the right one..
         // Also: should we leave the actual image? This would allow restarting the pipeline.
         let image = &mut self.execution.host.buffers[index];
+        let descriptor = image.data.layout().clone();
 
-        let descriptor = Descriptor {
-            layout: image.data.layout().clone(),
-            texel: image.texel.clone(),
-        };
-
-        let mut pool_image = self.pool.declare(descriptor);
+        let mut pool_image = self.pool.declare(descriptor.into());
         pool_image.swap(&mut image.data);
 
         Ok(pool_image.into())

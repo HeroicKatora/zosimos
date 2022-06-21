@@ -2,10 +2,7 @@ mod dynamic;
 
 pub use self::dynamic::{ShaderCommand, ShaderData, ShaderSource};
 
-use crate::buffer::{
-    self, BufferLayout, ChannelPosition, Color, ColorChannel, Descriptor, RowMatrix, SampleParts,
-    Texel, Whitepoint,
-};
+use crate::buffer::{self, BufferLayout, BufferSize, ChannelPosition, Descriptor, RowMatrix};
 use crate::pool::PoolImage;
 use crate::program::{
     CompileError, Frame, Function, ImageBufferAssignment, ImageBufferPlan, Program, QuadTarget,
@@ -16,6 +13,9 @@ pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
 pub use crate::shaders::fractal_noise::Shader as FractalNoise;
 
 use crate::shaders::{self, FragmentShader, PaintOnTopKind, ShaderInvocation};
+
+use image_canvas::color::{Color, ColorChannel, Whitepoint};
+use image_canvas::layout::{SampleParts, Texel};
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -534,7 +534,12 @@ impl CommandBuffer {
     /// Create an image with different color encoding.
     ///
     /// This goes through linear RGB, not ICC, and requires the two models to have same whitepoint.
-    pub fn color_convert(&mut self, src: Register, texel: Texel) -> Result<Register, CommandError> {
+    pub fn color_convert(
+        &mut self,
+        src: Register,
+        color: Color,
+        texel: Texel,
+    ) -> Result<Register, CommandError> {
         let desc_src = self.describe_reg(src)?;
         let conversion;
 
@@ -543,11 +548,12 @@ impl CommandBuffer {
         // almost correct, but not all GPUs will support all texel kinds. In particular
         // some channel orders or bit-field channels are likely to be unsupported. In these
         // cases, we will later add some temporary conversion.
-
+        //
         // FIXME: this is growing a bit ugly with non-rgb color spaces. We should find a more
         // general way to handle these, and in particular also handle non-rgb-to-non-rgb because
         // that's already happening in the command encoder anyways..
-        match (&desc_src.texel.color, &texel.color) {
+
+        match (&desc_src.color, &color) {
             (
                 Color::Rgb {
                     primary: primary_src,
@@ -623,19 +629,21 @@ impl CommandBuffer {
         }
 
         // FIXME: validate memory condition.
-        let layout = BufferLayout {
+        let layout = BufferSize {
             width: desc_src.layout.width,
             height: desc_src.layout.height,
-            // TODO: just add a bytes_u8 method or so.
-            bytes_per_texel: texel.samples.bits.bytes() as u8,
-            // TODO: make this nicer.
-            bytes_per_row: desc_src.layout.width * texel.samples.bits.bytes() as u32,
+            texel_stride: texel.bits.bytes(),
+            row_stride: desc_src.layout.width as u64 * texel.bits.bytes() as u64,
         };
 
         let op = Op::Unary {
             src,
             op: UnaryOp::ColorConvert(conversion),
-            desc: Descriptor { layout, texel },
+            desc: Descriptor {
+                color,
+                layout,
+                texel,
+            },
         };
 
         Ok(self.push(op))
@@ -656,7 +664,7 @@ impl CommandBuffer {
         let source_wp;
         let (to_xyz_matrix, from_xyz_matrix);
 
-        match desc_src.texel.color {
+        match desc_src.color {
             Color::Rgb {
                 whitepoint,
                 primary,
@@ -682,11 +690,7 @@ impl CommandBuffer {
             }
         };
 
-        let layout = BufferLayout { ..desc_src.layout };
-        let texel = Texel {
-            color: texel_color,
-            ..desc_src.texel
-        };
+        let desc = Descriptor { color: texel_color, ..*desc_src };
 
         let op = Op::Unary {
             src,
@@ -697,7 +701,7 @@ impl CommandBuffer {
                 from_xyz_matrix,
                 method,
             }),
-            desc: Descriptor { layout, texel },
+            desc,
         };
 
         Ok(self.push(op))
@@ -755,6 +759,7 @@ impl CommandBuffer {
             row_stride: (texel.samples.bits.bytes() as u64) * u64::from(desc.layout.width()),
         };
 
+        let color = desc.color.clone();
         let layout = buffer::BufferLayout::with_row_layout(layout).ok_or(CommandError::OTHER)?;
 
         // Check that we can actually extract that channel.
@@ -767,7 +772,7 @@ impl CommandBuffer {
         let op = Op::Unary {
             src,
             op: UnaryOp::Extract { channel },
-            desc: Descriptor { layout, texel },
+            desc: Descriptor { color, layout, texel },
         };
 
         Ok(self.push(op))
@@ -787,10 +792,11 @@ impl CommandBuffer {
 
         let supposed_type = Descriptor {
             layout: desc.layout.clone(),
+            color: desc.color.clone(),
             texel,
         };
 
-        if desc.texel.samples.bits.bytes() != supposed_type.texel.samples.bits.bytes() {
+        if desc.texel.bits.bytes() != supposed_type.texel.bits.bytes() {
             return Err(CommandError {
                 inner: CommandErrorKind::ConflictingTypes(desc.clone(), supposed_type),
             });
@@ -828,8 +834,8 @@ impl CommandBuffer {
             .ok_or(CommandError::OTHER)?;
         let mut desc_above = self.describe_reg(above)?.clone();
 
-        if desc_above.texel.samples.parts.num_components()
-            != expected_texel.samples.parts.num_components()
+        if desc_above.texel.parts.num_components()
+            != expected_texel.parts.num_components()
         {
             let wanted = Descriptor {
                 texel: expected_texel,
@@ -842,8 +848,8 @@ impl CommandBuffer {
         }
 
         // Override the sample part interpretation.
-        let from_channels = desc_above.texel.samples.parts;
-        desc_above.texel.samples.parts = expected_texel.samples.parts;
+        let from_channels = desc_above.texel.parts;
+        desc_above.texel.parts = expected_texel.parts;
 
         // FIXME: should we do parsing instead of validation?
         // Some type like ChannelPosition but for multiple.
@@ -907,8 +913,8 @@ impl CommandBuffer {
         let target_layout = BufferLayout::with_row_layout(buffer::RowLayoutDescription {
             width: idx_desc.layout.width(),
             height: idx_desc.layout.height(),
-            row_stride: (idx_desc.layout.width() * u32::from(desc.layout.bytes_per_texel)).into(),
-            texel_stride: desc.layout.bytes_per_texel.into(),
+            row_stride: (idx_desc.layout.width() * u32::from(desc.layout.texel_stride)).into(),
+            texel_stride: desc.layout.row_stride.into(),
         })
         .ok_or(CommandError::OTHER)?;
 
@@ -923,7 +929,7 @@ impl CommandBuffer {
             }),
             desc: Descriptor {
                 layout: target_layout,
-                texel: desc.texel.clone(),
+                ..*desc
             },
         };
 

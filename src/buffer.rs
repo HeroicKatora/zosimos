@@ -25,8 +25,8 @@ pub struct ImageBuffer {
 pub struct BufferSize {
     pub width: u32,
     pub height: u32,
-    pub texel_stride: u8,
     pub row_stride: u64,
+    pub texel_stride: u16,
 }
 
 /// Describes an image semantically.
@@ -323,5 +323,24 @@ impl From<&'_ image::DynamicImage> for ImageBuffer {
         layout.set_color(descriptor.color);
         let inner = Canvas::new(layout);
         ImageBuffer { inner }
+    }
+}
+
+impl From<&'_ BufferLayout> for Descriptor {
+    fn from(buf: &BufferLayout) -> Descriptor {
+        let plane = buf.as_plane().unwrap();
+
+        let layout = BufferSize {
+            width: buf.width(),
+            height: buf.height(),
+            row_stride: buf.as_row_layout().row_stride,
+            texel_stride: buf.texel().bits.bytes(),
+        };
+
+        Descriptor {
+            layout,
+            color: buf.color().unwrap().clone(),
+            texel: *buf.texel(),
+        }
     }
 }
