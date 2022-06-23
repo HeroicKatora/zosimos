@@ -2,7 +2,8 @@ mod dynamic;
 
 pub use self::dynamic::{ShaderCommand, ShaderData, ShaderSource};
 
-use crate::buffer::{self, BufferLayout, BufferSize, ChannelPosition, Descriptor, RowMatrix};
+use crate::buffer::{self, BufferLayout, ByteLayout, ChannelPosition, Descriptor, TexelExt};
+use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
     CompileError, Frame, Function, ImageBufferAssignment, ImageBufferPlan, Program, QuadTarget,
@@ -175,7 +176,7 @@ pub(crate) enum BinaryOp {
     /// where select(channel, T.color) = U.color
     Inject {
         channel: ChannelPosition,
-        from_channels: SampleParts,
+        from_channels: Texel,
     },
     /// Sample from a palette based on the color value of another image.
     /// Op[T, U] = T
@@ -567,8 +568,8 @@ impl CommandBuffer {
                 },
             ) if wp_src == wp_dst => {
                 conversion = ColorConversion::Xyz {
-                    from_xyz_matrix: primary_src.to_xyz(*wp_src),
-                    to_xyz_matrix: primary_dst.to_xyz(*wp_dst),
+                    from_xyz_matrix: RowMatrix(primary_src.to_xyz_row_matrix(*wp_src)),
+                    to_xyz_matrix: RowMatrix(primary_dst.to_xyz_row_matrix(*wp_dst)),
                 };
             }
             (
@@ -580,7 +581,7 @@ impl CommandBuffer {
                 Color::Oklab,
             ) => {
                 conversion = ColorConversion::XyzToOklab {
-                    to_xyz_matrix: primary.to_xyz(Whitepoint::D65),
+                    to_xyz_matrix: RowMatrix(primary.to_xyz_row_matrix(Whitepoint::D65)),
                 };
             }
             (
@@ -592,7 +593,7 @@ impl CommandBuffer {
                 },
             ) => {
                 conversion = ColorConversion::OklabToXyz {
-                    from_xyz_matrix: primary.to_xyz(Whitepoint::D65),
+                    from_xyz_matrix: RowMatrix(primary.to_xyz_row_matrix(Whitepoint::D65)),
                 };
             }
             (
@@ -629,7 +630,7 @@ impl CommandBuffer {
         }
 
         // FIXME: validate memory condition.
-        let layout = BufferSize {
+        let layout = ByteLayout {
             width: desc_src.layout.width,
             height: desc_src.layout.height,
             texel_stride: texel.bits.bytes(),
@@ -678,8 +679,8 @@ impl CommandBuffer {
                     luminance,
                 };
 
-                to_xyz_matrix = primary.to_xyz(whitepoint);
-                from_xyz_matrix = primary.to_xyz(target).inv();
+                to_xyz_matrix = RowMatrix(primary.to_xyz_row_matrix(whitepoint));
+                from_xyz_matrix = RowMatrix(primary.from_xyz_row_matrix(target));
                 source_wp = whitepoint;
             }
             // Forward compatibility.
@@ -750,17 +751,16 @@ impl CommandBuffer {
         channel: ColorChannel,
     ) -> Result<Register, CommandError> {
         let desc = self.describe_reg(src)?;
-        let texel = desc.channel_texel(channel).ok_or(CommandError::OTHER)?;
+        let texel = desc.texel.channel_texel(channel).ok_or(CommandError::OTHER)?;
 
-        let layout = buffer::RowLayoutDescription {
-            width: desc.layout.width(),
-            height: desc.layout.height(),
-            texel_stride: texel.samples.bits.bytes() as u64,
-            row_stride: (texel.samples.bits.bytes() as u64) * u64::from(desc.layout.width()),
+        let layout = ByteLayout {
+            texel_stride: texel.bits.bytes(),
+            width: desc.layout.width,
+            height: desc.layout.height,
+            row_stride: (texel.bits.bytes() as u64) * u64::from(desc.layout.width),
         };
 
         let color = desc.color.clone();
-        let layout = buffer::BufferLayout::with_row_layout(layout).ok_or(CommandError::OTHER)?;
 
         // Check that we can actually extract that channel.
         // This could be unimplemented if the position of a particular channel is not yet a stable
@@ -829,7 +829,7 @@ impl CommandBuffer {
         above: Register,
     ) -> Result<Register, CommandError> {
         let desc_below = self.describe_reg(below)?;
-        let expected_texel = desc_below
+        let expected_texel = desc_below.texel
             .channel_texel(channel)
             .ok_or(CommandError::OTHER)?;
         let mut desc_above = self.describe_reg(above)?.clone();
@@ -848,12 +848,12 @@ impl CommandBuffer {
         }
 
         // Override the sample part interpretation.
-        let from_channels = desc_above.texel.parts;
+        let from_channels = desc_above.texel;
         desc_above.texel.parts = expected_texel.parts;
 
         // FIXME: should we do parsing instead of validation?
         // Some type like ChannelPosition but for multiple.
-        if from_channels.into_vec4().is_none() {
+        if from_channels.channel_weight_vec4().is_none() {
             return Err(CommandError::OTHER);
         }
 
@@ -910,13 +910,11 @@ impl CommandBuffer {
         };
 
         // Compute the target layout (and that we can represent it).
-        let target_layout = BufferLayout::with_row_layout(buffer::RowLayoutDescription {
-            width: idx_desc.layout.width(),
-            height: idx_desc.layout.height(),
-            row_stride: (idx_desc.layout.width() * u32::from(desc.layout.texel_stride)).into(),
-            texel_stride: desc.layout.row_stride.into(),
-        })
-        .ok_or(CommandError::OTHER)?;
+        let target_layout = Descriptor::with_texel(
+            desc.texel,
+            idx_desc.layout.width,
+            idx_desc.layout.height,
+        ).ok_or(CommandError::OTHER)?;
 
         let op = Op::Binary {
             lhs: palette,
@@ -928,7 +926,7 @@ impl CommandBuffer {
                 base_y: config.height_base,
             }),
             desc: Descriptor {
-                layout: target_layout,
+                layout: target_layout.layout,
                 ..*desc
             },
         };
@@ -978,7 +976,7 @@ impl CommandBuffer {
             });
         }
 
-        if data.len() != usize::from(describe.layout.bytes_per_texel) {
+        if data.len() != usize::from(describe.layout.texel_stride) {
             return Err(CommandError {
                 inner: CommandErrorKind::BadDescriptor(describe),
             });
@@ -1007,8 +1005,8 @@ impl CommandBuffer {
             });
         }
 
-        if describe.texel.samples.parts != SampleParts::Luma
-            && describe.texel.samples.parts != SampleParts::LumaA
+        if describe.texel.parts != SampleParts::Luma
+            && describe.texel.parts != SampleParts::LumaA
         {
             return Err(CommandError {
                 inner: CommandErrorKind::BadDescriptor(describe),
@@ -1375,7 +1373,7 @@ impl CommandBuffer {
                                 fn_: Function::PaintFullScreen {
                                     shader: FragmentShader::Inject(shaders::inject::Shader {
                                         mix: channel.into_vec4(),
-                                        color: from_channels.into_vec4().unwrap(),
+                                        color: from_channels.channel_weight_vec4().unwrap(),
                                     }),
                                 },
                             })
@@ -1799,7 +1797,7 @@ impl Rectangle {
     }
 
     /// A rectangle describing a complete buffer.
-    pub fn with_layout(buffer: &BufferLayout) -> Self {
+    pub fn with_layout(buffer: &ByteLayout) -> Self {
         Self::with_width_height(buffer.width, buffer.height)
     }
 
@@ -1955,7 +1953,7 @@ fn simple_program() {
 
     let background = image::open(BACKGROUND).expect("Background image opened");
     let foreground = image::open(FOREGROUND).expect("Background image opened");
-    let expected = BufferLayout::from(&background);
+    let expected = ByteLayout::from(&background);
 
     let placement = Rectangle {
         x: 0,

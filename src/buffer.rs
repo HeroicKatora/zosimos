@@ -11,6 +11,7 @@ pub use image_canvas::{
     },
     color::{
         Color,
+        ColorChannel,
         Transfer,
         Whitepoint,
     },
@@ -22,7 +23,7 @@ pub struct ImageBuffer {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct BufferSize {
+pub struct ByteLayout {
     pub width: u32,
     pub height: u32,
     pub row_stride: u64,
@@ -33,7 +34,7 @@ pub struct BufferSize {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Descriptor {
     /// The byte and physical layout of the buffer.
-    pub layout: BufferSize,
+    pub layout: ByteLayout,
     /// The color interpretation of texels.
     pub color: Color,
     /// Describe how each single texel is interpreted.
@@ -58,17 +59,40 @@ pub(crate) enum ChannelPosition {
     Fourth = 3,
 }
 
-/// A column major matrix.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ColMatrix([[f32; 3]; 3]);
+pub(crate) trait TexelExt {
+    fn channel_texel(&self, _: ColorChannel) -> Option<Texel>;
+    fn channel_weight_vec4(&self) -> Option<[f32; 4]>;
+}
 
-/// A row major matrix.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct RowMatrix([f32; 9]);
+impl TexelExt for Texel {
+    fn channel_texel(&self, ch: ColorChannel) -> Option<Texel> {
+        Some(Texel {
+            parts: self.parts.with_channel(ch)?,
+            ..*self
+        })
+    }
+
+    fn channel_weight_vec4(&self) -> Option<[f32; 4]> {
+        use ColorChannel::*;
+
+        let ch = match self.parts.color_channels() {
+            [Some(ch), None, None, None] => ch,
+            _ => return None,
+        };
+
+        Some(match ch {
+            R | Luma | L | X | Scalar0 => [1.0, 0.0, 0.0, 0.0],
+            G | Cb | LABa | C | Y | Scalar1 => [0.0, 1.0, 0.0, 0.0],
+            B | Cr | LABb | LABh | Z | Scalar2 => [0.0, 0.0, 1.0, 0.0],
+            Alpha => [0.0, 0.0, 0.0, 1.0],
+            _ => return None,
+        })
+    }
+}
 
 impl Descriptor {
     pub const EMPTY: Self = Descriptor {
-        layout: BufferSize {
+        layout: ByteLayout {
             width: 0,
             height: 0,
             row_stride: 0,
@@ -78,10 +102,33 @@ impl Descriptor {
         texel: Texel::new_u8(SampleParts::RgbA),
     };
 
-    fn with_texel(texel: Texel, width: u32, height: u32) -> Option<Self> {
-        let layout = BufferLayout::with_texel(&texel, width, height)?;
+    pub fn with_texel(texel: Texel, width: u32, height: u32) -> Option<Self> {
+        let layout = ByteLayout {
+            width,
+            height,
+            row_stride: u64::from(texel.bits.bytes()) * u64::from(width),
+            texel_stride: texel.bits.bytes(),
+        };
+
         let color = Color::Scalars { transfer: Transfer::Linear };
-        Some(Descriptor { color, layout, texel })
+        let this = Descriptor { color, layout, texel };
+        let _ = this.try_to_canvas()?;
+        Some(this)
+    }
+
+    pub(crate) fn to_canvas(&self) -> BufferLayout {
+        self.try_to_canvas().expect("To be validated on construction")
+    }
+
+    pub(crate) fn try_to_canvas(&self) -> Option<BufferLayout> {
+        let descriptor = RowLayoutDescription {
+            width: self.layout.width,
+            height: self.layout.height,
+            row_stride: self.layout.row_stride,
+            texel: self.texel,
+        };
+
+        BufferLayout::with_row_layout(&descriptor).ok()
     }
 
     /// Check if the descriptor is consistent.
@@ -118,7 +165,7 @@ impl Descriptor {
     pub fn with_srgb_image(image: &'_ image::DynamicImage) -> Descriptor {
         Descriptor {
             color: Color::SRGB,
-            layout: BufferSize::from(image),
+            layout: ByteLayout::from(image),
             texel: Self::texel(image),
         }
     }
@@ -295,14 +342,14 @@ impl ImageBuffer {
     }
 }
 
-impl From<&'_ image::DynamicImage> for BufferSize {
-    fn from(image: &'_ image::DynamicImage) -> BufferSize {
+impl From<&'_ image::DynamicImage> for ByteLayout {
+    fn from(image: &'_ image::DynamicImage) -> ByteLayout {
         use image::GenericImageView;
         let (width, height) = image.dimensions();
         let color = image.color();
         let bpp = color.bytes_per_pixel();
 
-        BufferSize {
+        ByteLayout {
             width,
             height,
             row_stride: u64::from(width) * u64::from(bpp),
@@ -330,7 +377,7 @@ impl From<&'_ BufferLayout> for Descriptor {
     fn from(buf: &BufferLayout) -> Descriptor {
         let plane = buf.as_plane().unwrap();
 
-        let layout = BufferSize {
+        let layout = ByteLayout {
             width: buf.width(),
             height: buf.height(),
             row_stride: buf.as_row_layout().row_stride,

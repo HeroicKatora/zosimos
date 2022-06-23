@@ -3,7 +3,8 @@ use core::{num::NonZeroU32, ops::Range};
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use crate::buffer::{BufferLayout, Descriptor, RowMatrix};
+use crate::buffer::{ByteLayout, BufferLayout, Descriptor};
+use crate::color_matrix::RowMatrix;
 use crate::command::{High, Rectangle, Register, Target};
 use crate::encoder::{Encoder, RegisterMap};
 use crate::pool::{Pool, PoolKey};
@@ -113,9 +114,9 @@ pub enum QuadTarget {
 #[derive(Clone, Debug, Default)]
 pub struct ImageBufferPlan {
     pub(crate) texture: Vec<Descriptor>,
-    pub(crate) buffer: Vec<BufferLayout>,
+    pub(crate) buffer: Vec<ByteLayout>,
     pub(crate) by_register: Vec<ImageBufferAssignment>,
-    pub(crate) by_layout: HashMap<BufferLayout, Texture>,
+    pub(crate) by_layout: HashMap<ByteLayout, Texture>,
 }
 
 /// Contains the data on how images relate to the launcher's pool.

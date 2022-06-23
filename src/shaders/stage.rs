@@ -40,7 +40,7 @@ impl XyzParameter {
     pub(crate) fn serialize_std140(&self) -> [u32; 4] {
         [
             self.transfer.as_u32(),
-            self.parts as u32,
+            Self::serialize_parts(self.parts),
             self.bits as u32,
             // Upper bits are still reserved for texel block size.
             self.horizontal_subfactor() & 0xff,
@@ -56,6 +56,17 @@ impl XyzParameter {
             16 => StageKind::Rgba32ui,
             _ => return None,
         })
+    }
+
+    pub(crate) fn serialize_parts(parts: SampleParts) -> u32 {
+        use SampleParts as S;
+        match parts {
+            S::A => 0,
+            S::R => 1,
+            S::G => 2,
+            S::B => 3,
+            _ => todo!(),
+        }
     }
 
     pub(crate) fn horizontal_subfactor(&self) -> u32 {
@@ -164,7 +175,7 @@ impl Transfer {
     }
 }
 
-impl From<RgbTransfer> for Transfer {
+impl From<image_canvas::color::Transfer> for Transfer {
     fn from(t: RgbTransfer) -> Self {
         Transfer::Rgb(t)
     }

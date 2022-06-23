@@ -13,6 +13,7 @@
 
 pub mod buffer;
 pub mod command;
+mod color_matrix;
 mod encoder;
 pub mod pool;
 pub mod program;

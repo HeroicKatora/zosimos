@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::buffer::{
-    Block, BufferLayout, Color, SampleBits, SampleParts, Samples, Texel, Transfer,
+    Block, BufferLayout, ByteLayout, Color, SampleBits, SampleParts, Texel, Transfer,
 };
 use crate::command::Register;
 use crate::pool::Pool;
@@ -19,6 +19,8 @@ use crate::program::{
 };
 use crate::util::ExtendOne;
 use crate::{run, shaders};
+
+use image_canvas::layout::{CanvasLayout, RowLayoutDescription};
 
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
 #[derive(Default)]
@@ -351,7 +353,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     ) -> Result<ImageDescriptor, LaunchError> {
         let descriptor = &self.buffer_plan.texture[texture.0];
 
-        fn validate_size(layout: &BufferLayout) -> Option<(NonZeroU32, NonZeroU32)> {
+        fn validate_size(layout: &ByteLayout) -> Option<(NonZeroU32, NonZeroU32)> {
             Some((
                 NonZeroU32::new(layout.width)?,
                 NonZeroU32::new(layout.height)?,
@@ -362,47 +364,45 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
         let mut staging = None;
 
-        let format = match descriptor.texel {
-            Texel {
+        let format = match (&descriptor.texel, &descriptor.color) {
+            (Texel {
                 block: Block::Pixel,
-                samples:
-                    Samples {
-                        bits: SampleBits::Int8x4,
-                        parts: SampleParts::Rgba,
-                    },
-                color:
-                    Color::Rgb {
-                        transfer: Transfer::Srgb,
-                        ..
-                    },
-            } => wgpu::TextureFormat::Rgba8UnormSrgb,
-            Texel {
+                bits: SampleBits::Int8x4,
+                parts: SampleParts::RgbA,
+            },
+                Color::Rgb {
+                    transfer: Transfer::Srgb,
+                    ..
+                },
+            ) => wgpu::TextureFormat::Rgba8UnormSrgb,
+            (Texel {
                 block: Block::Pixel,
-                samples:
-                    Samples {
-                        bits: SampleBits::Int8x4,
-                        parts: SampleParts::Rgba,
-                    },
-                color:
+                bits: SampleBits::Int8x4,
+                parts: SampleParts::RgbA,
+            },
                     Color::Rgb {
                         transfer: Transfer::Linear,
                         ..
                     },
-            } => wgpu::TextureFormat::Rgba8Unorm,
-            Texel {
+            ) => wgpu::TextureFormat::Rgba8Unorm,
+            (Texel {
                 block: Block::Pixel,
-                samples,
-                color: Color::Rgb { transfer, .. },
-            }
-            | Texel {
+                bits,
+                parts,
+            },
+                Color::Rgb { transfer, .. },
+            )
+            | (Texel {
                 block: Block::Pixel,
-                samples,
-                color: Color::Scalars { transfer, .. },
-            } => {
+                bits,
+                parts,
+            },
+                Color::Scalars { transfer, .. },
+            ) => {
                 let parameter = shaders::stage::XyzParameter {
-                    transfer: transfer.into(),
-                    parts: samples.parts,
-                    bits: samples.bits,
+                    transfer: shaders::stage::Transfer::Rgb(*transfer),
+                    bits: *bits,
+                    parts: *parts,
                 };
 
                 let result = parameter.linear_format();
@@ -418,23 +418,21 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 result
             }
-            Texel {
+            (Texel {
                 block: Block::Pixel,
-                samples:
-                    Samples {
-                        bits,
-                        parts: parts @ (SampleParts::LChA | SampleParts::LabA),
-                    },
-                color: Color::Oklab,
-            } => {
+                bits,
+                parts: parts @ (SampleParts::LchA | SampleParts::LabA),
+            },
+                Color::Oklab
+            ) => {
                 let parameter = shaders::stage::XyzParameter {
-                    transfer: match parts {
-                        SampleParts::LChA => shaders::stage::Transfer::LabLch,
+                    transfer: match *parts {
+                        SampleParts::LchA => shaders::stage::Transfer::LabLch,
                         SampleParts::LabA => shaders::stage::Transfer::Rgb(Transfer::Linear),
                         _ => return Err(LaunchError::InternalCommandError(line!())),
                     },
-                    parts: SampleParts::LChA,
-                    bits,
+                    parts: SampleParts::LchA,
+                    bits: *bits,
                 };
 
                 // FIXME: duplicate code.
@@ -452,23 +450,21 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 result
             }
             // FIXME: very, very duplicate code.
-            Texel {
+            (Texel {
                 block: Block::Pixel,
-                samples:
-                    Samples {
-                        bits,
-                        parts: parts @ (SampleParts::LChA | SampleParts::LabA),
-                    },
-                color: Color::SrLab2 { .. },
-            } => {
+                bits,
+                parts: parts @ (SampleParts::LchA | SampleParts::LabA),
+            },
+                Color::SrLab2 { .. },
+            )=> {
                 let parameter = shaders::stage::XyzParameter {
-                    transfer: match parts {
-                        SampleParts::LChA => shaders::stage::Transfer::LabLch,
+                    transfer: match *parts {
+                        SampleParts::LchA => shaders::stage::Transfer::LabLch,
                         SampleParts::LabA => shaders::stage::Transfer::Rgb(Transfer::Linear),
                         _ => return Err(LaunchError::InternalCommandError(line!())),
                     },
-                    parts: SampleParts::LChA,
-                    bits,
+                    parts: SampleParts::LchA,
+                    bits: *bits,
                 };
 
                 let result = parameter.linear_format();
@@ -525,19 +521,20 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let staging_format = staged.to_staging_texture();
         let descriptor = &self.buffer_plan.texture[reg_texture.0];
 
-        let bytes_per_row = (descriptor.layout.bytes_per_texel as u32)
+        let bytes_per_row = (descriptor.layout.texel_stride as u32)
             .checked_mul(texture_format.size.0.get())
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
         let bytes_per_row = (bytes_per_row / 256 + u32::from(bytes_per_row % 256 != 0))
             .checked_mul(256)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
-        let buffer_layout = BufferLayout {
-            bytes_per_texel: descriptor.layout.bytes_per_texel,
+        let buffer_layout = CanvasLayout::with_row_layout(&RowLayoutDescription {
+            texel: descriptor.texel,
             width: texture_format.size.0.get(),
             height: texture_format.size.1.get(),
-            bytes_per_row,
-        };
+            row_stride: bytes_per_row.into(),
+        }).expect("valid layout");
+
 
         let (buffer, map_write, map_read) = {
             let buffer = self.buffers;
@@ -553,10 +550,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 size: buffer_layout.u64_len(),
                 usage: BufferUsage::DataOut,
             }))?;
-
-            // eprintln!("Buffer {:?} {:?}", buffer, buffer_layout.u64_len());
-            // eprintln!("Buffer {:?} {:?}", buffer + 1, buffer_layout.u64_len());
-            // eprintln!("Buffer {:?} {:?}", buffer + 2, buffer_layout.u64_len());
 
             (
                 DeviceBuffer(buffer),

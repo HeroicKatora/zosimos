@@ -2,7 +2,7 @@ use core::fmt;
 use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
-use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer, Texel};
+use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer};
 use crate::program::Capabilities;
 use crate::run::{block_on, Gpu};
 
@@ -46,7 +46,7 @@ pub struct IterMut<'pool> {
 pub(crate) struct Image {
     pub(crate) meta: ImageMeta,
     pub(crate) data: ImageData,
-    pub(crate) texel: Texel,
+    pub(crate) descriptor: Descriptor,
 }
 
 /// Meta data distinct from the layout questions.
@@ -143,8 +143,9 @@ impl Pool {
     /// Gift the pool an image allocated on the host.
     ///
     /// You must describe the texels of the image buffer.
-    pub fn insert(&mut self, image: ImageBuffer, texel: Texel) -> PoolImageMut<'_> {
-        self.new_with_data(ImageData::Host(image), texel)
+    pub fn insert(&mut self, image: ImageBuffer, descriptor: Descriptor) -> PoolImageMut<'_> {
+        // FIXME: check for consistency of buffer and descriptor
+        self.new_with_data(ImageData::Host(image), descriptor)
     }
 
     /// Insert an simple SRGB image into the pool.
@@ -153,8 +154,8 @@ impl Pool {
     /// special allocation tactic.
     pub fn insert_srgb(&mut self, image: &image::DynamicImage) -> PoolImageMut<'_> {
         let buffer = ImageBuffer::from(image);
-        let texel = Texel::with_srgb_image(image);
-        self.insert(buffer, texel)
+        let descriptor = Descriptor::with_srgb_image(image);
+        self.insert(buffer, descriptor)
     }
 
     /// Create the image based on an entry.
@@ -171,7 +172,7 @@ impl Pool {
         if let Some(data) = entry.as_bytes() {
             buffer.as_bytes_mut().copy_from_slice(data);
         }
-        let texel = entry.image.texel.clone();
+        let texel = entry.image.descriptor.clone();
         self.new_with_data(ImageData::Host(buffer), texel)
     }
 
@@ -181,7 +182,8 @@ impl Pool {
     /// This method will panic if the layout is inconsistent.
     pub fn declare(&mut self, desc: Descriptor) -> PoolImageMut<'_> {
         assert!(desc.is_consistent(), "{:?}", desc);
-        self.new_with_data(ImageData::LateBound(desc.layout), desc.texel)
+        let layout = desc.to_canvas();
+        self.new_with_data(ImageData::LateBound(layout), desc)
     }
 
     /// Iterate over all entries in the pool.
@@ -198,11 +200,11 @@ impl Pool {
         }
     }
 
-    fn new_with_data(&mut self, data: ImageData, texel: Texel) -> PoolImageMut<'_> {
+    fn new_with_data(&mut self, data: ImageData, descriptor: Descriptor) -> PoolImageMut<'_> {
         let key = self.items.insert(Image {
             meta: ImageMeta::default(),
             data,
-            texel,
+            descriptor,
         });
 
         PoolImageMut {
@@ -246,9 +248,10 @@ impl PoolImage<'_> {
     pub fn to_image(&self) -> Option<image::DynamicImage> {
         let data = self.as_bytes()?;
         let layout = self.layout();
+        let descriptor = self.image.descriptor;
 
-        let image = self.image.texel.samples.as_image_allocator()?;
-        let image = image(layout.width, layout.height, data)?;
+        let image = Descriptor::as_image_allocator(&descriptor.texel)?;
+        let image = image(layout.width(), layout.height(), data)?;
         Some(image)
     }
 
@@ -264,10 +267,7 @@ impl PoolImage<'_> {
     ///
     /// This is only available if a valid `Texel` descriptor has been configured.
     pub fn descriptor(&self) -> Descriptor {
-        Descriptor {
-            layout: self.layout().clone(),
-            texel: self.image.texel.clone(),
-        }
+        self.image.descriptor
     }
 
     /// View the buffer as bytes.
@@ -295,10 +295,7 @@ impl PoolImageMut<'_> {
     ///
     /// This is only available if a valid `Texel` descriptor has been configured.
     pub fn descriptor(&self) -> Descriptor {
-        Descriptor {
-            layout: self.layout().clone(),
-            texel: self.image.texel.clone(),
-        }
+        self.image.descriptor.clone()
     }
 
     /// View the buffer as bytes.
@@ -317,8 +314,10 @@ impl PoolImageMut<'_> {
 
     /// Configure the color of this image, not changing any data.
     pub fn set_color(&mut self, color: Color) {
-        assert!(color.is_consistent(self.image.texel.samples.parts));
-        self.image.texel.color = color;
+        let parts = self.image.descriptor.texel.parts;
+        // FIXME: re-add assert?
+        // assert!(color.is_consistent(parts));
+        self.image.descriptor.color = color;
     }
 
     /// Get the metadata associated with the entry.
