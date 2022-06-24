@@ -2,7 +2,7 @@ use core::{future::Future, iter::once, marker::Unpin, num::NonZeroU32, pin::Pin}
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::buffer::{BufferLayout, Descriptor, Texel};
+use crate::buffer::{ByteLayout, Descriptor};
 use crate::command::Register;
 use crate::pool::{ImageData, Pool, PoolImage, PoolKey};
 use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
@@ -90,10 +90,10 @@ pub(crate) struct InitialState {
 pub(crate) struct Image {
     /// The binary data and its layout.
     pub(crate) data: ImageData,
-    /// The texel interpretation of the data.
+    /// The full descriptor of the data.
     /// This is used mainly for IO where we reconstruct a free-standing image with all its
     /// associated data when moving from an `Image`.
-    pub(crate) texel: Texel,
+    pub(crate) descriptor: Descriptor,
     /// The pool key corresponding to this image.
     pub(crate) key: Option<PoolKey>,
 }
@@ -211,8 +211,8 @@ impl Image {
     /// Create an image without binary data, promising to set it up later.
     pub(crate) fn with_late_bound(descriptor: &Descriptor) -> Self {
         Image {
-            data: ImageData::LateBound(descriptor.clone()),
-            texel: descriptor.texel.clone(),
+            data: ImageData::LateBound(descriptor.to_canvas()),
+            descriptor: descriptor.clone(),
             // Not related to any pooled image.
             key: None,
         }
@@ -221,7 +221,7 @@ impl Image {
     pub(crate) fn clone_like(&self) -> Self {
         Image {
             data: ImageData::LateBound(self.data.layout().clone()),
-            texel: self.texel.clone(),
+            descriptor: self.descriptor.clone(),
             key: self.key,
         }
     }
@@ -290,7 +290,7 @@ impl Executable {
                 return Err(StartError::InternalCommandError(line!()));
             }
 
-            if reference.texel != buffer.texel {
+            if reference.descriptor != buffer.descriptor {
                 // FIXME: not quite such an 'unknown' error.
                 return Err(StartError::InternalCommandError(line!()));
             }
@@ -350,12 +350,12 @@ impl Environment<'_> {
         let image = &mut self.buffers[idx];
         let descriptor = pool_img.descriptor();
 
-        if descriptor.layout != *image.data.layout() {
+        // FIXME: we're ignoring color semantics here. Okay?
+        if descriptor.layout != image.descriptor.layout {
             return Err(StartError::InternalCommandError(line!()));
         }
 
-        if descriptor.texel != image.texel {
-            // FIXME: not quite such an 'unknown' error.
+        if descriptor.texel != image.descriptor.texel {
             return Err(StartError::InternalCommandError(line!()));
         }
 
@@ -701,8 +701,9 @@ impl Host {
                 }
 
                 let layout = source.layout().clone();
+                let target_size = (target_layout.width, target_layout.height);
 
-                if (target_layout.width, target_layout.height) != (layout.width, layout.height) {
+                if target_size != (layout.width(), layout.height()) {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
@@ -720,14 +721,14 @@ impl Host {
                 }
                 */
 
-                if size != (target_layout.width, target_layout.height) {
+                if size != target_size {
                     // Not yet supported (or needed).
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let (width, height) = size;
-                let bytes_per_row = target_layout.bytes_per_row;
-                let bytes_per_texel = target_layout.bytes_per_texel;
+                let (width, height) = target_size;
+                let bytes_per_row = target_layout.row_stride;
+                let bytes_per_texel = target_layout.texel_stride;
                 let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
                 let image = &mut self.buffers[source_image.0].data;
@@ -741,13 +742,14 @@ impl Host {
 
                 let mut data = slice.get_mapped_range_mut();
 
-                // TODO: defensive programming, don't assume cast works.
-                let target_pitch = bytes_per_row as usize;
-                let source_pitch = image.layout().bytes_per_row as usize;
-
                 // We've checked that this image can be seen as host bytes.
                 let source: &[u8] = image.as_bytes().unwrap();
                 let target: &mut [u8] = &mut data[..];
+
+                // TODO: defensive programming, don't assume cast works.
+                let target_pitch = bytes_per_row as usize;
+                // TODO(perf): should this use our internal descriptor?
+                let source_pitch = image.layout().as_row_layout().row_stride as usize;
 
                 for x in 0..height {
                     let source_row = &source[(x as usize * source_pitch)..][..source_pitch];
@@ -857,17 +859,19 @@ impl Host {
                 size,
                 target_image,
             } => {
+                let source_size = (source_layout.width, source_layout.height);
+
                 if offset != (0, 0) {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                if size != (source_layout.width, source_layout.height) {
+                if size != source_size {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
+                let bytes_per_row = source_layout.row_stride;
+                let bytes_per_texel = source_layout.texel_stride;
                 let (width, height) = size;
-                let bytes_per_row = source_layout.bytes_per_row;
-                let bytes_per_texel = source_layout.bytes_per_texel;
                 let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
                 let buffer = &self.descriptors.buffers[source_buffer.0];
@@ -883,7 +887,7 @@ impl Host {
 
                 // TODO: defensive programming, don't assume cast works.
                 let source_pitch = bytes_per_row as usize;
-                let target_pitch = image.layout().bytes_per_row as usize;
+                let target_pitch = image.layout().as_row_layout().row_stride as usize;
 
                 let source: &[u8] = &data[..];
                 let target: &mut [u8] = image.as_bytes_mut().unwrap();
@@ -1143,7 +1147,7 @@ impl Descriptors {
     fn buffer(
         &self,
         buffer: DeviceBuffer,
-        layout: &BufferLayout,
+        layout: &ByteLayout,
     ) -> Result<wgpu::ImageCopyBuffer<'_>, StepError> {
         let buffer = match self.buffers.get(buffer.0) {
             None => return Err(StepError::InvalidInstruction(line!())),
@@ -1152,7 +1156,7 @@ impl Descriptors {
         Ok(wgpu::ImageCopyBufferBase {
             buffer,
             layout: wgpu::ImageDataLayout {
-                bytes_per_row: NonZeroU32::new(layout.bytes_per_row),
+                bytes_per_row: NonZeroU32::new(layout.row_stride as u32),
                 offset: 0,
                 rows_per_image: NonZeroU32::new(layout.height),
             },
@@ -1320,7 +1324,8 @@ impl Retire<'_> {
         let image = &mut self.execution.host.buffers[index];
         let descriptor = image.data.layout().clone();
 
-        let mut pool_image = self.pool.declare(descriptor.into());
+        let descriptor = Descriptor::from(&descriptor);
+        let mut pool_image = self.pool.declare(descriptor);
         pool_image.swap(&mut image.data);
 
         Ok(pool_image.into())

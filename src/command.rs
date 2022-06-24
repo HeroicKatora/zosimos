@@ -1883,9 +1883,15 @@ impl Rectangle {
     }
 }
 
+impl From<&'_ ByteLayout> for Rectangle {
+    fn from(buffer: &ByteLayout) -> Rectangle {
+        Rectangle::with_width_height(buffer.width, buffer.height)
+    }
+}
+
 impl From<&'_ BufferLayout> for Rectangle {
     fn from(buffer: &BufferLayout) -> Rectangle {
-        Rectangle::with_width_height(buffer.width, buffer.height)
+        Rectangle::with_width_height(buffer.width(), buffer.height())
     }
 }
 

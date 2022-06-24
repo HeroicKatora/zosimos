@@ -3,7 +3,7 @@ use core::{num::NonZeroU32, ops::Range};
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use crate::buffer::{ByteLayout, BufferLayout, Descriptor};
+use crate::buffer::{ByteLayout, Descriptor};
 use crate::color_matrix::RowMatrix;
 use crate::command::{High, Rectangle, Register, Target};
 use crate::encoder::{Encoder, RegisterMap};
@@ -138,7 +138,7 @@ pub struct ImageBufferAssignment {
 #[derive(Clone, Copy, Debug)]
 pub struct ImageBufferDescriptors<'a> {
     pub(crate) descriptor: &'a Descriptor,
-    pub(crate) layout: &'a BufferLayout,
+    pub(crate) layout: &'a ByteLayout,
 }
 
 #[derive(Clone, Debug)]
@@ -266,7 +266,7 @@ pub(crate) enum Low {
         offset: (u32, u32),
         size: (u32, u32),
         target_buffer: DeviceBuffer,
-        target_layout: BufferLayout,
+        target_layout: ByteLayout,
     },
     WriteImageToTexture {
         source_image: Texture,
@@ -277,7 +277,7 @@ pub(crate) enum Low {
     /// Copy a buffer to a texture with the same (!) layout.
     CopyBufferToTexture {
         source_buffer: DeviceBuffer,
-        source_layout: BufferLayout,
+        source_layout: ByteLayout,
         offset: (u32, u32),
         size: (u32, u32),
         target_texture: DeviceTexture,
@@ -288,7 +288,7 @@ pub(crate) enum Low {
         offset: (u32, u32),
         size: (u32, u32),
         target_buffer: DeviceBuffer,
-        target_layout: BufferLayout,
+        target_layout: ByteLayout,
     },
     CopyBufferToBuffer {
         source_buffer: DeviceBuffer,
@@ -299,7 +299,7 @@ pub(crate) enum Low {
     /// Will map the buffer then do row-wise reads.
     ReadBuffer {
         source_buffer: DeviceBuffer,
-        source_layout: BufferLayout,
+        source_layout: ByteLayout,
         offset: (u32, u32),
         size: (u32, u32),
         target_image: Texture,
