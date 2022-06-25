@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 
 use super::{BufferInitContent, Direction, FragmentShaderData, FragmentShaderKey};
-use crate::buffer::{RowMatrix, Whitepoint};
+use crate::buffer::Whitepoint;
+use crate::color_matrix::RowMatrix;
 
 /// a linear transformation on rgb color.
 pub const SHADER_ENCODE: &[u8] =

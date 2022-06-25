@@ -509,22 +509,23 @@ fn run_srlab2(pool: &mut Pool) {
         layout: color_descriptor.layout.clone(),
         texel: buffer::Texel {
             block: buffer::Block::Pixel,
-            samples: color_descriptor.texel.samples,
-            color: buffer::Color::Scalars {
-                transfer: buffer::Transfer::Linear,
-            },
+            ..color_descriptor.texel
+        },
+        color: buffer::Color::Scalars {
+            transfer: buffer::Transfer::Linear,
         },
     };
 
-    let srlab2_texel = buffer::Texel {
+    let srlab2_texel = buffer::Descriptor {
         color: buffer::Color::SrLab2 {
             whitepoint: buffer::Whitepoint::D65,
         },
-        block: distribution_layout.texel.block,
-        samples: buffer::Samples {
-            bits: distribution_layout.texel.samples.bits,
-            parts: buffer::SampleParts::LChA,
+        texel: buffer::Texel {
+            block: distribution_layout.texel.block,
+            bits: distribution_layout.texel.bits,
+            parts: buffer::SampleParts::LchA,
         },
+        ..distribution_layout
     };
 
     let sampling_grid = commands
@@ -550,7 +551,7 @@ fn run_srlab2(pool: &mut Pool) {
         .transmute(sampling_grid, srlab2_texel)
         .expect("Valid transmute");
     let converted = commands
-        .color_convert(lch, color_descriptor.texel.clone())
+        .color_convert(lch, color_descriptor.color.clone(), color_descriptor.texel.clone())
         .expect("Valid for conversion");
 
     let (output, _) = commands.output(converted).expect("Valid for output");
