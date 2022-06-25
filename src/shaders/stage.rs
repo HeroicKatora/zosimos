@@ -40,8 +40,8 @@ impl XyzParameter {
     pub(crate) fn serialize_std140(&self) -> [u32; 4] {
         [
             self.transfer.as_u32(),
-            self.parts as u32,
-            self.bits as u32,
+            Self::serialize_parts(self.parts),
+            Self::serialize_bits(self.bits),
             // Upper bits are still reserved for texel block size.
             self.horizontal_subfactor() & 0xff,
         ]
@@ -56,6 +56,53 @@ impl XyzParameter {
             16 => StageKind::Rgba32ui,
             _ => return None,
         })
+    }
+
+    pub(crate) fn serialize_parts(parts: SampleParts) -> u32 {
+        use SampleParts as S;
+        match parts {
+            S::A => 0,
+            S::R => 1,
+            S::G => 2,
+            S::B => 3,
+            S::Luma => 4,
+            S::LumaA => 5,
+            S::Rgb => 6,
+            S::Bgr => 7,
+            S::RgbA => 8,
+            S::BgrA => 9,
+            S::ARgb => 12,
+            S::ABgr => 14,
+            S::Yuv => 16,
+            S::Lab => 17,
+            S::LabA => 18,
+            S::Lch => 19,
+            S::LchA => 20,
+            _ => todo!("{:?}", parts),
+        }
+    }
+
+    pub(crate) fn serialize_bits(bits: SampleBits) -> u32 {
+        use SampleBits as S;
+        match bits {
+            S::UInt8 => 0,
+            S::UInt332 => 1,
+            S::UInt233 => 2,
+            S::UInt16 => 3,
+            S::UInt4x4 => 4,
+            S::UInt565 => 7,
+            S::UInt8x2 => 8,
+            S::UInt8x3 => 9,
+            S::UInt8x4 => 10,
+            S::UInt16x2 => 11,
+            S::UInt16x3 => 12,
+            S::UInt16x4 => 13,
+            S::UInt2101010 => 14,
+            S::UInt1010102 => 15,
+            S::Float16x4 => 18,
+            S::Float32x4 => 19,
+            _ => todo!("{:?}", bits),
+        }
     }
 
     pub(crate) fn horizontal_subfactor(&self) -> u32 {
@@ -164,7 +211,7 @@ impl Transfer {
     }
 }
 
-impl From<RgbTransfer> for Transfer {
+impl From<image_canvas::color::Transfer> for Transfer {
     fn from(t: RgbTransfer) -> Self {
         Transfer::Rgb(t)
     }

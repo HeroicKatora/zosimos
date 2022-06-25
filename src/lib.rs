@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod buffer;
+mod color_matrix;
 pub mod command;
 mod encoder;
 pub mod pool;

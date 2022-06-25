@@ -87,8 +87,8 @@ fn run_blending(
     let placement = Rectangle {
         x: 0,
         y: 0,
-        max_x: foreground.layout.width(),
-        max_y: foreground.layout.height(),
+        max_x: foreground.layout.width,
+        max_y: foreground.layout.height,
     };
 
     // Describe the pipeline:
@@ -126,15 +126,15 @@ fn run_affine(
     let affine = command::Affine::new(command::AffineSample::Nearest)
         // Move the foreground center to origin.
         .shift(
-            -((foreground.layout.width() / 2) as f32),
-            -((foreground.layout.height() / 2) as f32),
+            -((foreground.layout.width / 2) as f32),
+            -((foreground.layout.height / 2) as f32),
         )
         // Rotate 45°
         .rotate(std::f32::consts::PI / 4.)
         // Move origin to the background center.
         .shift(
-            (background.layout.width() / 2) as f32,
-            (background.layout.height() / 2) as f32,
+            (background.layout.width / 2) as f32,
+            (background.layout.height / 2) as f32,
         );
 
     // Describe the pipeline:
@@ -196,7 +196,7 @@ fn run_conversion(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descri
     // Pretend the input is BT709 instead of SRGB.
     let (bt_key, bt_descriptor) = {
         let mut bt = pool.allocate_like(orig_key);
-        bt.set_color(buffer::Color::BT709);
+        bt.set_color(buffer::Color::BT709_RGB);
         (bt.key(), bt.descriptor())
     };
 
@@ -204,7 +204,7 @@ fn run_conversion(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descri
     let input = commands.input(bt_descriptor).unwrap();
 
     let converted = commands
-        .color_convert(input, orig_descriptor.texel)
+        .color_convert(input, orig_descriptor.color, orig_descriptor.texel)
         .unwrap();
 
     let (output, _outformat) = commands.output(converted).expect("Valid for output");
@@ -222,11 +222,7 @@ fn run_conversion(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descri
 
 fn run_distribution(pool: &mut Pool) {
     let mut layout = image::DynamicImage::new_luma_a16(400, 400);
-
-    let descriptor = Descriptor {
-        layout: (&layout).into(),
-        texel: buffer::Texel::with_srgb_image(&layout),
-    };
+    let descriptor = Descriptor::with_srgb_image(&layout);
 
     let mut commands = CommandBuffer::default();
     let generated = commands
@@ -255,11 +251,7 @@ fn run_distribution(pool: &mut Pool) {
 
 fn run_distribution_normal1d(pool: &mut Pool) {
     let mut layout = image::DynamicImage::new_luma_a16(400, 400);
-
-    let descriptor = Descriptor {
-        layout: (&layout).into(),
-        texel: buffer::Texel::with_srgb_image(&layout),
-    };
+    let descriptor = Descriptor::with_srgb_image(&layout);
 
     let mut commands = CommandBuffer::default();
     let generated = commands
@@ -288,11 +280,7 @@ fn run_distribution_normal1d(pool: &mut Pool) {
 
 fn run_distribution_u8(pool: &mut Pool) {
     let mut layout = image::DynamicImage::new_luma8(400, 400);
-
-    let descriptor = Descriptor {
-        layout: (&layout).into(),
-        texel: buffer::Texel::with_srgb_image(&layout),
-    };
+    let descriptor = Descriptor::with_srgb_image(&layout);
 
     let mut commands = CommandBuffer::default();
     let generated = commands
@@ -321,11 +309,7 @@ fn run_distribution_u8(pool: &mut Pool) {
 
 fn run_fractal_noise(pool: &mut Pool) {
     let mut layout = image::DynamicImage::new_rgba8(400, 400);
-
-    let descriptor = Descriptor {
-        layout: (&layout).into(),
-        texel: buffer::Texel::with_srgb_image(&layout),
-    };
+    let descriptor = Descriptor::with_srgb_image(&layout);
 
     let mut commands = CommandBuffer::default();
     let generated = commands
@@ -357,7 +341,8 @@ fn run_transmute(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descrip
     let input = commands.input(orig_descriptor).unwrap();
 
     let transmute = commands
-        .transmute(input, buffer::Texel::with_srgb_image(&layout))
+        // FIXME: make nice again?
+        .transmute(input, Descriptor::with_srgb_image(&layout))
         .unwrap();
 
     let (output, _outformat) = commands.output(transmute).expect("Valid for output");
@@ -388,10 +373,7 @@ fn run_transmute(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descrip
 fn run_palette(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {
     let distribution_layout = {
         let layout = image::DynamicImage::new_rgba8(400, 400);
-        Descriptor {
-            layout: (&layout).into(),
-            texel: buffer::Texel::with_srgb_image(&layout),
-        }
+        Descriptor::with_srgb_image(&layout)
     };
 
     let mut commands = CommandBuffer::default();
@@ -467,23 +449,20 @@ fn run_oklab(pool: &mut Pool) {
     let color_descriptor = buffer::Descriptor::with_srgb_image(&output);
 
     let distribution_layout = buffer::Descriptor {
-        layout: color_descriptor.layout.clone(),
-        texel: buffer::Texel {
-            block: buffer::Block::Pixel,
-            samples: color_descriptor.texel.samples,
-            color: buffer::Color::Scalars {
-                transfer: buffer::Transfer::Linear,
-            },
+        color: buffer::Color::Scalars {
+            transfer: buffer::Transfer::Linear,
         },
+        ..color_descriptor.clone()
     };
 
-    let oklab_texel = buffer::Texel {
-        color: buffer::Color::Oklab,
-        block: distribution_layout.texel.block,
-        samples: buffer::Samples {
-            bits: distribution_layout.texel.samples.bits,
-            parts: buffer::SampleParts::LChA,
+    let oklab_texel = buffer::Descriptor {
+        texel: buffer::Texel {
+            block: distribution_layout.texel.block,
+            bits: distribution_layout.texel.bits,
+            parts: buffer::SampleParts::LchA,
         },
+        color: buffer::Color::Oklab,
+        ..distribution_layout.clone()
     };
 
     let sampling_grid = commands
@@ -509,7 +488,11 @@ fn run_oklab(pool: &mut Pool) {
         .transmute(sampling_grid, oklab_texel)
         .expect("Valid transmute");
     let converted = commands
-        .color_convert(lch, color_descriptor.texel.clone())
+        .color_convert(
+            lch,
+            color_descriptor.color.clone(),
+            color_descriptor.texel.clone(),
+        )
         .expect("Valid for conversion");
 
     let (output, _) = commands.output(converted).expect("Valid for output");
@@ -530,22 +513,23 @@ fn run_srlab2(pool: &mut Pool) {
         layout: color_descriptor.layout.clone(),
         texel: buffer::Texel {
             block: buffer::Block::Pixel,
-            samples: color_descriptor.texel.samples,
-            color: buffer::Color::Scalars {
-                transfer: buffer::Transfer::Linear,
-            },
+            ..color_descriptor.texel
+        },
+        color: buffer::Color::Scalars {
+            transfer: buffer::Transfer::Linear,
         },
     };
 
-    let srlab2_texel = buffer::Texel {
+    let srlab2_texel = buffer::Descriptor {
         color: buffer::Color::SrLab2 {
             whitepoint: buffer::Whitepoint::D65,
         },
-        block: distribution_layout.texel.block,
-        samples: buffer::Samples {
-            bits: distribution_layout.texel.samples.bits,
-            parts: buffer::SampleParts::LChA,
+        texel: buffer::Texel {
+            block: distribution_layout.texel.block,
+            bits: distribution_layout.texel.bits,
+            parts: buffer::SampleParts::LchA,
         },
+        ..distribution_layout
     };
 
     let sampling_grid = commands
@@ -571,7 +555,11 @@ fn run_srlab2(pool: &mut Pool) {
         .transmute(sampling_grid, srlab2_texel)
         .expect("Valid transmute");
     let converted = commands
-        .color_convert(lch, color_descriptor.texel.clone())
+        .color_convert(
+            lch,
+            color_descriptor.color.clone(),
+            color_descriptor.texel.clone(),
+        )
         .expect("Valid for conversion");
 
     let (output, _) = commands.output(converted).expect("Valid for output");

@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::buffer::{
-    Block, BufferLayout, Color, SampleBits, SampleParts, Samples, Texel, Transfer,
+    Block, BufferLayout, ByteLayout, Color, SampleBits, SampleParts, Texel, Transfer,
 };
 use crate::command::Register;
 use crate::pool::Pool;
@@ -19,6 +19,8 @@ use crate::program::{
 };
 use crate::util::ExtendOne;
 use crate::{run, shaders};
+
+use image_canvas::layout::{CanvasLayout, RowLayoutDescription};
 
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
 #[derive(Default)]
@@ -100,7 +102,9 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
 /// encoder process.
 #[derive(Clone, Debug)]
 pub(crate) struct RegisterMap {
+    pub(crate) reg_texture: Texture,
     pub(crate) texture: DeviceTexture,
+    pub(crate) reg_buffer: Buffer,
     pub(crate) buffer: DeviceBuffer,
     /// A device buffer with (COPY_DST | MAP_READ) for reading back the texture.
     pub(crate) map_read: Option<DeviceBuffer>,
@@ -113,6 +117,11 @@ pub(crate) struct RegisterMap {
     /// the layout requirements of the device. For example, the alignment of each row must be
     /// divisible by 256 etc.
     pub(crate) buffer_layout: BufferLayout,
+    /// The byte (row-wise) descriptor for the buffer layout.
+    /// Same caveat applies, this must be padded to alignments. Note that all currently supported
+    /// wgpu formats have a row-wise layout. When and if this changes, turn this field into an enum
+    /// instead?
+    pub(crate) byte_layout: ByteLayout,
     /// The format of the non-staging texture.
     pub(crate) texture_format: TextureDescriptor,
     /// The format of the staging texture.
@@ -351,7 +360,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     ) -> Result<ImageDescriptor, LaunchError> {
         let descriptor = &self.buffer_plan.texture[texture.0];
 
-        fn validate_size(layout: &BufferLayout) -> Option<(NonZeroU32, NonZeroU32)> {
+        fn validate_size(layout: &ByteLayout) -> Option<(NonZeroU32, NonZeroU32)> {
             Some((
                 NonZeroU32::new(layout.width)?,
                 NonZeroU32::new(layout.height)?,
@@ -362,47 +371,49 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
         let mut staging = None;
 
-        let format = match descriptor.texel {
-            Texel {
-                block: Block::Pixel,
-                samples:
-                    Samples {
-                        bits: SampleBits::Int8x4,
-                        parts: SampleParts::Rgba,
-                    },
-                color:
-                    Color::Rgb {
-                        transfer: Transfer::Srgb,
-                        ..
-                    },
-            } => wgpu::TextureFormat::Rgba8UnormSrgb,
-            Texel {
-                block: Block::Pixel,
-                samples:
-                    Samples {
-                        bits: SampleBits::Int8x4,
-                        parts: SampleParts::Rgba,
-                    },
-                color:
-                    Color::Rgb {
-                        transfer: Transfer::Linear,
-                        ..
-                    },
-            } => wgpu::TextureFormat::Rgba8Unorm,
-            Texel {
-                block: Block::Pixel,
-                samples,
-                color: Color::Rgb { transfer, .. },
-            }
-            | Texel {
-                block: Block::Pixel,
-                samples,
-                color: Color::Scalars { transfer, .. },
-            } => {
+        let format = match (&descriptor.texel, &descriptor.color) {
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits: SampleBits::UInt8x4,
+                    parts: SampleParts::RgbA,
+                },
+                Color::Rgb {
+                    transfer: Transfer::Srgb,
+                    ..
+                },
+            ) => wgpu::TextureFormat::Rgba8UnormSrgb,
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits: SampleBits::UInt8x4,
+                    parts: SampleParts::RgbA,
+                },
+                Color::Rgb {
+                    transfer: Transfer::Linear,
+                    ..
+                },
+            ) => wgpu::TextureFormat::Rgba8Unorm,
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits,
+                    parts,
+                },
+                Color::Rgb { transfer, .. },
+            )
+            | (
+                Texel {
+                    block: Block::Pixel,
+                    bits,
+                    parts,
+                },
+                Color::Scalars { transfer, .. },
+            ) => {
                 let parameter = shaders::stage::XyzParameter {
-                    transfer: transfer.into(),
-                    parts: samples.parts,
-                    bits: samples.bits,
+                    transfer: shaders::stage::Transfer::Rgb(*transfer),
+                    bits: *bits,
+                    parts: *parts,
                 };
 
                 let result = parameter.linear_format();
@@ -418,23 +429,22 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 result
             }
-            Texel {
-                block: Block::Pixel,
-                samples:
-                    Samples {
-                        bits,
-                        parts: parts @ (SampleParts::LChA | SampleParts::LabA),
-                    },
-                color: Color::Oklab,
-            } => {
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits,
+                    parts: parts @ (SampleParts::LchA | SampleParts::LabA),
+                },
+                Color::Oklab,
+            ) => {
                 let parameter = shaders::stage::XyzParameter {
-                    transfer: match parts {
-                        SampleParts::LChA => shaders::stage::Transfer::LabLch,
+                    transfer: match *parts {
+                        SampleParts::LchA => shaders::stage::Transfer::LabLch,
                         SampleParts::LabA => shaders::stage::Transfer::Rgb(Transfer::Linear),
                         _ => return Err(LaunchError::InternalCommandError(line!())),
                     },
-                    parts: SampleParts::LChA,
-                    bits,
+                    parts: SampleParts::LchA,
+                    bits: *bits,
                 };
 
                 // FIXME: duplicate code.
@@ -452,23 +462,22 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 result
             }
             // FIXME: very, very duplicate code.
-            Texel {
-                block: Block::Pixel,
-                samples:
-                    Samples {
-                        bits,
-                        parts: parts @ (SampleParts::LChA | SampleParts::LabA),
-                    },
-                color: Color::SrLab2 { .. },
-            } => {
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits,
+                    parts: parts @ (SampleParts::LchA | SampleParts::LabA),
+                },
+                Color::SrLab2 { .. },
+            ) => {
                 let parameter = shaders::stage::XyzParameter {
-                    transfer: match parts {
-                        SampleParts::LChA => shaders::stage::Transfer::LabLch,
+                    transfer: match *parts {
+                        SampleParts::LchA => shaders::stage::Transfer::LabLch,
                         SampleParts::LabA => shaders::stage::Transfer::Rgb(Transfer::Linear),
                         _ => return Err(LaunchError::InternalCommandError(line!())),
                     },
-                    parts: SampleParts::LChA,
-                    bits,
+                    parts: SampleParts::LchA,
+                    bits: *bits,
                 };
 
                 let result = parameter.linear_format();
@@ -525,18 +534,26 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let staging_format = staged.to_staging_texture();
         let descriptor = &self.buffer_plan.texture[reg_texture.0];
 
-        let bytes_per_row = (descriptor.layout.bytes_per_texel as u32)
+        let bytes_per_row = (descriptor.layout.texel_stride as u32)
             .checked_mul(texture_format.size.0.get())
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
         let bytes_per_row = (bytes_per_row / 256 + u32::from(bytes_per_row % 256 != 0))
             .checked_mul(256)
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
-        let buffer_layout = BufferLayout {
-            bytes_per_texel: descriptor.layout.bytes_per_texel,
+        let buffer_layout = CanvasLayout::with_row_layout(&RowLayoutDescription {
+            texel: descriptor.texel.clone(),
             width: texture_format.size.0.get(),
             height: texture_format.size.1.get(),
-            bytes_per_row,
+            row_stride: bytes_per_row.into(),
+        })
+        .expect("valid layout");
+
+        let byte_layout = ByteLayout {
+            texel_stride: descriptor.texel.bits.bytes(),
+            width: texture_format.size.0.get(),
+            height: texture_format.size.1.get(),
+            row_stride: bytes_per_row.into(),
         };
 
         let (buffer, map_write, map_read) = {
@@ -554,10 +571,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 usage: BufferUsage::DataOut,
             }))?;
 
-            // eprintln!("Buffer {:?} {:?}", buffer, buffer_layout.u64_len());
-            // eprintln!("Buffer {:?} {:?}", buffer + 1, buffer_layout.u64_len());
-            // eprintln!("Buffer {:?} {:?}", buffer + 2, buffer_layout.u64_len());
-
             (
                 DeviceBuffer(buffer),
                 DeviceBuffer(buffer + 1),
@@ -572,12 +585,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             .map(|staging| staging.device);
 
         let map_entry = RegisterMap {
+            reg_buffer,
             buffer,
+            reg_texture,
             texture,
             map_read: Some(map_read),
             map_write: Some(map_write),
             staging,
             buffer_layout,
+            byte_layout,
             texture_format,
             staging_format,
         };
@@ -689,7 +705,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let source_image = self.ingest_image_data(idx)?;
         self.input_map.insert(idx, source_image);
 
-        let descriptor = &self.buffer_plan.texture[regmap.texture.0];
+        let descriptor = &self.buffer_plan.texture[regmap.reg_texture.0];
         let size = descriptor.size();
 
         // See below, required for direct buffer-to-buffer copy.
@@ -698,12 +714,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // FIXME: if it is a simple copy we can use regmap.buffer directly.
         let target_buffer = regmap.map_write.unwrap_or(regmap.buffer);
 
+        // FIXME: should we validate size here as well for better errors?
+        // Potentially all errors are internal so it might not matter.
         self.push(Low::WriteImageToBuffer {
             source_image,
             size,
             offset: (0, 0),
             target_buffer,
-            target_layout: regmap.buffer_layout,
+            target_layout: regmap.byte_layout,
         })?;
 
         // FIXME: we're using wgpu internal's scheduling for writing the data to the gpu buffer but
@@ -745,7 +763,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyBufferToTexture {
             source_buffer: regmap.buffer,
-            source_layout: regmap.buffer_layout,
+            source_layout: regmap.byte_layout,
             offset: (0, 0),
             size,
             target_texture,
@@ -875,7 +893,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             offset: (0, 0),
             size,
             target_buffer: regmap.buffer,
-            target_layout: regmap.buffer_layout,
+            target_layout: regmap.byte_layout,
         })?;
         self.push(Low::EndCommands)?;
         // TODO: maybe also don't run it immediately?
@@ -916,7 +934,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         self.push(Low::ReadBuffer {
             source_buffer,
-            source_layout: regmap.buffer_layout,
+            source_layout: regmap.byte_layout,
             size,
             offset: (0, 0),
             target_image,

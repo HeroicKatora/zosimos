@@ -47,8 +47,8 @@ fn integration() {
     let placement = command::Rectangle {
         x: 0,
         y: 0,
-        max_x: foreground.layout.width(),
-        max_y: foreground.layout.height(),
+        max_x: foreground.layout.width,
+        max_y: foreground.layout.height,
     };
 
     // Describe the pipeline:

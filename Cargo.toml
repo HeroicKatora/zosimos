@@ -15,8 +15,7 @@ version = "0.24.0"
 default-features = false
 
 [dependencies.image-canvas]
-git = "https://github.com/image-rs/canvas"
-rev = "a9eb1ff32715d5eb909bc09f33f24a6415bde905"
+version = "0.4.2"
 
 [dependencies.palette]
 version = "0.5.0"

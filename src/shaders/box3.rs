@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use super::{BufferInitContent, FragmentShaderData, FragmentShaderKey};
-use crate::buffer::RowMatrix;
+use crate::color_matrix::RowMatrix;
 
 /// a linear transformation on rgb color.
 pub const SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spirv/box3.frag.v"));

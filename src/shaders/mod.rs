@@ -1,4 +1,4 @@
-use crate::buffer::RowMatrix;
+use crate::color_matrix::RowMatrix;
 use crate::program::BufferInitContent;
 use std::borrow::Cow;
 use std::sync::Arc;
