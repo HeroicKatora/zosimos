@@ -787,14 +787,16 @@ impl CommandBuffer {
     /// One important use of this method is to add or removed the color interpretation of an image.
     /// This can be necessary when it has been algorithmically created or when one wants to
     /// intentionally ignore such meaning.
-    pub fn transmute(&mut self, src: Register, texel: Texel) -> Result<Register, CommandError> {
+    pub fn transmute(&mut self, src: Register, into: Descriptor) -> Result<Register, CommandError> {
         let desc = self.describe_reg(src)?;
 
-        let supposed_type = Descriptor {
-            layout: desc.layout.clone(),
-            color: desc.color.clone(),
-            texel,
-        };
+        let supposed_type = into;
+
+        if desc.layout != supposed_type.layout {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(supposed_type),
+            });
+        }
 
         if desc.texel.bits.bytes() != supposed_type.texel.bits.bytes() {
             return Err(CommandError {

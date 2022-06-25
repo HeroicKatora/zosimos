@@ -342,7 +342,7 @@ fn run_transmute(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descrip
 
     let transmute = commands
         // FIXME: make nice again?
-        .transmute(input, Descriptor::with_srgb_image(&layout).texel)
+        .transmute(input, Descriptor::with_srgb_image(&layout))
         .unwrap();
 
     let (output, _outformat) = commands.output(transmute).expect("Valid for output");
@@ -455,10 +455,14 @@ fn run_oklab(pool: &mut Pool) {
         ..color_descriptor.clone()
     };
 
-    let oklab_texel = buffer::Texel {
-        block: distribution_layout.texel.block,
-        bits: distribution_layout.texel.bits,
-        parts: buffer::SampleParts::LchA,
+    let oklab_texel = buffer::Descriptor {
+        texel: buffer::Texel {
+            block: distribution_layout.texel.block,
+            bits: distribution_layout.texel.bits,
+            parts: buffer::SampleParts::LchA,
+        },
+        color: buffer::Color::Oklab,
+        ..distribution_layout.clone()
     };
 
     let sampling_grid = commands
@@ -482,7 +486,6 @@ fn run_oklab(pool: &mut Pool) {
 
     let lch = commands
         .transmute(sampling_grid, oklab_texel)
-        // FIXME: color: buffer::Color::Oklab,
         .expect("Valid transmute");
     let converted = commands
         .color_convert(lch, color_descriptor.color.clone(), color_descriptor.texel.clone())
