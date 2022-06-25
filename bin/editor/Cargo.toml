@@ -1,0 +1,48 @@
+[package]
+name = "stealth-paint-editor"
+version = "0.0.0"
+authors = ["Andreas Molzer <andreas.molzer@gmx.de>"]
+edition = "2021"
+license = "MPL-2.0"
+resolver = "2"
+
+# Wasm compatibility following, roughly
+# <https://sotrh.github.io/learn-wgpu/beginner/tutorial1-window/#the-code>
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "stealth-paint-editor"
+path = "src/main.rs"
+
+
+[dependencies.stealth-paint]
+path = "../../"
+
+## 'Optional' dependencies for the binary.
+[dependencies.winit]
+version = "0.26"
+optional = true
+
+[dependencies.egui]
+version = "0.18"
+optional = true
+[dependencies.egui-wgpu]
+version = "0.18"
+optional = true
+
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = "0.9.0"
+
+# Wasm compatibility following, roughly
+# <https://sotrh.github.io/learn-wgpu/beginner/tutorial1-window/#the-code>
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "0.12", features = ["webgl"]}
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4.30"
+web-sys = { version = "=0.3.53", features = [
+    "Document",
+    "Window",
+    "Element",
+]}

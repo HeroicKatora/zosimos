@@ -30,6 +30,10 @@ default-features = false
 version = "0.12"
 features = ["spirv"]
 
+[workspace]
+members = [".", "bin/editor"]
+
+
 [build-dependencies]
 shaderc = "0.7"
 
