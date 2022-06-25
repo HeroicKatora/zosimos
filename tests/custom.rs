@@ -70,7 +70,8 @@ fn mandelbrot() {
     }));
 
     let srgb = Descriptor::with_srgb_image(&target);
-    let srgb = commands.color_convert(brot, srgb.color, srgb.texel)
+    let srgb = commands
+        .color_convert(brot, srgb.color, srgb.texel)
         .expect("Valid for color conversion");
     let (output, _outformat) = commands.output(srgb).expect("Valid for output");
 

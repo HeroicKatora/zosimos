@@ -488,7 +488,11 @@ fn run_oklab(pool: &mut Pool) {
         .transmute(sampling_grid, oklab_texel)
         .expect("Valid transmute");
     let converted = commands
-        .color_convert(lch, color_descriptor.color.clone(), color_descriptor.texel.clone())
+        .color_convert(
+            lch,
+            color_descriptor.color.clone(),
+            color_descriptor.texel.clone(),
+        )
         .expect("Valid for conversion");
 
     let (output, _) = commands.output(converted).expect("Valid for output");
@@ -551,7 +555,11 @@ fn run_srlab2(pool: &mut Pool) {
         .transmute(sampling_grid, srlab2_texel)
         .expect("Valid transmute");
     let converted = commands
-        .color_convert(lch, color_descriptor.color.clone(), color_descriptor.texel.clone())
+        .color_convert(
+            lch,
+            color_descriptor.color.clone(),
+            color_descriptor.texel.clone(),
+        )
         .expect("Valid for conversion");
 
     let (output, _) = commands.output(converted).expect("Valid for output");

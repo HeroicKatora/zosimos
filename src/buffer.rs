@@ -1,20 +1,10 @@
 //! Defines layout and buffer of our images.
 pub use image_canvas::{
-    Canvas,
+    color::{Color, ColorChannel, Transfer, Whitepoint},
     layout::{
-        CanvasLayout as BufferLayout,
-        Block,
-        RowLayoutDescription,
-        SampleBits,
-        SampleParts,
-        Texel,
+        Block, CanvasLayout as BufferLayout, RowLayoutDescription, SampleBits, SampleParts, Texel,
     },
-    color::{
-        Color,
-        ColorChannel,
-        Transfer,
-        Whitepoint,
-    },
+    Canvas,
 };
 
 #[derive(Clone)]
@@ -92,7 +82,7 @@ impl TexelExt for Texel {
 
 impl Descriptor {
     pub fn empty() -> Self {
-            Descriptor {
+        Descriptor {
             layout: ByteLayout {
                 width: 0,
                 height: 0,
@@ -112,14 +102,21 @@ impl Descriptor {
             texel_stride: texel.bits.bytes(),
         };
 
-        let color = Color::Scalars { transfer: Transfer::Linear };
-        let this = Descriptor { color, layout, texel };
+        let color = Color::Scalars {
+            transfer: Transfer::Linear,
+        };
+        let this = Descriptor {
+            color,
+            layout,
+            texel,
+        };
         let _ = this.try_to_canvas()?;
         Some(this)
     }
 
     pub(crate) fn to_canvas(&self) -> BufferLayout {
-        self.try_to_canvas().expect("To be validated on construction")
+        self.try_to_canvas()
+            .expect("To be validated on construction")
     }
 
     pub(crate) fn try_to_canvas(&self) -> Option<BufferLayout> {
@@ -357,8 +354,9 @@ impl From<&'_ image::DynamicImage> for ImageBuffer {
             width: image.width(),
             height: image.height(),
             row_stride: descriptor.layout.row_stride,
-            texel: descriptor.texel
-        }).expect("Valid layout");
+            texel: descriptor.texel,
+        })
+        .expect("Valid layout");
         layout.set_color(descriptor.color);
         let mut inner = Canvas::new(layout);
 

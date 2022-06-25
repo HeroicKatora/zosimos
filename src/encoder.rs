@@ -372,38 +372,42 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let mut staging = None;
 
         let format = match (&descriptor.texel, &descriptor.color) {
-            (Texel {
-                block: Block::Pixel,
-                bits: SampleBits::UInt8x4,
-                parts: SampleParts::RgbA,
-            },
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits: SampleBits::UInt8x4,
+                    parts: SampleParts::RgbA,
+                },
                 Color::Rgb {
                     transfer: Transfer::Srgb,
                     ..
                 },
             ) => wgpu::TextureFormat::Rgba8UnormSrgb,
-            (Texel {
-                block: Block::Pixel,
-                bits: SampleBits::UInt8x4,
-                parts: SampleParts::RgbA,
-            },
-                    Color::Rgb {
-                        transfer: Transfer::Linear,
-                        ..
-                    },
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits: SampleBits::UInt8x4,
+                    parts: SampleParts::RgbA,
+                },
+                Color::Rgb {
+                    transfer: Transfer::Linear,
+                    ..
+                },
             ) => wgpu::TextureFormat::Rgba8Unorm,
-            (Texel {
-                block: Block::Pixel,
-                bits,
-                parts,
-            },
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits,
+                    parts,
+                },
                 Color::Rgb { transfer, .. },
             )
-            | (Texel {
-                block: Block::Pixel,
-                bits,
-                parts,
-            },
+            | (
+                Texel {
+                    block: Block::Pixel,
+                    bits,
+                    parts,
+                },
                 Color::Scalars { transfer, .. },
             ) => {
                 let parameter = shaders::stage::XyzParameter {
@@ -425,12 +429,13 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 result
             }
-            (Texel {
-                block: Block::Pixel,
-                bits,
-                parts: parts @ (SampleParts::LchA | SampleParts::LabA),
-            },
-                Color::Oklab
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits,
+                    parts: parts @ (SampleParts::LchA | SampleParts::LabA),
+                },
+                Color::Oklab,
             ) => {
                 let parameter = shaders::stage::XyzParameter {
                     transfer: match *parts {
@@ -457,13 +462,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 result
             }
             // FIXME: very, very duplicate code.
-            (Texel {
-                block: Block::Pixel,
-                bits,
-                parts: parts @ (SampleParts::LchA | SampleParts::LabA),
-            },
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits,
+                    parts: parts @ (SampleParts::LchA | SampleParts::LabA),
+                },
                 Color::SrLab2 { .. },
-            )=> {
+            ) => {
                 let parameter = shaders::stage::XyzParameter {
                     transfer: match *parts {
                         SampleParts::LchA => shaders::stage::Transfer::LabLch,
@@ -540,7 +546,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             width: texture_format.size.0.get(),
             height: texture_format.size.1.get(),
             row_stride: bytes_per_row.into(),
-        }).expect("valid layout");
+        })
+        .expect("valid layout");
 
         let byte_layout = ByteLayout {
             texel_stride: descriptor.texel.bits.bytes(),

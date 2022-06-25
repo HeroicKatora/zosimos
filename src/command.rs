@@ -691,7 +691,10 @@ impl CommandBuffer {
             }
         };
 
-        let desc = Descriptor { color: texel_color, ..desc_src.clone() };
+        let desc = Descriptor {
+            color: texel_color,
+            ..desc_src.clone()
+        };
 
         let op = Op::Unary {
             src,
@@ -751,7 +754,10 @@ impl CommandBuffer {
         channel: ColorChannel,
     ) -> Result<Register, CommandError> {
         let desc = self.describe_reg(src)?;
-        let texel = desc.texel.channel_texel(channel).ok_or(CommandError::OTHER)?;
+        let texel = desc
+            .texel
+            .channel_texel(channel)
+            .ok_or(CommandError::OTHER)?;
 
         let layout = ByteLayout {
             texel_stride: texel.bits.bytes(),
@@ -772,7 +778,11 @@ impl CommandBuffer {
         let op = Op::Unary {
             src,
             op: UnaryOp::Extract { channel },
-            desc: Descriptor { color, layout, texel },
+            desc: Descriptor {
+                color,
+                layout,
+                texel,
+            },
         };
 
         Ok(self.push(op))
@@ -831,14 +841,13 @@ impl CommandBuffer {
         above: Register,
     ) -> Result<Register, CommandError> {
         let desc_below = self.describe_reg(below)?;
-        let expected_texel = desc_below.texel
+        let expected_texel = desc_below
+            .texel
             .channel_texel(channel)
             .ok_or(CommandError::OTHER)?;
         let mut desc_above = self.describe_reg(above)?.clone();
 
-        if desc_above.texel.parts.num_components()
-            != expected_texel.parts.num_components()
-        {
+        if desc_above.texel.parts.num_components() != expected_texel.parts.num_components() {
             let wanted = Descriptor {
                 texel: expected_texel,
                 ..desc_below.clone()
@@ -916,7 +925,8 @@ impl CommandBuffer {
             desc.texel.clone(),
             idx_desc.layout.width,
             idx_desc.layout.height,
-        ).ok_or(CommandError::OTHER)?;
+        )
+        .ok_or(CommandError::OTHER)?;
 
         let op = Op::Binary {
             lhs: palette,
@@ -1007,9 +1017,7 @@ impl CommandBuffer {
             });
         }
 
-        if describe.texel.parts != SampleParts::Luma
-            && describe.texel.parts != SampleParts::LumaA
-        {
+        if describe.texel.parts != SampleParts::Luma && describe.texel.parts != SampleParts::LumaA {
             return Err(CommandError {
                 inner: CommandErrorKind::BadDescriptor(describe),
             });
