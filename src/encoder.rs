@@ -374,7 +374,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let format = match (&descriptor.texel, &descriptor.color) {
             (Texel {
                 block: Block::Pixel,
-                bits: SampleBits::Int8x4,
+                bits: SampleBits::UInt8x4,
                 parts: SampleParts::RgbA,
             },
                 Color::Rgb {
@@ -384,7 +384,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             ) => wgpu::TextureFormat::Rgba8UnormSrgb,
             (Texel {
                 block: Block::Pixel,
-                bits: SampleBits::Int8x4,
+                bits: SampleBits::UInt8x4,
                 parts: SampleParts::RgbA,
             },
                     Color::Rgb {

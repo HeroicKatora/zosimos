@@ -41,7 +41,7 @@ impl XyzParameter {
         [
             self.transfer.as_u32(),
             Self::serialize_parts(self.parts),
-            self.bits as u32,
+            Self::serialize_bits(self.bits),
             // Upper bits are still reserved for texel block size.
             self.horizontal_subfactor() & 0xff,
         ]
@@ -79,6 +79,29 @@ impl XyzParameter {
             S::Lch => 19,
             S::LchA => 20,
             _ => todo!("{:?}", parts),
+        }
+    }
+
+    pub(crate) fn serialize_bits(bits: SampleBits) -> u32 {
+        use SampleBits as S;
+        match bits {
+            S::UInt8 => 0,
+            S::UInt332 => 1,
+            S::UInt233 => 2,
+            S::UInt16 => 3,
+            S::UInt4x4 => 4,
+            S::UInt565 => 7,
+            S::UInt8x2 => 8,
+            S::UInt8x3 => 9,
+            S::UInt8x4 => 10,
+            S::UInt16x2 => 11,
+            S::UInt16x3 => 12,
+            S::UInt16x4 => 13,
+            S::UInt2101010 => 14,
+            S::UInt1010102 => 15,
+            S::Float16x4 => 18,
+            S::Float32x4 => 19,
+            _ => todo!("{:?}", bits),
         }
     }
 
