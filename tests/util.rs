@@ -33,6 +33,7 @@ pub fn assert_reference_image(image: image::DynamicImage, key: &str) {
     let debug_path = Path::new(DEBUG).join(key);
 
     if std::env::var_os("STEALTH_PAINT_BLESS").is_some() {
+        eprintln!("{}: {:?}", key, image.color());
         std::fs::write(&output, format!("{}", crc)).expect("Failed to bless result");
         image
             .save_with_format(&debug_path, image::ImageFormat::Png)

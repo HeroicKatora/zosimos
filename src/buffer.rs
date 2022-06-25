@@ -360,7 +360,13 @@ impl From<&'_ image::DynamicImage> for ImageBuffer {
             texel: descriptor.texel
         }).expect("Valid layout");
         layout.set_color(descriptor.color);
-        let inner = Canvas::new(layout);
+        let mut inner = Canvas::new(layout);
+
+        let source = image.as_bytes();
+        let target = inner.as_bytes_mut();
+        let len = source.len().min(target.len());
+        target[..len].copy_from_slice(&source[..len]);
+
         ImageBuffer { inner }
     }
 }

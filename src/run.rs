@@ -740,6 +740,9 @@ impl Host {
                     .await
                     .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
 
+                // eprintln!("WriteImageToBuffer");
+                // eprintln!(" Source: {:?}", source_image.0);
+                // eprintln!(" Target: {:?}", target_buffer.0);
                 let mut data = slice.get_mapped_range_mut();
 
                 // We've checked that this image can be seen as host bytes.
@@ -793,12 +796,13 @@ impl Host {
                     depth_or_array_layers: 1,
                 };
 
-                // eprintln!("Source: {:?}", source_buffer);
-                // eprintln!("Target: {:?}", target_texture);
+                // eprintln!("CopyBufferToTexture");
+                // eprintln!(" Source: {:?}", source_buffer);
+                // eprintln!(" Target: {:?}", target_texture);
 
                 // eprintln!("{:?}", buffer);
                 // eprintln!("{:?}", texture);
-                // eprintln!("{:?}", extent);
+                // eprintln!(" {:?}", extent);
 
                 encoder.copy_buffer_to_texture(buffer, texture, extent);
 
@@ -852,6 +856,11 @@ impl Host {
                     Some(target) => target,
                     None => return Err(StepError::InvalidInstruction(line!())),
                 };
+
+                // eprintln!("CopyBufferToBuffer");
+                // eprintln!(" Source: {:?}", source_buffer.0);
+                // eprintln!(" Target: {:?}", target_buffer.0);
+                // eprintln!(" Size: {:?}", size);
 
                 encoder.copy_buffer_to_buffer(source, 0, target, 0, size);
 
