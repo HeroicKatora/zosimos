@@ -65,7 +65,20 @@ impl XyzParameter {
             S::R => 1,
             S::G => 2,
             S::B => 3,
-            _ => todo!(),
+            S::Luma => 4,
+            S::LumaA => 5,
+            S::Rgb => 6,
+            S::Bgr => 7,
+            S::RgbA => 8,
+            S::BgrA => 9,
+            S::ARgb => 12,
+            S::ABgr => 14,
+            S::Yuv => 16,
+            S::Lab => 17,
+            S::LabA => 18,
+            S::Lch => 19,
+            S::LchA => 20,
+            _ => todo!("{:?}", parts),
         }
     }
 

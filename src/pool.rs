@@ -248,7 +248,7 @@ impl PoolImage<'_> {
     pub fn to_image(&self) -> Option<image::DynamicImage> {
         let data = self.as_bytes()?;
         let layout = self.layout();
-        let descriptor = self.image.descriptor;
+        let descriptor = &self.image.descriptor;
 
         let image = Descriptor::as_image_allocator(&descriptor.texel)?;
         let image = image(layout.width(), layout.height(), data)?;
@@ -267,7 +267,8 @@ impl PoolImage<'_> {
     ///
     /// This is only available if a valid `Texel` descriptor has been configured.
     pub fn descriptor(&self) -> Descriptor {
-        self.image.descriptor
+        // TODO: return reference?
+        self.image.descriptor.clone()
     }
 
     /// View the buffer as bytes.
@@ -314,8 +315,8 @@ impl PoolImageMut<'_> {
 
     /// Configure the color of this image, not changing any data.
     pub fn set_color(&mut self, color: Color) {
-        let parts = self.image.descriptor.texel.parts;
         // FIXME: re-add assert?
+        // let parts = self.image.descriptor.texel.parts;
         // assert!(color.is_consistent(parts));
         self.image.descriptor.color = color;
     }

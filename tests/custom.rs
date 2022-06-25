@@ -60,19 +60,17 @@ fn mandelbrot() {
 
     let mut commands = CommandBuffer::default();
     let brot = commands.construct_dynamic(&Mandelbrot::new(Descriptor {
-        layout: buffer::BufferLayout::from(&target),
+        layout: buffer::ByteLayout::from(&target),
+        color: buffer::Color::Oklab,
         texel: buffer::Texel {
-            color: buffer::Color::Oklab,
             block: buffer::Block::Pixel,
-            samples: buffer::Samples {
-                bits: buffer::SampleBits::Int8x4,
-                parts: buffer::SampleParts::LChA,
-            },
+            bits: buffer::SampleBits::Int8x4,
+            parts: buffer::SampleParts::LChA,
         },
     }));
 
-    let srgb = commands
-        .color_convert(brot, buffer::Texel::with_srgb_image(&target))
+    let srgb = Descriptor::with_srgb_image(&target);
+    let srgb = commands.color_convert(brot, srgb.color, srgb.texel)
         .expect("Valid for color conversion");
     let (output, _outformat) = commands.output(srgb).expect("Valid for output");
 

@@ -115,6 +115,11 @@ pub(crate) struct RegisterMap {
     /// the layout requirements of the device. For example, the alignment of each row must be
     /// divisible by 256 etc.
     pub(crate) buffer_layout: BufferLayout,
+    /// The byte (row-wise) descriptor for the buffer layout.
+    /// Same caveat applies, this must be padded to alignments. Note that all currently supported
+    /// wgpu formats have a row-wise layout. When and if this changes, turn this field into an enum
+    /// instead?
+    pub(crate) byte_layout: ByteLayout,
     /// The format of the non-staging texture.
     pub(crate) texture_format: TextureDescriptor,
     /// The format of the staging texture.
@@ -529,12 +534,18 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
         let buffer_layout = CanvasLayout::with_row_layout(&RowLayoutDescription {
-            texel: descriptor.texel,
+            texel: descriptor.texel.clone(),
             width: texture_format.size.0.get(),
             height: texture_format.size.1.get(),
             row_stride: bytes_per_row.into(),
         }).expect("valid layout");
 
+        let byte_layout = ByteLayout {
+            texel_stride: descriptor.texel.bits.bytes(),
+            width: texture_format.size.0.get(),
+            height: texture_format.size.1.get(),
+            row_stride: bytes_per_row.into(),
+        };
 
         let (buffer, map_write, map_read) = {
             let buffer = self.buffers;
@@ -571,6 +582,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             map_write: Some(map_write),
             staging,
             buffer_layout,
+            byte_layout,
             texture_format,
             staging_format,
         };
@@ -691,12 +703,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // FIXME: if it is a simple copy we can use regmap.buffer directly.
         let target_buffer = regmap.map_write.unwrap_or(regmap.buffer);
 
+        // FIXME: should we validate size here as well for better errors?
+        // Potentially all errors are internal so it might not matter.
         self.push(Low::WriteImageToBuffer {
             source_image,
             size,
             offset: (0, 0),
             target_buffer,
-            target_layout: regmap.buffer_layout,
+            target_layout: regmap.byte_layout,
         })?;
 
         // FIXME: we're using wgpu internal's scheduling for writing the data to the gpu buffer but
@@ -738,7 +752,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyBufferToTexture {
             source_buffer: regmap.buffer,
-            source_layout: regmap.buffer_layout,
+            source_layout: regmap.byte_layout,
             offset: (0, 0),
             size,
             target_texture,
@@ -868,7 +882,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             offset: (0, 0),
             size,
             target_buffer: regmap.buffer,
-            target_layout: regmap.buffer_layout,
+            target_layout: regmap.byte_layout,
         })?;
         self.push(Low::EndCommands)?;
         // TODO: maybe also don't run it immediately?
@@ -909,7 +923,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         self.push(Low::ReadBuffer {
             source_buffer,
-            source_layout: regmap.buffer_layout,
+            source_layout: regmap.byte_layout,
             size,
             offset: (0, 0),
             target_image,

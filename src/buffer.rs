@@ -91,16 +91,18 @@ impl TexelExt for Texel {
 }
 
 impl Descriptor {
-    pub const EMPTY: Self = Descriptor {
-        layout: ByteLayout {
-            width: 0,
-            height: 0,
-            row_stride: 0,
-            texel_stride: 0,
-        },
-        color: Color::SRGB,
-        texel: Texel::new_u8(SampleParts::RgbA),
-    };
+    pub fn empty() -> Self {
+            Descriptor {
+            layout: ByteLayout {
+                width: 0,
+                height: 0,
+                row_stride: 0,
+                texel_stride: 0,
+            },
+            color: Color::SRGB,
+            texel: Texel::new_u8(SampleParts::RgbA),
+        }
+    }
 
     pub fn with_texel(texel: Texel, width: u32, height: u32) -> Option<Self> {
         let layout = ByteLayout {
@@ -125,7 +127,7 @@ impl Descriptor {
             width: self.layout.width,
             height: self.layout.height,
             row_stride: self.layout.row_stride,
-            texel: self.texel,
+            texel: self.texel.clone(),
         };
 
         BufferLayout::with_row_layout(&descriptor).ok()
@@ -170,16 +172,6 @@ impl Descriptor {
         }
     }
 
-    pub(crate) fn into_vec4(that: SampleParts) -> Option<[f32; 4]> {
-        Some(match that {
-            SampleParts::A => [0.0, 0.0, 0.0, 1.0],
-            SampleParts::R => [1.0, 0.0, 0.0, 0.0],
-            SampleParts::G => [0.0, 1.0, 0.0, 0.0],
-            SampleParts::B => [0.0, 0.0, 1.0, 0.0],
-            _ => return None,
-        })
-    }
-
     pub(crate) fn as_image_allocator(that: &Texel) -> Option<ImageAllocator> {
         use SampleBits as B;
         use SampleParts as P;
@@ -188,7 +180,7 @@ impl Descriptor {
             Texel {
                 block: Block::Pixel,
                 parts: P::Luma,
-                bits: B::Int8,
+                bits: B::UInt8,
             } => |width, height, source| {
                 let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
                 Some(image::DynamicImage::ImageLuma8(buffer))
@@ -196,7 +188,7 @@ impl Descriptor {
             Texel {
                 block: Block::Pixel,
                 parts: P::LumaA,
-                bits: B::Int8x2,
+                bits: B::UInt8x2,
             } => |width, height, source| {
                 let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
                 Some(image::DynamicImage::ImageLumaA8(buffer))
@@ -204,7 +196,7 @@ impl Descriptor {
             Texel {
                 block: Block::Pixel,
                 parts: P::Rgb,
-                bits: B::Int8x3,
+                bits: B::UInt8x3,
             } => |width, height, source| {
                 let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
                 Some(image::DynamicImage::ImageRgb8(buffer))
@@ -212,7 +204,7 @@ impl Descriptor {
             Texel {
                 block: Block::Pixel,
                 parts: P::RgbA,
-                bits: B::Int8x4,
+                bits: B::UInt8x4,
             } => |width, height, source| {
                 let buffer = image::ImageBuffer::from_vec(width, height, source.to_vec())?;
                 Some(image::DynamicImage::ImageRgba8(buffer))
@@ -221,7 +213,7 @@ impl Descriptor {
             Texel {
                 block: Block::Pixel,
                 parts: P::Luma,
-                bits: B::Int16,
+                bits: B::UInt16,
             } => |width, height, source| {
                 let source = &source[..(source.len() / 2) * 2];
                 let buffer = image::ImageBuffer::from_vec(width, height, {
@@ -234,7 +226,7 @@ impl Descriptor {
             Texel {
                 block: Block::Pixel,
                 parts: P::LumaA,
-                bits: B::Int16x2,
+                bits: B::UInt16x2,
             } => |width, height, source| {
                 let source = &source[..(source.len() / 2) * 2];
                 let buffer = image::ImageBuffer::from_vec(width, height, {
@@ -247,7 +239,7 @@ impl Descriptor {
             Texel {
                 block: Block::Pixel,
                 parts: P::Rgb,
-                bits: B::Int16x3,
+                bits: B::UInt16x3,
             } => |width, height, source| {
                 let source = &source[..(source.len() / 2) * 2];
                 let buffer = image::ImageBuffer::from_vec(width, height, {
@@ -260,7 +252,7 @@ impl Descriptor {
             Texel {
                 block: Block::Pixel,
                 parts: P::RgbA,
-                bits: B::Int16x4,
+                bits: B::UInt16x4,
             } => |width, height, source| {
                 let source = &source[..(source.len() / 2) * 2];
                 let buffer = image::ImageBuffer::from_vec(width, height, {
@@ -279,42 +271,42 @@ impl Descriptor {
         match image {
             ImageLuma8(_) => Texel {
                 block: Block::Pixel,
-                bits: SampleBits::Int8,
+                bits: SampleBits::UInt8,
                 parts: SampleParts::Luma,
             },
             ImageLumaA8(_) => Texel {
                 block: Block::Pixel,
-                bits: SampleBits::Int8x2,
+                bits: SampleBits::UInt8x2,
                 parts: SampleParts::LumaA,
             },
             ImageLuma16(_) => Texel {
                 block: Block::Pixel,
-                bits: SampleBits::Int16,
+                bits: SampleBits::UInt16,
                 parts: SampleParts::Luma,
             },
             ImageLumaA16(_) => Texel {
                 block: Block::Pixel,
-                bits: SampleBits::Int16x2,
+                bits: SampleBits::UInt16x2,
                 parts: SampleParts::LumaA,
             },
             ImageRgb8(_) => Texel {
                 block: Block::Pixel,
-                bits: SampleBits::Int8x3,
+                bits: SampleBits::UInt8x3,
                 parts: SampleParts::Rgb,
             },
             ImageRgba8(_) => Texel {
                 block: Block::Pixel,
-                bits: SampleBits::Int8x4,
+                bits: SampleBits::UInt8x4,
                 parts: SampleParts::RgbA,
             },
             ImageRgb16(_) => Texel {
                 block: Block::Pixel,
-                bits: SampleBits::Int16x3,
+                bits: SampleBits::UInt16x3,
                 parts: SampleParts::Rgb,
             },
             ImageRgba16(_) => Texel {
                 block: Block::Pixel,
-                bits: SampleBits::Int16x4,
+                bits: SampleBits::UInt16x4,
                 parts: SampleParts::RgbA,
             },
             _ => unreachable!("Promise, we match the rest"),
@@ -375,7 +367,8 @@ impl From<&'_ image::DynamicImage> for ImageBuffer {
 
 impl From<&'_ BufferLayout> for Descriptor {
     fn from(buf: &BufferLayout) -> Descriptor {
-        let plane = buf.as_plane().unwrap();
+        // FIXME: panics on purpose.
+        let _plane = buf.as_plane().unwrap();
 
         let layout = ByteLayout {
             width: buf.width(),
@@ -386,8 +379,10 @@ impl From<&'_ BufferLayout> for Descriptor {
 
         Descriptor {
             layout,
-            color: buf.color().unwrap().clone(),
-            texel: *buf.texel(),
+            // FIXME: this makes me reconsider if it should be a From-impl. Maybe just a regular
+            // method that notes this default in its name?
+            color: buf.color().unwrap_or(&Color::SRGB).clone(),
+            texel: buf.texel().clone(),
         }
     }
 }

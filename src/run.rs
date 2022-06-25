@@ -746,15 +746,20 @@ impl Host {
                 let source: &[u8] = image.as_bytes().unwrap();
                 let target: &mut [u8] = &mut data[..];
 
-                // TODO: defensive programming, don't assume cast works.
+                // TODO: defensive programming, don't assume cast works. Proof?
                 let target_pitch = bytes_per_row as usize;
                 // TODO(perf): should this use our internal descriptor?
                 let source_pitch = image.layout().as_row_layout().row_stride as usize;
 
                 for x in 0..height {
-                    let source_row = &source[(x as usize * source_pitch)..][..source_pitch];
-                    let target_row = &mut target[(x as usize * target_pitch)..][..target_pitch];
-
+                    let source_line = x as usize * source_pitch;
+                    debug_assert!(source.get(source_line..).is_some());
+                    debug_assert!(source[source_line..].len() >= source_pitch);
+                    let source_row = &source[source_line..][..source_pitch];
+                    let target_line = x as usize * target_pitch;
+                    debug_assert!(target.get(target_line..).is_some());
+                    debug_assert!(target[target_line..].len() >= target_pitch);
+                    let target_row = &mut target[target_line..][..target_pitch];
                     target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
                 }
 

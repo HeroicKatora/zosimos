@@ -2,7 +2,7 @@ mod dynamic;
 
 pub use self::dynamic::{ShaderCommand, ShaderData, ShaderSource};
 
-use crate::buffer::{self, BufferLayout, ByteLayout, ChannelPosition, Descriptor, TexelExt};
+use crate::buffer::{BufferLayout, ByteLayout, ChannelPosition, Descriptor, TexelExt};
 use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
@@ -691,7 +691,7 @@ impl CommandBuffer {
             }
         };
 
-        let desc = Descriptor { color: texel_color, ..*desc_src };
+        let desc = Descriptor { color: texel_color, ..desc_src.clone() };
 
         let op = Op::Unary {
             src,
@@ -848,7 +848,7 @@ impl CommandBuffer {
         }
 
         // Override the sample part interpretation.
-        let from_channels = desc_above.texel;
+        let from_channels = desc_above.texel.clone();
         desc_above.texel.parts = expected_texel.parts;
 
         // FIXME: should we do parsing instead of validation?
@@ -911,7 +911,7 @@ impl CommandBuffer {
 
         // Compute the target layout (and that we can represent it).
         let target_layout = Descriptor::with_texel(
-            desc.texel,
+            desc.texel.clone(),
             idx_desc.layout.width,
             idx_desc.layout.height,
         ).ok_or(CommandError::OTHER)?;
@@ -927,7 +927,7 @@ impl CommandBuffer {
             }),
             desc: Descriptor {
                 layout: target_layout.layout,
-                ..*desc
+                ..desc.clone()
             },
         };
 
