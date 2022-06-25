@@ -15,8 +15,7 @@ version = "0.24.0"
 default-features = false
 
 [dependencies.image-canvas]
-path = "../image-canvas/canvas"
-version = "0.4"
+version = "0.4.2"
 
 [dependencies.palette]
 version = "0.5.0"
