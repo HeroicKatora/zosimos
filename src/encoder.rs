@@ -102,7 +102,9 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
 /// encoder process.
 #[derive(Clone, Debug)]
 pub(crate) struct RegisterMap {
+    pub(crate) reg_texture: Texture,
     pub(crate) texture: DeviceTexture,
+    pub(crate) reg_buffer: Buffer,
     pub(crate) buffer: DeviceBuffer,
     /// A device buffer with (COPY_DST | MAP_READ) for reading back the texture.
     pub(crate) map_read: Option<DeviceBuffer>,
@@ -576,7 +578,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             .map(|staging| staging.device);
 
         let map_entry = RegisterMap {
+            reg_buffer,
             buffer,
+            reg_texture,
             texture,
             map_read: Some(map_read),
             map_write: Some(map_write),
@@ -694,7 +698,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let source_image = self.ingest_image_data(idx)?;
         self.input_map.insert(idx, source_image);
 
-        let descriptor = &self.buffer_plan.texture[regmap.texture.0];
+        let descriptor = &self.buffer_plan.texture[regmap.reg_texture.0];
         let size = descriptor.size();
 
         // See below, required for direct buffer-to-buffer copy.
