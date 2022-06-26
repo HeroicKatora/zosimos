@@ -631,6 +631,18 @@ impl ImagePoolPlan {
 }
 
 impl Program {
+    /// Request an adapter, hoping to get a proper one.
+    pub fn request_adapter(instance: &wgpu::Instance) -> Result<wgpu::Adapter, MismatchError> {
+        let request = instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        });
+
+        let choice = run::block_on(Box::pin(request), None);
+        Self::minimum_adapter(choice.into_iter())
+    }
+
     /// Choose an applicable adapter from one of the presented ones.
     pub fn choose_adapter(
         &self,

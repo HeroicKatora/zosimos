@@ -391,6 +391,8 @@ impl Execution {
         self.host.machine.instruction_pointer < self.host.machine.instructions.len()
     }
 
+    /// FIXME: a way to pass a `&wgpu::SurfaceTexture` as output?
+    /// Otherwise, have to make an extra copy call in the pool.
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
         let instruction_pointer = self.host.machine.instruction_pointer;
 
@@ -524,7 +526,6 @@ impl Host {
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
 
-                    // SAFETY: who knows. FIXME: once naga's validation is good enough.
                     shader = gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc));
                 };
 

@@ -65,7 +65,7 @@ fn mandelbrot() {
         texel: buffer::Texel {
             block: buffer::Block::Pixel,
             bits: buffer::SampleBits::Int8x4,
-            parts: buffer::SampleParts::LChA,
+            parts: buffer::SampleParts::LchA,
         },
     }));
 
