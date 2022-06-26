@@ -50,12 +50,17 @@ name = "blend"
 [[test]]
 name = "direct"
 
-## From here on is our local development profile.
-## We use it for CI and testing, not release.
-## Important parts are compiling image deps with release.
+[profile.release]
+debug = 0
+opt-level = 2
 
 [profile.test]
 debug = 0
+opt-level = 2
+
+## From here on is our local development profile.
+## We use it for CI and testing, not release.
+## Important parts are compiling image deps with release.
 
 [profile.dev.package."*"]
 debug = 0
