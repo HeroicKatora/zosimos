@@ -618,7 +618,7 @@ impl CommandBuffer {
                 },
             ) => {
                 conversion = ColorConversion::SrLab2ToXyz {
-                    from_xyz_matrix: RowMatrix(primary.from_xyz_row_matrix(*rgb_wp)),
+                    from_xyz_matrix: RowMatrix(primary.to_xyz_row_matrix(*rgb_wp)),
                     whitepoint: *whitepoint,
                 };
             }

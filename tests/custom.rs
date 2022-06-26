@@ -64,7 +64,7 @@ fn mandelbrot() {
         color: buffer::Color::Oklab,
         texel: buffer::Texel {
             block: buffer::Block::Pixel,
-            bits: buffer::SampleBits::Int8x4,
+            bits: buffer::SampleBits::UInt8x4,
             parts: buffer::SampleParts::LchA,
         },
     }));
