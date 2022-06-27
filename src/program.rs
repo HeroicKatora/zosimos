@@ -643,6 +643,19 @@ impl Program {
         Self::minimum_adapter(choice.into_iter())
     }
 
+    pub fn request_compatible_adapter(
+        instance: &wgpu::Instance,
+        options: &wgpu::RequestAdapterOptions,
+    ) -> Result<wgpu::Adapter, MismatchError> {
+        let request = instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            .. *options
+        });
+
+        let choice = run::block_on(Box::pin(request), None);
+        Self::minimum_adapter(choice.into_iter())
+    }
+
     /// Choose an applicable adapter from one of the presented ones.
     pub fn choose_adapter(
         &self,

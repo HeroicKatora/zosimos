@@ -735,6 +735,38 @@ impl Host {
                 let image = &mut self.buffers[source_image.0].data;
                 let buffer = &self.descriptors.buffers[target_buffer.0];
 
+                if let ImageData::GpuTexture {
+                    texture,
+                    // FIXME: validate layout? What for?
+                    layout: _,
+                    gpu: _,
+                } = image
+                {
+                    let encoder = match &mut self.command_encoder {
+                        Some(encoder) => encoder,
+                        None => return Err(StepError::InvalidInstruction(line!())),
+                    };
+
+                    encoder.copy_buffer_to_texture(
+                        wgpu::ImageCopyBufferBase {
+                            buffer,
+                            layout: wgpu::ImageDataLayout {
+                                bytes_per_row: NonZeroU32::new(bytes_per_row as u32),
+                                offset: 0,
+                                rows_per_image: NonZeroU32::new(size.1),
+                            },
+                        },
+                        texture.as_image_copy(),
+                        wgpu::Extent3d {
+                            width: size.0,
+                            height: size.1,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+
+                    return Ok(());
+                }
+
                 let slice = buffer.slice(..);
                 slice
                     .map_async(wgpu::MapMode::Write)
@@ -891,6 +923,38 @@ impl Host {
 
                 let buffer = &self.descriptors.buffers[source_buffer.0];
                 let image = &mut self.buffers[target_image.0].data;
+
+                if let ImageData::GpuTexture {
+                    texture,
+                    // FIXME: validate layout? What for?
+                    layout: _,
+                    gpu: _,
+                } = image
+                {
+                    let encoder = match &mut self.command_encoder {
+                        Some(encoder) => encoder,
+                        None => return Err(StepError::InvalidInstruction(line!())),
+                    };
+
+                    encoder.copy_texture_to_buffer(
+                        texture.as_image_copy(),
+                        wgpu::ImageCopyBufferBase {
+                            buffer,
+                            layout: wgpu::ImageDataLayout {
+                                bytes_per_row: NonZeroU32::new(bytes_per_row as u32),
+                                offset: 0,
+                                rows_per_image: NonZeroU32::new(size.1),
+                            },
+                        },
+                        wgpu::Extent3d {
+                            width: size.0,
+                            height: size.1,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+
+                    return Ok(());
+                }
 
                 let slice = buffer.slice(..);
                 slice

@@ -55,7 +55,7 @@ name = "blend"
 name = "direct"
 
 [profile.release]
-debug = 0
+debug = true
 opt-level = 2
 
 [profile.test]

@@ -33,6 +33,8 @@ pub struct PoolImageMut<'pool> {
     key: DefaultKey,
     /// The image inside the pool.
     image: &'pool mut Image,
+    /// All other devices.
+    devices: &'pool SlotMap<DefaultKey, Gpu>,
 }
 
 pub struct Iter<'pool> {
@@ -41,6 +43,7 @@ pub struct Iter<'pool> {
 
 pub struct IterMut<'pool> {
     inner: slotmap::basic::IterMut<'pool, DefaultKey, Image>,
+    devices: &'pool SlotMap<DefaultKey, Gpu>,
 }
 
 pub(crate) struct Image {
@@ -137,6 +140,7 @@ impl Pool {
         Some(PoolImageMut {
             key,
             image: self.items.get_mut(key)?,
+            devices: &self.devices,
         })
     }
 
@@ -197,6 +201,7 @@ impl Pool {
     pub fn iter_mut(&mut self) -> IterMut<'_> {
         IterMut {
             inner: self.items.iter_mut(),
+            devices: &mut self.devices,
         }
     }
 
@@ -210,6 +215,7 @@ impl Pool {
         PoolImageMut {
             key,
             image: &mut self.items[key],
+            devices: &self.devices,
         }
     }
 }
@@ -321,6 +327,63 @@ impl PoolImageMut<'_> {
         self.image.descriptor.color = color;
     }
 
+    /// Replace this image with a descriptor for an image buffer that is provided by the caller.
+    ///
+    /// # Panics
+    /// This method will panic if the layout is inconsistent.
+    pub fn declare(&mut self, descriptor: Descriptor) {
+        let layout = descriptor.to_canvas();
+        self.image.descriptor = descriptor;
+        self.image.data = ImageData::LateBound(layout);
+    }
+
+    /// Insert the texture instead of the current image.
+    ///
+    /// A replacement with the same format is allocated instead.
+    /// # Panics
+    ///
+    /// This may panic later if the texture is not from the same gpu device as used by the pool, or
+    /// if the texture does not fit with the layout.
+    pub fn replace_texture_unguarded(&mut self, texture: &mut wgpu::Texture, GpuKey(gpu): GpuKey) {
+        let layout = self.layout().clone();
+
+        let ttexture = texture;
+        let tgpu = gpu;
+
+        if let ImageData::GpuTexture { texture, layout: _, gpu } = &mut self.image.data {
+            core::mem::swap(ttexture, texture);
+            *gpu = tgpu;
+        }
+
+        let mut replace;
+        match self.devices.get(tgpu) {
+            None => return,
+            Some(gpu) => {
+                replace = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d {
+                        width: 0,
+                        height: 0,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R8Unorm,
+                    usage: wgpu::TextureUsages::empty(),
+                });
+
+                core::mem::swap(&mut replace, ttexture);
+            }
+        }
+
+        self.image.data = ImageData::GpuTexture {
+            texture: replace,
+            layout,
+            gpu,
+        };
+    }
+
     /// Get the metadata associated with the entry.
     pub(crate) fn meta(&self) -> &ImageMeta {
         &self.image.meta
@@ -390,7 +453,8 @@ impl<'pool> Iterator for IterMut<'pool> {
     type Item = PoolImageMut<'pool>;
     fn next(&mut self) -> Option<Self::Item> {
         let (key, image) = self.inner.next()?;
-        Some(PoolImageMut { key, image })
+        let devices = self.devices;
+        Some(PoolImageMut { key, image, devices })
     }
 }
 
