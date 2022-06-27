@@ -22,14 +22,11 @@ path = "../../"
 ## 'Optional' dependencies for the binary.
 [dependencies.winit]
 version = "0.26"
-optional = true
 
 [dependencies.egui]
 version = "0.18"
-optional = true
 [dependencies.egui-wgpu]
 version = "0.18"
-optional = true
 
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
