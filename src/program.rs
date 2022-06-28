@@ -267,6 +267,7 @@ pub(crate) enum Low {
         size: (u32, u32),
         target_buffer: DeviceBuffer,
         target_layout: ByteLayout,
+        copy_dst_buffer: DeviceBuffer,
     },
     WriteImageToTexture {
         source_image: Texture,
@@ -298,11 +299,15 @@ pub(crate) enum Low {
     /// Read a buffer into host image data.
     /// Will map the buffer then do row-wise reads.
     ReadBuffer {
+        /// Equivalent buffer we're allowed to map.
         source_buffer: DeviceBuffer,
+        /// Layout of the buffers with this data.
         source_layout: ByteLayout,
         offset: (u32, u32),
         size: (u32, u32),
         target_image: Texture,
+        /// The buffer that we're allowed to use a COPY_SRC.
+        copy_src_buffer: DeviceBuffer,
     },
 
     StackFrame(run::Frame),

@@ -337,6 +337,14 @@ impl PoolImageMut<'_> {
         self.image.data = ImageData::LateBound(layout);
     }
 
+    /// Replace this image with host allocated data, changing the layout.
+    pub fn set_srgb(&mut self, image: &image::DynamicImage) {
+        let buffer = ImageBuffer::from(image);
+        let descriptor = Descriptor::with_srgb_image(image);
+        self.image.descriptor = descriptor;
+        self.image.data = ImageData::Host(buffer);
+    }
+
     /// Insert the texture instead of the current image.
     ///
     /// A replacement with the same format is allocated instead.
@@ -362,15 +370,15 @@ impl PoolImageMut<'_> {
                 replace = gpu.device.create_texture(&wgpu::TextureDescriptor {
                     label: None,
                     size: wgpu::Extent3d {
-                        width: 0,
-                        height: 0,
+                        width: 1,
+                        height: 1,
                         depth_or_array_layers: 1,
                     },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::R8Unorm,
-                    usage: wgpu::TextureUsages::empty(),
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 });
 
                 core::mem::swap(&mut replace, ttexture);
@@ -387,6 +395,10 @@ impl PoolImageMut<'_> {
     /// Get the metadata associated with the entry.
     pub(crate) fn meta(&self) -> &ImageMeta {
         &self.image.meta
+    }
+
+    pub(crate) fn data(&self) -> &ImageData {
+        &self.image.data
     }
 
     /// Replace the data with a host allocated buffer of the correct layout.

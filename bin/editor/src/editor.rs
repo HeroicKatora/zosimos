@@ -29,7 +29,8 @@ impl ModalEditor for Editor {
 
 impl Editor {
     pub fn draw_to_surface(&mut self, surface: &mut Surface) -> Result<(), wgpu::SurfaceError> {
-        let texture = surface.get_current_texture()?;
+        let mut texture = surface.get_current_texture()?;
+        surface.present_to_texture(&mut texture);
         texture.present();
         Ok(())
     }

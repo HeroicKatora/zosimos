@@ -78,8 +78,6 @@ impl Window {
                 }
             }
 
-            std::thread::sleep(std::time::Duration::from_millis(10));
-
             if ed.exit() {
                 *ctrl = ControlFlow::Exit;
             }

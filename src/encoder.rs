@@ -717,6 +717,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // FIXME: should we validate size here as well for better errors?
         // Potentially all errors are internal so it might not matter.
         self.push(Low::WriteImageToBuffer {
+            copy_dst_buffer: regmap.buffer,
             source_image,
             size,
             offset: (0, 0),
@@ -728,6 +729,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // this is a separate allocation. We'd instead like to use `regmap.map_write` and do our
         // own buffer mapping but this requires async scheduling. Soo.. do that later.
         // FIXME: might happen at next call within another command encoder..
+        // FIXME: if we're reading from a texture, then we do not need this copy at all.
+        // However, this fact is only known at runtime. So, should we defer running the
+        // CopyBufferToBuffer instead to the runtime?
         if let Some(map_write) = regmap.map_write {
             self.push(Low::BeginCommands)?;
             self.push(Low::CopyBufferToBuffer {
@@ -932,7 +936,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         }
         // eprintln!("buf{:?} -> img{:?} ({:?})", source_buffer, target_image, size);
 
+        // FIXME: if we're reading out to a texture, then we do not need this copy at all.
+        // However, this fact is only known at runtime. So, should we defer running the
+        // CopyBufferToBuffer instead to the runtime?
         self.push(Low::ReadBuffer {
+            copy_src_buffer: regmap.buffer,
             source_buffer,
             source_layout: regmap.byte_layout,
             size,

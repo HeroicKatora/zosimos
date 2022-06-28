@@ -20,17 +20,20 @@ path = "src/main.rs"
 path = "../../"
 
 ## 'Optional' dependencies for the binary.
-[dependencies.winit]
-version = "0.26"
-
 [dependencies.egui]
 version = "0.18"
 [dependencies.egui-wgpu]
 version = "0.18"
-[dependencies.wgpu]
-version = "0.12"
+[dependencies.image]
+version = "0.24"
+default-features = false
+features = ["png"]
 [dependencies.log]
 version = "0.4"
+[dependencies.winit]
+version = "0.26"
+[dependencies.wgpu]
+version = "0.12"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = "0.9.0"

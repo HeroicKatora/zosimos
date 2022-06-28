@@ -1113,6 +1113,39 @@ impl CommandBuffer {
         }))
     }
 
+    pub fn resize(
+        &mut self,
+        below: Register,
+        upper: (u32, u32),
+    ) -> Result<Register, CommandError> {
+        let (width, height) = upper;
+        let grid_layout = Descriptor::with_texel(Texel::new_u8(SampleParts::RgbA), width, height)
+            .ok_or(CommandError::OTHER)?;
+
+        let grid = self.bilinear(
+            grid_layout,
+            Bilinear {
+                u_min: [0.0, 0.0, 0.0, 1.0],
+                v_min: [0.0, 0.0, 0.0, 1.0],
+                uv_min: [0.0, 0.0, 0.0, 1.0],
+                u_max: [1.0, 0.0, 0.0, 1.0],
+                v_max: [0.0, 1.0, 0.0, 1.0],
+                uv_max: [0.0, 0.0, 0.0, 1.0],
+            },
+        )?;
+
+        self.palette(
+            below,
+            Palette {
+                width: Some(ColorChannel::R),
+                height: Some(ColorChannel::G),
+                width_base: 0,
+                height_base: 0,
+            },
+            grid,
+        )
+    }
+
     /// Declare an output.
     ///
     /// Outputs MUST later be bound from the pool during launch.

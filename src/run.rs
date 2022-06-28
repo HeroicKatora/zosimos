@@ -203,6 +203,7 @@ pub struct RetireError {
 
 #[derive(Debug)]
 pub enum RetireErrorKind {
+    NoSuchInput,
     NoSuchOutput,
     BadInstruction,
 }
@@ -327,7 +328,13 @@ impl Executable {
         }
 
         for &output in self.io_map.outputs.values() {
-            env.buffers[output].data.host_allocate();
+            if let Some(key) = env.buffers[output].key {
+                let mut pool_img = env.pool.entry(key).unwrap();
+                let buffer = &mut env.buffers[output];
+                pool_img.swap(&mut buffer.data);
+            } else {
+                env.buffers[output].data.host_allocate();
+            }
         }
 
         Ok(())
@@ -357,6 +364,53 @@ impl Environment<'_> {
 
         if descriptor.texel != image.descriptor.texel {
             return Err(StartError::InternalCommandError(line!()));
+        }
+
+        match pool_img.data() {
+            ImageData::Host(_) | ImageData::GpuTexture { .. } => {}
+            _ => {
+                eprintln!("Bad binding: {:?}", reg);
+                return Err(StartError::InternalCommandError(line!()));
+            }
+        }
+
+        image.key = Some(pool_img.key());
+
+        Ok(())
+    }
+
+    pub fn bind_output(&mut self, reg: Register, key: PoolKey) -> Result<(), StartError> {
+        let &idx = self
+            .io_map
+            .outputs
+            .get(&reg)
+            .ok_or_else(|| {
+                StartError::InternalCommandError(line!())
+            })?;
+
+        let pool_img = self
+            .pool
+            .entry(key)
+            .ok_or_else(|| StartError::InternalCommandError(line!()))?;
+
+        let image = &mut self.buffers[idx];
+        let descriptor = pool_img.descriptor();
+
+        // FIXME: we're ignoring color semantics here. Okay?
+        if descriptor.layout != image.descriptor.layout {
+            return Err(StartError::InternalCommandError(line!()));
+        }
+
+        if descriptor.texel != image.descriptor.texel {
+            return Err(StartError::InternalCommandError(line!()));
+        }
+
+        match pool_img.data() {
+            ImageData::Host(_) | ImageData::GpuTexture { .. } => {}
+            _ => {
+                eprintln!("Bad binding: {:?}", reg);
+                return Err(StartError::InternalCommandError(line!()));
+            }
         }
 
         image.key = Some(pool_img.key());
@@ -687,6 +741,7 @@ impl Host {
                 size,
                 target_buffer,
                 ref target_layout,
+                copy_dst_buffer,
             } => {
                 if offset != (0, 0) {
                     return Err(StepError::InvalidInstruction(line!()));
@@ -696,10 +751,6 @@ impl Host {
                     None => return Err(StepError::InvalidInstruction(line!())),
                     Some(source) => &source.data,
                 };
-
-                if source.as_bytes().is_none() {
-                    return Err(StepError::InvalidInstruction(line!()));
-                }
 
                 let layout = source.layout().clone();
                 let target_size = (target_layout.width, target_layout.height);
@@ -742,21 +793,19 @@ impl Host {
                     gpu: _,
                 } = image
                 {
-                    let encoder = match &mut self.command_encoder {
-                        Some(encoder) => encoder,
-                        None => return Err(StepError::InvalidInstruction(line!())),
-                    };
+                    let descriptor = wgpu::CommandEncoderDescriptor { label: None };
+                    let mut encoder = gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
 
-                    encoder.copy_buffer_to_texture(
+                    encoder.copy_texture_to_buffer(
+                        texture.as_image_copy(),
                         wgpu::ImageCopyBufferBase {
-                            buffer,
+                            buffer: &self.descriptors.buffers[copy_dst_buffer.0],
                             layout: wgpu::ImageDataLayout {
                                 bytes_per_row: NonZeroU32::new(bytes_per_row as u32),
                                 offset: 0,
                                 rows_per_image: NonZeroU32::new(size.1),
                             },
                         },
-                        texture.as_image_copy(),
                         wgpu::Extent3d {
                             width: size.0,
                             height: size.1,
@@ -764,7 +813,14 @@ impl Host {
                         },
                     );
 
+                    let command = encoder.finish();
+                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+
                     return Ok(());
+                }
+
+                if image.as_bytes().is_none() {
+                    return Err(StepError::InvalidInstruction(line!()));
                 }
 
                 let slice = buffer.slice(..);
@@ -905,6 +961,7 @@ impl Host {
                 offset,
                 size,
                 target_image,
+                copy_src_buffer,
             } => {
                 let source_size = (source_layout.width, source_layout.height);
 
@@ -931,21 +988,19 @@ impl Host {
                     gpu: _,
                 } = image
                 {
-                    let encoder = match &mut self.command_encoder {
-                        Some(encoder) => encoder,
-                        None => return Err(StepError::InvalidInstruction(line!())),
-                    };
+                    let descriptor = wgpu::CommandEncoderDescriptor { label: None };
+                    let mut encoder = gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
 
-                    encoder.copy_texture_to_buffer(
-                        texture.as_image_copy(),
+                    encoder.copy_buffer_to_texture(
                         wgpu::ImageCopyBufferBase {
-                            buffer,
+                            buffer: &self.descriptors.buffers[copy_src_buffer.0],
                             layout: wgpu::ImageDataLayout {
                                 bytes_per_row: NonZeroU32::new(bytes_per_row as u32),
                                 offset: 0,
                                 rows_per_image: NonZeroU32::new(size.1),
                             },
                         },
+                        texture.as_image_copy(),
                         wgpu::Extent3d {
                             width: size.0,
                             height: size.1,
@@ -953,7 +1008,14 @@ impl Host {
                         },
                     );
 
+                    let command = encoder.finish();
+                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+
                     return Ok(());
+                }
+
+                if image.as_bytes().is_none() {
+                    return Err(StepError::InvalidInstruction(line!()));
                 }
 
                 let slice = buffer.slice(..);
@@ -1382,6 +1444,40 @@ impl StepError {
 }
 
 impl Retire<'_> {
+    /// Move the input image corresponding to `reg` back into the pool.
+    ///
+    /// Return the image as viewed inside the pool. This is not arbitrary. See
+    /// [`output_key`](Self::output_key) for more details (WIP).
+    pub fn input(&mut self, reg: Register) -> Result<PoolImage<'_>, RetireError> {
+        let index = self
+            .execution
+            .host
+            .io_map
+            .inputs
+            .get(&reg)
+            .copied()
+            .ok_or(RetireError {
+                inner: RetireErrorKind::NoSuchInput,
+            })?;
+
+        let image = &mut self.execution.host.buffers[index];
+        let descriptor = image.data.layout().clone();
+
+        let mut pool_image;
+        let pool = &mut self.pool;
+        match image.key.filter(|key| pool.entry(*key).is_some()) {
+            Some(key) => pool_image = self.pool.entry(key).unwrap(),
+            None => {
+                let descriptor = Descriptor::from(&descriptor);
+                pool_image = self.pool.declare(descriptor);
+            }
+        };
+
+        pool_image.swap(&mut image.data);
+
+        Ok(pool_image.into())
+    }
+
     /// Move the output image corresponding to `reg` into the pool.
     ///
     /// Return the image as viewed inside the pool. This is not arbitrary. See
@@ -1398,13 +1494,19 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        // FIXME: don't take some random image, use the right one..
-        // Also: should we leave the actual image? This would allow restarting the pipeline.
         let image = &mut self.execution.host.buffers[index];
         let descriptor = image.data.layout().clone();
 
-        let descriptor = Descriptor::from(&descriptor);
-        let mut pool_image = self.pool.declare(descriptor);
+        let mut pool_image;
+        let pool = &mut self.pool;
+        match image.key.filter(|key| pool.entry(*key).is_some()) {
+            Some(key) => pool_image = self.pool.entry(key).unwrap(),
+            None => {
+                let descriptor = Descriptor::from(&descriptor);
+                pool_image = self.pool.declare(descriptor);
+            }
+        };
+
         pool_image.swap(&mut image.data);
 
         Ok(pool_image.into())
