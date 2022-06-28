@@ -6,6 +6,7 @@ use crate::winit::{ModalContext, ModalEditor, ModalEvent};
 #[derive(Default)]
 pub struct Editor {
     close_requested: bool,
+    num_frames: usize,
 }
 
 impl ModalEditor for Editor {
@@ -20,6 +21,8 @@ impl ModalEditor for Editor {
         if let Err(err) = self.draw_to_surface(surface) {
             self.drawn_error(err, surface);
         }
+
+        self.num_frames += 1;
     }
 
     fn exit(&self) -> bool {

@@ -70,7 +70,7 @@ impl XyzParameter {
             S::Rgb => 6,
             S::Bgr => 7,
             S::RgbA => 8,
-            S::BgrA => 9,
+            S::BgrA => 10,
             S::ARgb => 12,
             S::ABgr => 14,
             S::Yuv => 16,

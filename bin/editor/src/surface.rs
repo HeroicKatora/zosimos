@@ -98,7 +98,7 @@ impl Surface {
                 }
                 Some(wgpu::TextureFormat::Bgra8UnormSrgb) | _ => {
                     color = Color::SRGB;
-                    texel = Texel::new_u8(SampleParts::ARgb);
+                    texel = Texel::new_u8(SampleParts::BgrA);
                     wgpu::TextureFormat::Bgra8UnormSrgb
                 }
             },
