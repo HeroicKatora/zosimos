@@ -95,7 +95,7 @@ pub(crate) enum FragmentShaderKey {
     LinearColorMatrix,
     /// The conversion of texel format.
     /// FIXME: there are multiple sources of this.
-    Convert,
+    Convert(Direction),
     /// The generic distribution normal 2d.
     DistributionNormal2d,
     /// Generic fractal brownian noise.
@@ -115,6 +115,19 @@ pub(crate) enum FragmentShaderKey {
     /// The key is the address of some dynamic object, unique for the duration of the pipeline.
     /// One shouldn't rely on uniqueness of soundness.
     Dynamic(usize),
+}
+
+/// Identifies the vertex shading.
+///
+/// Currently, we only paint a single quad and all coordinates are encoded in the vertex buffer.
+/// However, other directions we may proceed with:
+/// - A transformation matrix so that the quad buffer is reusable.
+/// - Non-Quad vertex shading.
+/// - Different UV variants that require vertex shading, such as with depths?
+/// - Instanced rendering where multiple quads are painted at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VertexShader {
+    Noop,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -2,6 +2,7 @@ use core::{num::NonZeroU32, ops::Range};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::buffer::{ByteLayout, Descriptor};
 use crate::color_matrix::RowMatrix;
@@ -28,7 +29,11 @@ pub struct Program {
     /// affect any other images.
     /// The encoder can make use of this mapping as intermediate resources for transfer between
     /// different images or from host to graphic device etc.
-    pub(crate) textures: ImageBufferPlan,
+    pub(crate) image_buffers: ImageBufferPlan,
+    /// Annotates which function allocates a cacheable texture.
+    pub(crate) texture_by_op: HashMap<usize, TextureDescriptor>,
+    /// Annotates which function allocates a cacheable buffer.
+    pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
 }
 
 /// Describes a function call in more common terms.
@@ -267,6 +272,7 @@ pub(crate) enum Low {
         size: (u32, u32),
         target_buffer: DeviceBuffer,
         target_layout: ByteLayout,
+        copy_dst_buffer: DeviceBuffer,
     },
     WriteImageToTexture {
         source_image: Texture,
@@ -298,11 +304,15 @@ pub(crate) enum Low {
     /// Read a buffer into host image data.
     /// Will map the buffer then do row-wise reads.
     ReadBuffer {
+        /// Equivalent buffer we're allowed to map.
         source_buffer: DeviceBuffer,
+        /// Layout of the buffers with this data.
         source_layout: ByteLayout,
         offset: (u32, u32),
         size: (u32, u32),
         target_image: Texture,
+        /// The buffer that we're allowed to use a COPY_SRC.
+        copy_src_buffer: DeviceBuffer,
     },
 
     StackFrame(run::Frame),
@@ -392,7 +402,7 @@ pub(crate) struct PipelineLayoutDescriptor {
 }
 
 /// For constructing a new buffer, of anonymous memory.
-#[derive(Debug)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct BufferDescriptor {
     pub size: wgpu::BufferAddress,
     pub usage: BufferUsage,
@@ -425,9 +435,28 @@ pub(crate) struct BufferInitContentBuilder<'trgt> {
 pub(crate) struct ShaderDescriptor {
     pub name: &'static str,
     pub source_spirv: Cow<'static, [u32]>,
+    pub key: Option<ShaderDescriptorKey>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) enum ShaderDescriptorKey {
+    Fragment(shaders::FragmentShaderKey),
+    Vertex(shaders::VertexShader),
+}
+
+impl From<shaders::FragmentShaderKey> for ShaderDescriptorKey {
+    fn from(key: shaders::FragmentShaderKey) -> Self {
+        ShaderDescriptorKey::Fragment(key)
+    }
+}
+
+impl From<shaders::VertexShader> for ShaderDescriptorKey {
+    fn from(key: shaders::VertexShader) -> Self {
+        ShaderDescriptorKey::Vertex(key)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum BufferUsage {
     /// Map Write + Vertex
     InVertices,
@@ -443,7 +472,7 @@ pub(crate) enum BufferUsage {
 
 /// For constructing a new texture.
 /// Ignores mip level, sample count, and some usages.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct TextureDescriptor {
     /// The size, not that zero-sized textures have to be emulated by us.
     pub size: (NonZeroU32, NonZeroU32),
@@ -485,7 +514,7 @@ impl ImageDescriptor {
 }
 
 /// The usage of a texture, of those we differentiate.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum TextureUsage {
     /// Copy Dst + Sampled
     DataIn,
@@ -643,6 +672,19 @@ impl Program {
         Self::minimum_adapter(choice.into_iter())
     }
 
+    pub fn request_compatible_adapter(
+        instance: &wgpu::Instance,
+        options: &wgpu::RequestAdapterOptions,
+    ) -> Result<wgpu::Adapter, MismatchError> {
+        let request = instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..*options
+        });
+
+        let choice = run::block_on(Box::pin(request), None);
+        Self::minimum_adapter(choice.into_iter())
+    }
+
     /// Choose an applicable adapter from one of the presented ones.
     pub fn choose_adapter(
         &self,
@@ -736,7 +778,7 @@ impl Program {
     pub fn launch<'pool>(&'pool self, pool: &'pool mut Pool) -> Launcher<'pool> {
         // Create empty bind assignments as a start, with respective layouts.
         let binds = self
-            .textures
+            .image_buffers
             .texture
             .iter()
             .map(run::Image::with_late_bound)
@@ -759,7 +801,7 @@ impl Program {
         // FIXME: _All_ textures? No, some amount of textures might not be IO.
         // Currently this is true but no in general.
         let buffers = self
-            .textures
+            .image_buffers
             .texture
             .iter()
             .map(run::Image::with_late_bound)
@@ -767,6 +809,11 @@ impl Program {
 
         Ok(run::Executable {
             instructions: encoder.instructions.into(),
+            info: Arc::new(run::ProgramInfo {
+                buffer_by_op: encoder.buffer_by_op,
+                texture_by_op: encoder.texture_by_op,
+                shader_by_op: encoder.shader_by_op,
+            }),
             binary_data: encoder.binary_data,
             descriptors: run::Descriptors::default(),
             buffers,
@@ -783,7 +830,7 @@ impl Program {
         let mut encoder = Encoder::default();
         encoder.enable_capabilities(capabilities);
 
-        encoder.set_buffer_plan(&self.textures);
+        encoder.set_buffer_plan(&self.image_buffers);
         if let Some(pool_plan) = pool_plan {
             encoder.set_pool_plan(pool_plan);
         }
@@ -922,7 +969,7 @@ impl Launcher<'_> {
             return Err(LaunchError::InternalCommandError(line!()));
         }
 
-        let Texture(texture) = match self.program.textures.by_register.get(reg) {
+        let Texture(texture) = match self.program.image_buffers.by_register.get(reg) {
             Some(assigned) => assigned.texture,
             None => return Err(LaunchError::InternalCommandError(line!())),
         };
@@ -941,8 +988,8 @@ impl Launcher<'_> {
     pub fn bind_remaining_outputs(mut self) -> Result<Self, LaunchError> {
         for high in &self.program.ops {
             if let High::Output { src: register, dst } = *high {
-                let assigned = &self.program.textures.by_register[register.0];
-                let descriptor = &self.program.textures.texture[assigned.texture.0];
+                let assigned = &self.program.image_buffers.by_register[register.0];
+                let descriptor = &self.program.image_buffers.texture[assigned.texture.0];
                 let key = self.pool_plan.choose_output(&mut *self.pool, descriptor);
                 self.pool_plan.plan.insert(dst, key);
             }
@@ -1117,6 +1164,29 @@ impl BufferUsage {
             BufferUsage::DataBuffer => U::STORAGE | U::COPY_SRC | U::COPY_DST,
             BufferUsage::Uniform => U::COPY_DST | U::UNIFORM,
         }
+    }
+}
+
+impl BufferDescriptor {
+    pub fn u64_len(&self) -> u64 {
+        self.size
+    }
+}
+
+impl BufferDescriptorInit {
+    pub fn u64_len(&self) -> u64 {
+        match self.content {
+            BufferInitContent::Owned(ref v) => v.len() as u64,
+            BufferInitContent::Defer { start, end } => end.wrapping_sub(start) as u64,
+        }
+    }
+}
+
+impl TextureDescriptor {
+    pub fn u64_len(&self) -> u64 {
+        let (w, h) = self.size;
+        // FIXME: not really accurate.
+        4 * u64::from(w.get()) * u64::from(h.get())
     }
 }
 

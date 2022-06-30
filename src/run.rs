@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::buffer::{ByteLayout, Descriptor};
 use crate::command::Register;
-use crate::pool::{ImageData, Pool, PoolImage, PoolKey};
+use crate::pool::{BufferKey, GpuKey, ImageData, Pool, PoolImage, PoolKey, ShaderKey, TextureKey};
 use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
 
 use wgpu::{Device, Queue};
@@ -23,6 +23,8 @@ use wgpu::{Device, Queue};
 pub struct Executable {
     /// The list of instructions to perform.
     pub(crate) instructions: Arc<[Low]>,
+    /// The auxiliary information on the program.
+    pub(crate) info: Arc<ProgramInfo>,
     /// The host-side data which is used to initialize buffers.
     pub(crate) binary_data: Vec<u8>,
     /// All device related state which we have preserved.
@@ -33,6 +35,12 @@ pub struct Executable {
     pub(crate) io_map: Arc<IoMap>,
     /// The capabilities required from devices to execute this.
     pub(crate) capabilities: Capabilities,
+}
+
+pub(crate) struct ProgramInfo {
+    pub(crate) texture_by_op: HashMap<usize, program::TextureDescriptor>,
+    pub(crate) buffer_by_op: HashMap<usize, program::BufferDescriptor>,
+    pub(crate) shader_by_op: HashMap<usize, program::ShaderDescriptorKey>,
 }
 
 /// Configures devices and input/output buffers for an executable.
@@ -47,9 +55,18 @@ pub struct Executable {
 /// may be rejected if the inputs and device capabilities differ.
 pub struct Environment<'pool> {
     pool: &'pool mut Pool,
+    /// The gpu, potentially from the pool.
     gpu: Gpu,
+    /// The old gpu key from within the pool.
+    gpu_key: Option<GpuKey>,
+    /// Pre-allocated buffers.
     buffers: Vec<Image>,
+    /// Map of program input/outputs as signature information (inverse of retiring).
     io_map: Arc<IoMap>,
+    /// Static info about the program, i.e. resource it will require or benefit from cache/prefetching.
+    info: Arc<ProgramInfo>,
+    /// Cache state of this environment.
+    cache: Cache,
 }
 
 /// A running `Executable`.
@@ -58,6 +75,8 @@ pub struct Execution {
     pub(crate) gpu: core::cell::RefCell<Gpu>,
     /// All the host state of execution.
     pub(crate) host: Host,
+    /// All cached data (from one or more pools).
+    pub(crate) cache: Cache,
 }
 
 pub(crate) struct Host {
@@ -68,6 +87,24 @@ pub(crate) struct Host {
     pub(crate) binary_data: Vec<u8>,
     pub(crate) io_map: Arc<IoMap>,
     pub(crate) debug_stack: Vec<Frame>,
+    pub(crate) usage: ResourcesUsed,
+}
+
+#[derive(Default)]
+pub(crate) struct Cache {
+    preallocated_textures: HashMap<usize, wgpu::Texture>,
+    preallocated_buffers: HashMap<usize, wgpu::Buffer>,
+    precompiled_shader: HashMap<usize, wgpu::ShaderModule>,
+}
+
+#[derive(Debug, Default)]
+pub struct ResourcesUsed {
+    buffer_mem: u64,
+    buffer_reused: u64,
+    texture_mem: u64,
+    texture_reused: u64,
+    shaders_compiled: u64,
+    shaders_reused: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -118,11 +155,35 @@ pub(crate) struct Descriptors {
     sampler: Vec<wgpu::Sampler>,
     textures: Vec<wgpu::Texture>,
     texture_views: Vec<wgpu::TextureView>,
+    /// Post-information: descriptors with which buffers were created.
+    /// These buffers can be reused if retired to a pool.
+    buffer_descriptors: HashMap<usize, program::BufferDescriptor>,
+    /// Post-information: descriptors with which textures were created.
+    /// These textures may be reused.
+    texture_descriptors: HashMap<usize, program::TextureDescriptor>,
+    /// Post-information: descriptors with which textures were created.
+    /// These textures may be reused.
+    shader_descriptors: HashMap<usize, program::ShaderDescriptorKey>,
 }
 
 pub(crate) struct Gpu {
     pub(crate) device: Device,
     pub(crate) queue: Queue,
+}
+
+/// Total memory recovered from previous buffers.
+#[derive(Debug, Default)]
+pub struct RecoveredBufferStats {
+    mem: u64,
+}
+
+/// Total memory retired into retained buffers.
+#[derive(Debug, Default)]
+pub struct RetiredBufferStats {
+    mem: u64,
+    texture_keys: Vec<TextureKey>,
+    buffer_keys: Vec<BufferKey>,
+    shader_keys: Vec<ShaderKey>,
 }
 
 trait WithGpu {
@@ -160,6 +221,9 @@ pub struct Retire<'pool> {
     /// The retiring execution instance.
     execution: Execution,
     pool: &'pool mut Pool,
+    uncorrected_gpu_textures: Vec<TextureKey>,
+    uncorrected_gpu_buffers: Vec<BufferKey>,
+    uncorrected_shaders: Vec<ShaderKey>,
 }
 
 pub(crate) struct Machine {
@@ -203,6 +267,7 @@ pub struct RetireError {
 
 #[derive(Debug)]
 pub enum RetireErrorKind {
+    NoSuchInput,
     NoSuchOutput,
     BadInstruction,
 }
@@ -229,18 +294,20 @@ impl Image {
 
 impl Executable {
     pub fn from_pool<'p>(&self, pool: &'p mut Pool) -> Option<Environment<'p>> {
-        let (_, gpu) = pool.select_device(&self.capabilities)?;
+        let (gpu_key, gpu) = pool.select_device(&self.capabilities)?;
         Some(Environment {
             pool,
             gpu,
+            gpu_key: Some(gpu_key),
+            info: self.info.clone(),
             buffers: self.buffers.iter().map(Image::clone_like).collect(),
             io_map: self.io_map.clone(),
+            cache: Cache::default(),
         })
     }
 
     pub fn launch(&self, mut env: Environment) -> Result<Execution, StartError> {
         self.check_satisfiable(&mut env)?;
-
         Ok(Execution {
             gpu: env.gpu.into(),
             host: Host {
@@ -251,7 +318,9 @@ impl Executable {
                 binary_data: self.binary_data.clone(),
                 io_map: self.io_map.clone(),
                 debug_stack: vec![],
+                usage: ResourcesUsed::default(),
             },
+            cache: env.cache,
         })
     }
 
@@ -268,7 +337,9 @@ impl Executable {
                 binary_data: self.binary_data,
                 io_map: self.io_map.clone(),
                 debug_stack: vec![],
+                usage: ResourcesUsed::default(),
             },
+            cache: env.cache,
         })
     }
 
@@ -315,6 +386,8 @@ impl Executable {
             }
         }
 
+        // FIXME: Check env.cache against our program info?
+
         // Okay, checks done, let's patch up the state.
         for &input in self.io_map.inputs.values() {
             let buffer = &mut env.buffers[input];
@@ -327,7 +400,13 @@ impl Executable {
         }
 
         for &output in self.io_map.outputs.values() {
-            env.buffers[output].data.host_allocate();
+            if let Some(key) = env.buffers[output].key {
+                let mut pool_img = env.pool.entry(key).unwrap();
+                let buffer = &mut env.buffers[output];
+                pool_img.swap(&mut buffer.data);
+            } else {
+                env.buffers[output].data.host_allocate();
+            }
         }
 
         Ok(())
@@ -359,9 +438,89 @@ impl Environment<'_> {
             return Err(StartError::InternalCommandError(line!()));
         }
 
+        match pool_img.data() {
+            ImageData::Host(_) | ImageData::GpuTexture { .. } => {}
+            _ => {
+                eprintln!("Bad binding: {:?}", reg);
+                return Err(StartError::InternalCommandError(line!()));
+            }
+        }
+
         image.key = Some(pool_img.key());
 
         Ok(())
+    }
+
+    pub fn bind_output(&mut self, reg: Register, key: PoolKey) -> Result<(), StartError> {
+        let &idx = self
+            .io_map
+            .outputs
+            .get(&reg)
+            .ok_or_else(|| StartError::InternalCommandError(line!()))?;
+
+        let pool_img = self
+            .pool
+            .entry(key)
+            .ok_or_else(|| StartError::InternalCommandError(line!()))?;
+
+        let image = &mut self.buffers[idx];
+        let descriptor = pool_img.descriptor();
+
+        // FIXME: we're ignoring color semantics here. Okay?
+        if descriptor.layout != image.descriptor.layout {
+            return Err(StartError::InternalCommandError(line!()));
+        }
+
+        if descriptor.texel != image.descriptor.texel {
+            return Err(StartError::InternalCommandError(line!()));
+        }
+
+        match pool_img.data() {
+            ImageData::Host(_) | ImageData::GpuTexture { .. } => {}
+            _ => {
+                eprintln!("Bad binding: {:?}", reg);
+                return Err(StartError::InternalCommandError(line!()));
+            }
+        }
+
+        image.key = Some(pool_img.key());
+
+        Ok(())
+    }
+
+    /// Retrieve matching temporary buffers from the pool.
+    ///
+    /// This reuses of allocations of buffers, textures, etc. from previous iterations of this
+    /// program run where possible.
+    pub fn recover_buffers(&mut self) -> RecoveredBufferStats {
+        let mut stats = RecoveredBufferStats::default();
+
+        let mut pool_cache = self.pool.as_cache(match self.gpu_key {
+            Some(key) => key,
+            None => return stats,
+        });
+
+        for (&inst, desc) in &self.info.texture_by_op {
+            if let Some(texture) = pool_cache.extract_texture(desc) {
+                stats.mem += desc.u64_len();
+                self.cache.preallocated_textures.insert(inst, texture);
+            }
+        }
+
+        for (&inst, desc) in &self.info.buffer_by_op {
+            if let Some(buffer) = pool_cache.extract_buffer(desc) {
+                stats.mem += desc.u64_len();
+                self.cache.preallocated_buffers.insert(inst, buffer);
+            }
+        }
+
+        for (&inst, desc) in &self.info.shader_by_op {
+            if let Some(buffer) = pool_cache.extract_shader(desc) {
+                self.cache.precompiled_shader.insert(inst, buffer);
+            }
+        }
+
+        stats
     }
 }
 
@@ -382,7 +541,9 @@ impl Execution {
                 binary_data: init.binary_data,
                 io_map: Arc::new(init.io_map),
                 debug_stack: vec![],
+                usage: ResourcesUsed::default(),
             },
+            cache: Cache::default(),
         }
     }
 
@@ -396,10 +557,13 @@ impl Execution {
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
         let instruction_pointer = self.host.machine.instruction_pointer;
 
-        let gpu = &self.gpu;
-        let host = &mut self.host;
+        let Execution {
+            ref gpu,
+            host,
+            cache,
+        } = self;
         let async_step = async move {
-            match host.step_inner(gpu).await {
+            match host.step_inner(cache, gpu).await {
                 Err(mut error) => {
                     // Add tracing information..
                     error.instruction_pointer = instruction_pointer;
@@ -439,12 +603,20 @@ impl Execution {
         Retire {
             execution: self,
             pool,
+            uncorrected_gpu_textures: vec![],
+            uncorrected_gpu_buffers: vec![],
+            uncorrected_shaders: vec![],
         }
+    }
+
+    /// Debug how many resources were used, any how.
+    pub fn resources_used(&self) -> &ResourcesUsed {
+        &self.host.usage
     }
 }
 
 impl Host {
-    async fn step_inner(&mut self, gpu: impl WithGpu) -> Result<(), StepError> {
+    async fn step_inner(&mut self, cache: &mut Cache, gpu: impl WithGpu) -> Result<(), StepError> {
         struct DumpFrame<'stack> {
             stack: Option<&'stack mut Vec<Frame>>,
         }
@@ -468,6 +640,7 @@ impl Host {
             stack: Some(&mut self.debug_stack),
         };
 
+        let inst = self.machine.instruction_pointer;
         match self.machine.next_instruction()? {
             Low::BindGroupLayout(desc) => {
                 let mut entry_buffer = vec![];
@@ -488,26 +661,38 @@ impl Host {
                 Ok(())
             }
             Low::Buffer(desc) => {
-                let desc = wgpu::BufferDescriptor {
+                let wgpu_desc = wgpu::BufferDescriptor {
                     label: None,
                     size: desc.size,
                     usage: desc.usage.to_wgpu(),
                     mapped_at_creation: false,
                 };
 
-                let buffer = gpu.with_gpu(|gpu| gpu.device.create_buffer(&desc));
+                let buffer = if let Some(buffer) = cache.preallocated_buffers.remove(&inst) {
+                    self.usage.buffer_reused += desc.u64_len();
+                    buffer
+                } else {
+                    self.usage.buffer_mem += desc.u64_len();
+                    gpu.with_gpu(|gpu| gpu.device.create_buffer(&wgpu_desc))
+                };
+
+                let buffer_idx = self.descriptors.buffers.len();
+                self.descriptors
+                    .buffer_descriptors
+                    .insert(buffer_idx, desc.clone());
                 self.descriptors.buffers.push(buffer);
                 Ok(())
             }
             Low::BufferInit(desc) => {
                 use wgpu::util::DeviceExt;
-                let desc = wgpu::util::BufferInitDescriptor {
+                let wgpu_desc = wgpu::util::BufferInitDescriptor {
                     label: None,
                     contents: desc.content.as_slice(&self.binary_data),
                     usage: desc.usage.to_wgpu(),
                 };
 
-                let buffer = gpu.with_gpu(|gpu| gpu.device.create_buffer_init(&desc));
+                self.usage.buffer_mem += desc.u64_len();
+                let buffer = gpu.with_gpu(|gpu| gpu.device.create_buffer_init(&wgpu_desc));
                 self.descriptors.buffers.push(buffer);
                 Ok(())
             }
@@ -519,15 +704,34 @@ impl Host {
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
 
-                    shader = gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc));
+                    shader = if let Some(shader) = cache.precompiled_shader.remove(&inst) {
+                        self.usage.shaders_reused += 1;
+                        shader
+                    } else {
+                        self.usage.shaders_compiled += 1;
+                        gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc))
+                    };
                 } else {
                     let desc = wgpu::ShaderModuleDescriptor {
                         label: Some(desc.name),
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
 
-                    shader = gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc));
+                    shader = if let Some(shader) = cache.precompiled_shader.remove(&inst) {
+                        self.usage.shaders_reused += 1;
+                        shader
+                    } else {
+                        self.usage.shaders_compiled += 1;
+                        gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc))
+                    };
                 };
+
+                if let Some(key) = &desc.key {
+                    let shader_idx = self.descriptors.shaders.len();
+                    self.descriptors
+                        .shader_descriptors
+                        .insert(shader_idx, key.clone());
+                }
 
                 self.descriptors.shaders.push(shader);
                 Ok(())
@@ -580,7 +784,7 @@ impl Host {
             }
             Low::Texture(desc) => {
                 use wgpu::TextureUsages as U;
-                let desc = wgpu::TextureDescriptor {
+                let wgpu_desc = wgpu::TextureDescriptor {
                     label: None,
                     size: wgpu::Extent3d {
                         width: desc.size.0.get(),
@@ -605,7 +809,19 @@ impl Host {
                         }
                     },
                 };
-                let texture = gpu.with_gpu(|gpu| gpu.device.create_texture(&desc));
+
+                let texture = if let Some(texture) = cache.preallocated_textures.remove(&inst) {
+                    self.usage.texture_reused += desc.u64_len();
+                    texture
+                } else {
+                    self.usage.texture_mem += desc.u64_len();
+                    gpu.with_gpu(|gpu| gpu.device.create_texture(&wgpu_desc))
+                };
+
+                let texture_idx = self.descriptors.textures.len();
+                self.descriptors
+                    .texture_descriptors
+                    .insert(texture_idx, desc.clone());
                 self.descriptors.textures.push(texture);
                 Ok(())
             }
@@ -687,6 +903,7 @@ impl Host {
                 size,
                 target_buffer,
                 ref target_layout,
+                copy_dst_buffer,
             } => {
                 if offset != (0, 0) {
                     return Err(StepError::InvalidInstruction(line!()));
@@ -696,10 +913,6 @@ impl Host {
                     None => return Err(StepError::InvalidInstruction(line!())),
                     Some(source) => &source.data,
                 };
-
-                if source.as_bytes().is_none() {
-                    return Err(StepError::InvalidInstruction(line!()));
-                }
 
                 let layout = source.layout().clone();
                 let target_size = (target_layout.width, target_layout.height);
@@ -734,6 +947,44 @@ impl Host {
 
                 let image = &mut self.buffers[source_image.0].data;
                 let buffer = &self.descriptors.buffers[target_buffer.0];
+
+                if let ImageData::GpuTexture {
+                    texture,
+                    // FIXME: validate layout? What for?
+                    layout: _,
+                    gpu: _,
+                } = image
+                {
+                    let descriptor = wgpu::CommandEncoderDescriptor { label: None };
+                    let mut encoder =
+                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+
+                    encoder.copy_texture_to_buffer(
+                        texture.as_image_copy(),
+                        wgpu::ImageCopyBufferBase {
+                            buffer: &self.descriptors.buffers[copy_dst_buffer.0],
+                            layout: wgpu::ImageDataLayout {
+                                bytes_per_row: NonZeroU32::new(bytes_per_row as u32),
+                                offset: 0,
+                                rows_per_image: NonZeroU32::new(size.1),
+                            },
+                        },
+                        wgpu::Extent3d {
+                            width: size.0,
+                            height: size.1,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+
+                    let command = encoder.finish();
+                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+
+                    return Ok(());
+                }
+
+                if image.as_bytes().is_none() {
+                    return Err(StepError::InvalidInstruction(line!()));
+                }
 
                 let slice = buffer.slice(..);
                 slice
@@ -873,6 +1124,7 @@ impl Host {
                 offset,
                 size,
                 target_image,
+                copy_src_buffer,
             } => {
                 let source_size = (source_layout.width, source_layout.height);
 
@@ -891,6 +1143,44 @@ impl Host {
 
                 let buffer = &self.descriptors.buffers[source_buffer.0];
                 let image = &mut self.buffers[target_image.0].data;
+
+                if let ImageData::GpuTexture {
+                    texture,
+                    // FIXME: validate layout? What for?
+                    layout: _,
+                    gpu: _,
+                } = image
+                {
+                    let descriptor = wgpu::CommandEncoderDescriptor { label: None };
+                    let mut encoder =
+                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+
+                    encoder.copy_buffer_to_texture(
+                        wgpu::ImageCopyBufferBase {
+                            buffer: &self.descriptors.buffers[copy_src_buffer.0],
+                            layout: wgpu::ImageDataLayout {
+                                bytes_per_row: NonZeroU32::new(bytes_per_row as u32),
+                                offset: 0,
+                                rows_per_image: NonZeroU32::new(size.1),
+                            },
+                        },
+                        texture.as_image_copy(),
+                        wgpu::Extent3d {
+                            width: size.0,
+                            height: size.1,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+
+                    let command = encoder.finish();
+                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+
+                    return Ok(());
+                }
+
+                if image.as_bytes().is_none() {
+                    return Err(StepError::InvalidInstruction(line!()));
+                }
 
                 let slice = buffer.slice(..);
                 slice
@@ -1318,6 +1608,40 @@ impl StepError {
 }
 
 impl Retire<'_> {
+    /// Move the input image corresponding to `reg` back into the pool.
+    ///
+    /// Return the image as viewed inside the pool. This is not arbitrary. See
+    /// [`output_key`](Self::output_key) for more details (WIP).
+    pub fn input(&mut self, reg: Register) -> Result<PoolImage<'_>, RetireError> {
+        let index = self
+            .execution
+            .host
+            .io_map
+            .inputs
+            .get(&reg)
+            .copied()
+            .ok_or(RetireError {
+                inner: RetireErrorKind::NoSuchInput,
+            })?;
+
+        let image = &mut self.execution.host.buffers[index];
+        let descriptor = image.data.layout().clone();
+
+        let mut pool_image;
+        let pool = &mut self.pool;
+        match image.key.filter(|key| pool.entry(*key).is_some()) {
+            Some(key) => pool_image = self.pool.entry(key).unwrap(),
+            None => {
+                let descriptor = Descriptor::from(&descriptor);
+                pool_image = self.pool.declare(descriptor);
+            }
+        };
+
+        pool_image.swap(&mut image.data);
+
+        Ok(pool_image.into())
+    }
+
     /// Move the output image corresponding to `reg` into the pool.
     ///
     /// Return the image as viewed inside the pool. This is not arbitrary. See
@@ -1334,13 +1658,19 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        // FIXME: don't take some random image, use the right one..
-        // Also: should we leave the actual image? This would allow restarting the pipeline.
         let image = &mut self.execution.host.buffers[index];
         let descriptor = image.data.layout().clone();
 
-        let descriptor = Descriptor::from(&descriptor);
-        let mut pool_image = self.pool.declare(descriptor);
+        let mut pool_image;
+        let pool = &mut self.pool;
+        match image.key.filter(|key| pool.entry(*key).is_some()) {
+            Some(key) => pool_image = self.pool.entry(key).unwrap(),
+            None => {
+                let descriptor = Descriptor::from(&descriptor);
+                pool_image = self.pool.declare(descriptor);
+            }
+        };
+
         pool_image.swap(&mut image.data);
 
         Ok(pool_image.into())
@@ -1362,6 +1692,56 @@ impl Retire<'_> {
         Ok(self.execution.host.buffers[index].key)
     }
 
+    /// Retain temporary buffers that had been allocated during execution.
+    pub fn retire_buffers(&mut self) -> RetiredBufferStats {
+        let mut stats = RetiredBufferStats::default();
+
+        let descriptors = &mut self.execution.host.descriptors;
+
+        let tidx = 0..descriptors.textures.len();
+        let textures = descriptors.textures.drain(..).zip(tidx);
+        for (texture, idx) in textures {
+            let descriptor = match descriptors.texture_descriptors.get(&idx) {
+                None => continue,
+                Some(descriptor) => descriptor,
+            };
+
+            let key = self.pool.insert_cacheable_texture(descriptor, texture);
+            stats.mem += descriptor.u64_len();
+            stats.texture_keys.push(key);
+            self.uncorrected_gpu_textures.push(key);
+        }
+
+        let tidx = 0..descriptors.buffers.len();
+        let textures = descriptors.buffers.drain(..).zip(tidx);
+        for (texture, idx) in textures {
+            let descriptor = match descriptors.buffer_descriptors.get(&idx) {
+                None => continue,
+                Some(descriptor) => descriptor,
+            };
+
+            let key = self.pool.insert_cacheable_buffer(descriptor, texture);
+            stats.mem += descriptor.u64_len();
+            stats.buffer_keys.push(key);
+            self.uncorrected_gpu_buffers.push(key);
+        }
+
+        let tidx = 0..descriptors.shaders.len();
+        let shaders = descriptors.shaders.drain(..).zip(tidx);
+        for (shader, idx) in shaders {
+            let descriptor = match descriptors.shader_descriptors.get(&idx) {
+                None => continue,
+                Some(descriptor) => descriptor,
+            };
+
+            let key = self.pool.insert_cacheable_shader(descriptor, shader);
+            stats.shader_keys.push(key);
+            self.uncorrected_shaders.push(key);
+        }
+
+        stats
+    }
+
     /// Drop any temporary buffers that had been allocated during execution.
     ///
     /// This leaves only IO resources alive, potentially reducing the amount of allocated memory
@@ -1380,9 +1760,24 @@ impl Retire<'_> {
     ///
     /// You might wish to call [`prune`](Self::prune) to prevent such buffers from staying
     /// allocated in the pool in the first place.
-    pub fn finish(self) {
+    pub fn finish(mut self) {
+        let _ = self.retire_buffers();
+
         let gpu = self.execution.gpu.into_inner();
-        self.pool.reinsert_device(gpu);
+        let gpu_key = self.pool.reinsert_device(gpu);
+
+        // Fixup the gpu reference for all inserted gpu buffers.
+        for pool_key in self.uncorrected_gpu_textures.into_iter() {
+            self.pool.reassign_texture_gpu_unguarded(pool_key, gpu_key);
+        }
+
+        for pool_key in self.uncorrected_gpu_buffers.into_iter() {
+            self.pool.reassign_buffer_gpu_unguarded(pool_key, gpu_key);
+        }
+
+        for shader_key in self.uncorrected_shaders.into_iter() {
+            self.pool.reassign_shader_gpu_unguarded(shader_key, gpu_key);
+        }
     }
 
     /// Explicitly discard all remaining items.

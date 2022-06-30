@@ -14,8 +14,8 @@ use crate::program::{
     DeviceBuffer, DeviceTexture, FragmentState, Function, ImageBufferAssignment, ImageBufferPlan,
     ImageDescriptor, ImagePoolPlan, LaunchError, Low, PipelineLayoutDescriptor, PrimitiveState,
     RenderPassDescriptor, RenderPipelineDescriptor, SamplerDescriptor, ShaderDescriptor,
-    StagingDescriptor, Texture, TextureDescriptor, TextureUsage, TextureViewDescriptor,
-    VertexState,
+    ShaderDescriptorKey, StagingDescriptor, Texture, TextureDescriptor, TextureUsage,
+    TextureViewDescriptor, VertexState,
 };
 use crate::util::ExtendOne;
 use crate::{run, shaders};
@@ -30,6 +30,7 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     pub(crate) binary_data: Vec<u8>,
 
     // Fields from `run::Descriptors` that simulate the length.
+    instruction_pointer: usize,
     bind_groups: usize,
     bind_group_layouts: usize,
     buffers: usize,
@@ -76,7 +77,7 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     stage_group_layout: HashMap<u32, usize>,
     known_samplers: HashMap<SamplerDescriptor, usize>,
     fragment_shaders: HashMap<shaders::FragmentShaderKey, usize>,
-    vertex_shaders: HashMap<VertexShader, usize>,
+    vertex_shaders: HashMap<shaders::VertexShader, usize>,
     simple_quad_buffer: Option<DeviceBuffer>,
     /// The render pipeline state for staging a texture.
     staged_to_pipelines: HashMap<Texture, SimpleRenderPipeline>,
@@ -95,6 +96,21 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     /// Describes which intermediate textures have been mapped to the GPU.
     staging_map: HashMap<Texture, StagingTexture>,
     // Arena style allocators.
+
+    // Output State with additional info relating to the input program.
+    // FIXME: remember masks for ops that can be skipped/replaced if texture is cached? Most ops
+    // build objects (descriptors, etc.) that are used in construction or initialization of a
+    // buffer. If we don't need to build the buffer, because we have its state in a previous cache,
+    // then we don't need the inputs either.
+    // We must always emulate the 'effect' (in terms of object indices) at runtime. Maybe we can
+    // just use a skip-list instead of Vec for those objects though. Or switch run to a pull-based
+    // model? But that would make it hard to provide bounds for `step`. Ahhh! Choices!
+    /// Annotates which low op allocates a cacheable texture.
+    pub(crate) texture_by_op: HashMap<usize, TextureDescriptor>,
+    /// Annotates which low op allocates a cacheable buffer.
+    pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
+    /// Annotates which low op constructs a cacheable shader module.
+    pub(crate) shader_by_op: HashMap<usize, ShaderDescriptorKey>,
 }
 
 /// The GPU buffers associated with a register.
@@ -169,11 +185,6 @@ struct StagingTexture {
 struct BufferMap {
     device: DeviceBuffer,
     layout: BufferLayout,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum VertexShader {
-    Noop,
 }
 
 #[derive(Clone, Copy)]
@@ -268,11 +279,27 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         match low {
             Low::BindGroupLayout(_) => self.bind_group_layouts += 1,
             Low::BindGroup(_) => self.bind_groups += 1,
-            Low::Buffer(_) | Low::BufferInit(_) => self.buffers += 1,
+            Low::Buffer(ref desc) => {
+                self.buffer_by_op
+                    .insert(self.instruction_pointer, desc.clone());
+                self.buffers += 1;
+            }
+            Low::BufferInit(_) => self.buffers += 1,
             Low::PipelineLayout(_) => self.pipeline_layouts += 1,
             Low::Sampler(_) => self.sampler += 1,
-            Low::Shader(_) => self.shaders += 1,
-            Low::Texture(_) => self.textures += 1,
+            Low::Shader(ref desc) => {
+                if let Some(key) = &desc.key {
+                    self.shader_by_op
+                        .insert(self.instruction_pointer, key.clone());
+                }
+
+                self.shaders += 1
+            }
+            Low::Texture(ref desc) => {
+                self.texture_by_op
+                    .insert(self.instruction_pointer, desc.clone());
+                self.textures += 1
+            }
             Low::TextureView(_) => self.texture_views += 1,
             Low::RenderPipeline(_) => self.render_pipelines += 1,
             Low::BeginCommands => {
@@ -350,6 +377,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Low::StackFrame(_) | Low::StackPop => {}
         }
 
+        self.instruction_pointer += 1;
         self.instructions.extend_one(low);
         Ok(())
     }
@@ -717,6 +745,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // FIXME: should we validate size here as well for better errors?
         // Potentially all errors are internal so it might not matter.
         self.push(Low::WriteImageToBuffer {
+            copy_dst_buffer: regmap.buffer,
             source_image,
             size,
             offset: (0, 0),
@@ -728,6 +757,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // this is a separate allocation. We'd instead like to use `regmap.map_write` and do our
         // own buffer mapping but this requires async scheduling. Soo.. do that later.
         // FIXME: might happen at next call within another command encoder..
+        // FIXME: if we're reading from a texture, then we do not need this copy at all.
+        // However, this fact is only known at runtime. So, should we defer running the
+        // CopyBufferToBuffer instead to the runtime?
         if let Some(map_write) = regmap.map_write {
             self.push(Low::BeginCommands)?;
             self.push(Low::CopyBufferToBuffer {
@@ -932,7 +964,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         }
         // eprintln!("buf{:?} -> img{:?} ({:?})", source_buffer, target_image, size);
 
+        // FIXME: if we're reading out to a texture, then we do not need this copy at all.
+        // However, this fact is only known at runtime. So, should we defer running the
+        // CopyBufferToBuffer instead to the runtime?
         self.push(Low::ReadBuffer {
+            copy_src_buffer: regmap.buffer,
             source_buffer,
             source_layout: regmap.byte_layout,
             size,
@@ -964,6 +1000,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn make_quad_bind_group(&mut self) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
+        let instruction_pointer = &mut self.instruction_pointer;
         *self.quad_group_layout.get_or_insert_with(|| {
             let descriptor = BindGroupLayoutDescriptor {
                 entries: vec![wgpu::BindGroupLayoutEntry {
@@ -978,6 +1015,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 }],
             };
 
+            *instruction_pointer += 1;
             instructions.extend_one(Low::BindGroupLayout(descriptor));
             let descriptor_id = *bind_group_layouts;
             *bind_group_layouts += 1;
@@ -988,6 +1026,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn make_generic_fragment_bind_group(&mut self) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
+        let instruction_pointer = &mut self.instruction_pointer;
         *self.fragment_data_group_layout.get_or_insert_with(|| {
             let descriptor = BindGroupLayoutDescriptor {
                 entries: vec![wgpu::BindGroupLayoutEntry {
@@ -1002,6 +1041,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 }],
             };
 
+            *instruction_pointer += 1;
             instructions.extend_one(Low::BindGroupLayout(descriptor));
             let descriptor_id = *bind_group_layouts;
             *bind_group_layouts += 1;
@@ -1012,6 +1052,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn make_paint_group_layout(&mut self, count: usize) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
+        let instruction_pointer = &mut self.instruction_pointer;
         *self.paint_group_layout.entry(count).or_insert_with(|| {
             let mut entries = vec![wgpu::BindGroupLayoutEntry {
                 binding: 0,
@@ -1034,6 +1075,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             }
 
             let descriptor = BindGroupLayoutDescriptor { entries };
+            *instruction_pointer += 1;
             instructions.extend_one(Low::BindGroupLayout(descriptor));
 
             let descriptor_id = *bind_group_layouts;
@@ -1046,6 +1088,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         use shaders::stage::StageKind;
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
+        let instruction_pointer = &mut self.instruction_pointer;
 
         // For encoding we have two extra bindings, sampler and in_texture.
         let encode: bool = binding > StageKind::ALL.len() as u32;
@@ -1116,6 +1159,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             }
 
             let descriptor = BindGroupLayoutDescriptor { entries };
+            *instruction_pointer += 1;
             instructions.extend_one(Low::BindGroupLayout(descriptor));
             let descriptor_id = *bind_group_layouts;
             *bind_group_layouts += 1;
@@ -1141,6 +1185,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         if let BufferBind::None = desc.fragment_bind_data {
             let layouts = &mut self.pipeline_layouts;
             let instructions = &mut self.instructions;
+            let instruction_pointer = &mut self.instruction_pointer;
 
             *self.paint_pipeline_layout.get_or_insert_with(|| {
                 let descriptor = PipelineLayoutDescriptor {
@@ -1148,6 +1193,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     push_constant_ranges: &[],
                 };
 
+                *instruction_pointer += 1;
                 instructions.extend_one(Low::PipelineLayout(descriptor));
                 let descriptor_id = *layouts;
                 *layouts += 1;
@@ -1158,12 +1204,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             let layouts = &mut self.pipeline_layouts;
             let instructions = &mut self.instructions;
+            let instruction_pointer = &mut self.instruction_pointer;
 
             let descriptor = PipelineLayoutDescriptor {
                 bind_group_layouts,
                 push_constant_ranges: &[],
             };
 
+            *instruction_pointer += 1;
             instructions.extend_one(Low::PipelineLayout(descriptor));
             let descriptor_id = *layouts;
             *layouts += 1;
@@ -1172,9 +1220,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     fn shader(&mut self, desc: ShaderDescriptor) -> Result<usize, LaunchError> {
-        self.instructions.extend_one(Low::Shader(desc));
         let idx = self.shaders;
-        self.shaders += 1;
+        self.push(Low::Shader(desc))?;
         Ok(idx)
     }
 
@@ -1183,19 +1230,20 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         kind: Option<shaders::FragmentShaderKey>,
         source: Cow<'static, [u32]>,
     ) -> Result<usize, LaunchError> {
-        if let Some(&shader) = kind.and_then(|k| self.fragment_shaders.get(&k)) {
+        if let Some(&shader) = kind.as_ref().and_then(|k| self.fragment_shaders.get(&k)) {
             return Ok(shader);
         }
 
         self.shader(ShaderDescriptor {
             name: "",
             source_spirv: source,
+            key: kind.map(Into::into),
         })
     }
 
     fn vertex_shader(
         &mut self,
-        kind: Option<VertexShader>,
+        kind: Option<shaders::VertexShader>,
         source: Cow<'static, [u32]>,
     ) -> Result<usize, LaunchError> {
         if let Some(&shader) = kind.and_then(|k| self.vertex_shaders.get(&k)) {
@@ -1205,6 +1253,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.shader(ShaderDescriptor {
             name: "",
             source_spirv: source,
+            key: kind.map(Into::into),
         })
     }
 
@@ -1212,6 +1261,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn simple_quad_buffer(&mut self) -> DeviceBuffer {
         let buffers = &mut self.buffers;
         let instructions = &mut self.instructions;
+        let instruction_pointer = &mut self.instruction_pointer;
+
         *self.simple_quad_buffer.get_or_insert_with(|| {
             // Sole quad!
             let content: &'static [f32; 8] = &[
@@ -1226,6 +1277,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 content: bytemuck::cast_slice(content).to_vec().into(),
             };
 
+            *instruction_pointer += 1;
             instructions.extend_one(Low::BufferInit(descriptor));
 
             let buffer = *buffers;
@@ -1260,38 +1312,38 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             ShaderBind::Shader { id, entry_point } => (id, entry_point),
         };
 
-        self.instructions
-            .extend_one(Low::RenderPipeline(RenderPipelineDescriptor {
-                vertex: VertexState {
-                    entry_point: vertex_entry_point,
-                    vertex_module: vertex,
-                },
-                fragment: FragmentState {
-                    entry_point: fragment_entry_point,
-                    fragment_module: fragment,
-                    targets: vec![wgpu::ColorTargetState {
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                        format,
-                    }],
-                },
-                primitive: PrimitiveState::TriangleStrip,
-                layout,
-            }));
-
         let pipeline = self.render_pipelines;
-        self.render_pipelines += 1;
+        self.push(Low::RenderPipeline(RenderPipelineDescriptor {
+            vertex: VertexState {
+                entry_point: vertex_entry_point,
+                vertex_module: vertex,
+            },
+            fragment: FragmentState {
+                entry_point: fragment_entry_point,
+                fragment_module: fragment,
+                targets: vec![wgpu::ColorTargetState {
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                    format,
+                }],
+            },
+            primitive: PrimitiveState::TriangleStrip,
+            layout,
+        }))?;
+
         Ok(pipeline)
     }
 
     fn make_sampler(&mut self, descriptor: SamplerDescriptor) -> usize {
         let instructions = &mut self.instructions;
+        let instruction_pointer = &mut self.instruction_pointer;
         let sampler = &mut self.sampler;
         *self
             .known_samplers
             .entry(descriptor)
             .or_insert_with_key(|desc| {
                 let sampler_id = *sampler;
+                *instruction_pointer += 1;
                 instructions.extend_one(Low::Sampler(SamplerDescriptor {
                     address_mode: desc.address_mode,
                     border_color: desc.border_color,
@@ -1556,7 +1608,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let (tex_width, tex_height) = self.texture_map[texture].format.size;
 
                 let vertex = self.vertex_shader(
-                    Some(VertexShader::Noop),
+                    Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let shader = shader.shader();
@@ -1600,7 +1652,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             },
             Function::PaintFullScreen { shader } => {
                 let vertex = self.vertex_shader(
-                    Some(VertexShader::Noop),
+                    Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let shader = shader.shader();
@@ -1627,11 +1679,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             },
             Function::ToLinearOpto { parameter, stage_kind } => {
                 let vertex = self.vertex_shader(
-                    Some(VertexShader::Noop),
+                    Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(shaders::FragmentShaderKey::Convert),
+                    Some(shaders::FragmentShaderKey::Convert(shaders::Direction::Decode)),
                     shader_include_to_spirv(stage_kind.decode_src()))?;
 
                 let buffer = parameter.serialize_std140();
@@ -1672,11 +1724,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             }
             Function::FromLinearOpto { parameter, stage_kind } => {
                 let vertex = self.vertex_shader(
-                    Some(VertexShader::Noop),
+                    Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(shaders::FragmentShaderKey::Convert),
+                    Some(shaders::FragmentShaderKey::Convert(shaders::Direction::Encode)),
                     shader_include_to_spirv(stage_kind.encode_src()))?;
 
                 let buffer = parameter.serialize_std140();
