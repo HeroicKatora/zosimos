@@ -166,24 +166,24 @@ impl Surface {
             Some(key) => key,
             None => {
                 log::warn!("No gpu to paint with.");
-                return
-            },
+                return;
+            }
         };
 
         let surface = match self.entry.key {
             Some(key) => key,
             None => {
                 log::warn!("No surface to paint to.");
-                return
-            },
+                return;
+            }
         };
 
         let present = match self.entry.presentable {
             Some(key) => key,
             None => {
                 log::warn!("No image to paint from.");
-                return
-            },
+                return;
+            }
         };
 
         let present_desc = self.pool.entry(present).unwrap().descriptor();
@@ -200,7 +200,10 @@ impl Surface {
         let in_reg = normalize.in_reg;
         let out_reg = normalize.out_reg;
 
-        self.pool.entry(surface).unwrap().replace_texture_unguarded(&mut surface_tex.texture, gpu);
+        self.pool
+            .entry(surface)
+            .unwrap()
+            .replace_texture_unguarded(&mut surface_tex.texture, gpu);
 
         let mut run = normalize
             .exe
@@ -244,7 +247,10 @@ impl Surface {
         log::warn!("{:?}", retire.retire_buffers());
         retire.finish();
 
-        self.pool.entry(surface).unwrap().replace_texture_unguarded(&mut surface_tex.texture, gpu);
+        self.pool
+            .entry(surface)
+            .unwrap()
+            .replace_texture_unguarded(&mut surface_tex.texture, gpu);
         log::info!("Presented!");
     }
 

@@ -1113,11 +1113,7 @@ impl CommandBuffer {
         }))
     }
 
-    pub fn resize(
-        &mut self,
-        below: Register,
-        upper: (u32, u32),
-    ) -> Result<Register, CommandError> {
+    pub fn resize(&mut self, below: Register, upper: (u32, u32)) -> Result<Register, CommandError> {
         let (width, height) = upper;
         let grid_layout = Descriptor::with_texel(Texel::new_u8(SampleParts::RgbA), width, height)
             .ok_or(CommandError::OTHER)?;

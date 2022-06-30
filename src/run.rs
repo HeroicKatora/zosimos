@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::buffer::{ByteLayout, Descriptor};
 use crate::command::Register;
-use crate::pool::{BufferKey, ImageData, GpuKey, Pool, PoolImage, PoolKey, ShaderKey, TextureKey};
+use crate::pool::{BufferKey, GpuKey, ImageData, Pool, PoolImage, PoolKey, ShaderKey, TextureKey};
 use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
 
 use wgpu::{Device, Queue};
@@ -456,9 +456,7 @@ impl Environment<'_> {
             .io_map
             .outputs
             .get(&reg)
-            .ok_or_else(|| {
-                StartError::InternalCommandError(line!())
-            })?;
+            .ok_or_else(|| StartError::InternalCommandError(line!()))?;
 
         let pool_img = self
             .pool
@@ -559,7 +557,11 @@ impl Execution {
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
         let instruction_pointer = self.host.machine.instruction_pointer;
 
-        let Execution { ref gpu, host, cache } = self;
+        let Execution {
+            ref gpu,
+            host,
+            cache,
+        } = self;
         let async_step = async move {
             match host.step_inner(cache, gpu).await {
                 Err(mut error) => {
@@ -675,7 +677,9 @@ impl Host {
                 };
 
                 let buffer_idx = self.descriptors.buffers.len();
-                self.descriptors.buffer_descriptors.insert(buffer_idx, desc.clone());
+                self.descriptors
+                    .buffer_descriptors
+                    .insert(buffer_idx, desc.clone());
                 self.descriptors.buffers.push(buffer);
                 Ok(())
             }
@@ -724,7 +728,9 @@ impl Host {
 
                 if let Some(key) = &desc.key {
                     let shader_idx = self.descriptors.shaders.len();
-                    self.descriptors.shader_descriptors.insert(shader_idx, key.clone());
+                    self.descriptors
+                        .shader_descriptors
+                        .insert(shader_idx, key.clone());
                 }
 
                 self.descriptors.shaders.push(shader);
@@ -813,7 +819,9 @@ impl Host {
                 };
 
                 let texture_idx = self.descriptors.textures.len();
-                self.descriptors.texture_descriptors.insert(texture_idx, desc.clone());
+                self.descriptors
+                    .texture_descriptors
+                    .insert(texture_idx, desc.clone());
                 self.descriptors.textures.push(texture);
                 Ok(())
             }
@@ -948,7 +956,8 @@ impl Host {
                 } = image
                 {
                     let descriptor = wgpu::CommandEncoderDescriptor { label: None };
-                    let mut encoder = gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+                    let mut encoder =
+                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
 
                     encoder.copy_texture_to_buffer(
                         texture.as_image_copy(),
@@ -1143,7 +1152,8 @@ impl Host {
                 } = image
                 {
                     let descriptor = wgpu::CommandEncoderDescriptor { label: None };
-                    let mut encoder = gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+                    let mut encoder =
+                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
 
                     encoder.copy_buffer_to_texture(
                         wgpu::ImageCopyBufferBase {
