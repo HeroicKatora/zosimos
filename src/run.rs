@@ -214,6 +214,8 @@ struct DevicePolled<'exe, T: WithGpu> {
 pub struct SyncPoint<'exe> {
     future: Option<DevicePolled<'exe, &'exe core::cell::RefCell<Gpu>>>,
     marker: core::marker::PhantomData<&'exe mut Execution>,
+    host_start: std::time::Instant,
+    debug_mark: Option<String>,
 }
 
 /// Represents a stopped execution instance, without information abouts its outputs.
@@ -556,6 +558,13 @@ impl Execution {
     /// Otherwise, have to make an extra copy call in the pool.
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
         let instruction_pointer = self.host.machine.instruction_pointer;
+        let host_start = std::time::Instant::now();
+        let debug_mark = self
+            .host
+            .machine
+            .instructions
+            .get(instruction_pointer)
+            .map(|instr| format!("{:?}", instr));
 
         let Execution {
             ref gpu,
@@ -580,6 +589,8 @@ impl Execution {
                 gpu: &self.gpu,
             }),
             marker: core::marker::PhantomData,
+            host_start,
+            debug_mark,
         })
     }
 
@@ -1801,6 +1812,8 @@ impl SyncPoint<'_> {
             Some(polled) => {
                 let DevicePolled { future, gpu } = polled;
                 block_on(future, Some(gpu))?;
+                let _took_time =
+                    std::time::Instant::now().saturating_duration_since(self.host_start);
                 Ok(())
             }
         }

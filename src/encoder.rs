@@ -1683,7 +1683,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(shaders::FragmentShaderKey::Convert(shaders::Direction::Decode)),
+                    Some(shaders::FragmentShaderKey::Convert(shaders::Direction::Decode, *stage_kind)),
                     shader_include_to_spirv(stage_kind.decode_src()))?;
 
                 let buffer = parameter.serialize_std140();
@@ -1728,7 +1728,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(shaders::FragmentShaderKey::Convert(shaders::Direction::Encode)),
+                    Some(shaders::FragmentShaderKey::Convert(shaders::Direction::Encode, *stage_kind)),
                     shader_include_to_spirv(stage_kind.encode_src()))?;
 
                 let buffer = parameter.serialize_std140();

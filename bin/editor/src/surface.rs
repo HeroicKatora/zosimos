@@ -216,6 +216,7 @@ impl Surface {
         // Bind the output.
         run.bind_output(out_reg, surface)
             .expect("Valid binding for our executable output");
+        log::warn!("Sub- optimality: {:?}", surface_tex.suboptimal);
         log::warn!("{:?}", run.recover_buffers());
 
         let mut running = normalize

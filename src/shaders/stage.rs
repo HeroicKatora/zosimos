@@ -20,7 +20,7 @@ pub(crate) struct XyzParameter {
 }
 
 /// Defines the bit representation we use for our own coding of texels and pixels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum StageKind {
     /// Each texel is 8 bit and we operate on 4 texels horizontally at the same time.
