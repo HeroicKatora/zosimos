@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::buffer::{ByteLayout, Descriptor};
 use crate::command::Register;
-use crate::pool::{BufferKey, ImageData, GpuKey, Pool, PoolImage, PoolKey, TextureKey};
+use crate::pool::{BufferKey, ImageData, GpuKey, Pool, PoolImage, PoolKey, ShaderKey, TextureKey};
 use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
 
 use wgpu::{Device, Queue};
@@ -39,8 +39,8 @@ pub struct Executable {
 
 pub(crate) struct ProgramInfo {
     pub(crate) texture_by_op: HashMap<usize, program::TextureDescriptor>,
-    /// Annotates which low op allocates a cacheable buffer.
     pub(crate) buffer_by_op: HashMap<usize, program::BufferDescriptor>,
+    pub(crate) shader_by_op: HashMap<usize, program::ShaderDescriptorKey>,
 }
 
 /// Configures devices and input/output buffers for an executable.
@@ -94,6 +94,7 @@ pub(crate) struct Host {
 pub(crate) struct Cache {
     preallocated_textures: HashMap<usize, wgpu::Texture>,
     preallocated_buffers: HashMap<usize, wgpu::Buffer>,
+    precompiled_shader: HashMap<usize, wgpu::ShaderModule>,
 }
 
 #[derive(Debug, Default)]
@@ -102,6 +103,8 @@ pub struct ResourcesUsed {
     buffer_reused: u64,
     texture_mem: u64,
     texture_reused: u64,
+    shaders_compiled: u64,
+    shaders_reused: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +161,9 @@ pub(crate) struct Descriptors {
     /// Post-information: descriptors with which textures were created.
     /// These textures may be reused.
     texture_descriptors: HashMap<usize, program::TextureDescriptor>,
+    /// Post-information: descriptors with which textures were created.
+    /// These textures may be reused.
+    shader_descriptors: HashMap<usize, program::ShaderDescriptorKey>,
 }
 
 pub(crate) struct Gpu {
@@ -177,6 +183,7 @@ pub struct RetiredBufferStats {
     mem: u64,
     texture_keys: Vec<TextureKey>,
     buffer_keys: Vec<BufferKey>,
+    shader_keys: Vec<ShaderKey>,
 }
 
 trait WithGpu {
@@ -216,6 +223,7 @@ pub struct Retire<'pool> {
     pool: &'pool mut Pool,
     uncorrected_gpu_textures: Vec<TextureKey>,
     uncorrected_gpu_buffers: Vec<BufferKey>,
+    uncorrected_shaders: Vec<ShaderKey>,
 }
 
 pub(crate) struct Machine {
@@ -508,6 +516,12 @@ impl Environment<'_> {
             }
         }
 
+        for (&inst, desc) in &self.info.shader_by_op {
+            if let Some(buffer) = pool_cache.extract_shader(desc) {
+                self.cache.precompiled_shader.insert(inst, buffer);
+            }
+        }
+
         stats
     }
 }
@@ -589,6 +603,7 @@ impl Execution {
             pool,
             uncorrected_gpu_textures: vec![],
             uncorrected_gpu_buffers: vec![],
+            uncorrected_shaders: vec![],
         }
     }
 
@@ -685,15 +700,32 @@ impl Host {
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
 
-                    shader = gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc));
+                    shader = if let Some(shader) = cache.precompiled_shader.remove(&inst) {
+                        self.usage.shaders_reused += 1;
+                        shader
+                    } else {
+                        self.usage.shaders_compiled += 1;
+                        gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc))
+                    };
                 } else {
                     let desc = wgpu::ShaderModuleDescriptor {
                         label: Some(desc.name),
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
 
-                    shader = gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc));
+                    shader = if let Some(shader) = cache.precompiled_shader.remove(&inst) {
+                        self.usage.shaders_reused += 1;
+                        shader
+                    } else {
+                        self.usage.shaders_compiled += 1;
+                        gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc))
+                    };
                 };
+
+                if let Some(key) = &desc.key {
+                    let shader_idx = self.descriptors.shaders.len();
+                    self.descriptors.shader_descriptors.insert(shader_idx, key.clone());
+                }
 
                 self.descriptors.shaders.push(shader);
                 Ok(())
@@ -1672,7 +1704,6 @@ impl Retire<'_> {
 
         let tidx = 0..descriptors.buffers.len();
         let textures = descriptors.buffers.drain(..).zip(tidx);
-
         for (texture, idx) in textures {
             let descriptor = match descriptors.buffer_descriptors.get(&idx) {
                 None => continue,
@@ -1683,6 +1714,19 @@ impl Retire<'_> {
             stats.mem += descriptor.u64_len();
             stats.buffer_keys.push(key);
             self.uncorrected_gpu_buffers.push(key);
+        }
+
+        let tidx = 0..descriptors.shaders.len();
+        let shaders = descriptors.shaders.drain(..).zip(tidx);
+        for (shader, idx) in shaders {
+            let descriptor = match descriptors.shader_descriptors.get(&idx) {
+                None => continue,
+                Some(descriptor) => descriptor,
+            };
+
+            let key = self.pool.insert_cacheable_shader(descriptor, shader);
+            stats.shader_keys.push(key);
+            self.uncorrected_shaders.push(key);
         }
 
         stats
@@ -1719,6 +1763,10 @@ impl Retire<'_> {
 
         for pool_key in self.uncorrected_gpu_buffers.into_iter() {
             self.pool.reassign_buffer_gpu_unguarded(pool_key, gpu_key);
+        }
+
+        for shader_key in self.uncorrected_shaders.into_iter() {
+            self.pool.reassign_shader_gpu_unguarded(shader_key, gpu_key);
         }
     }
 

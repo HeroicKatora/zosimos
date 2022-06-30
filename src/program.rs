@@ -435,6 +435,25 @@ pub(crate) struct BufferInitContentBuilder<'trgt> {
 pub(crate) struct ShaderDescriptor {
     pub name: &'static str,
     pub source_spirv: Cow<'static, [u32]>,
+    pub key: Option<ShaderDescriptorKey>,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) enum ShaderDescriptorKey {
+    Fragment(shaders::FragmentShaderKey),
+    Vertex(shaders::VertexShader),
+}
+
+impl From<shaders::FragmentShaderKey> for ShaderDescriptorKey {
+    fn from(key: shaders::FragmentShaderKey) -> Self {
+        ShaderDescriptorKey::Fragment(key)
+    }
+}
+
+impl From<shaders::VertexShader> for ShaderDescriptorKey {
+    fn from(key: shaders::VertexShader) -> Self {
+        ShaderDescriptorKey::Vertex(key)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -793,6 +812,7 @@ impl Program {
             info: Arc::new(run::ProgramInfo {
                 buffer_by_op: encoder.buffer_by_op,
                 texture_by_op: encoder.texture_by_op,
+                shader_by_op: encoder.shader_by_op,
             }),
             binary_data: encoder.binary_data,
             descriptors: run::Descriptors::default(),

@@ -58,6 +58,10 @@ name = "direct"
 debug = true
 opt-level = 2
 
+[profile.release-with-assertions]
+inherits = "release"
+debug-assertions = true
+
 [profile.test]
 debug = 0
 opt-level = 2

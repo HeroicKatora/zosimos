@@ -14,8 +14,8 @@ use crate::program::{
     DeviceBuffer, DeviceTexture, FragmentState, Function, ImageBufferAssignment, ImageBufferPlan,
     ImageDescriptor, ImagePoolPlan, LaunchError, Low, PipelineLayoutDescriptor, PrimitiveState,
     RenderPassDescriptor, RenderPipelineDescriptor, SamplerDescriptor, ShaderDescriptor,
-    StagingDescriptor, Texture, TextureDescriptor, TextureUsage, TextureViewDescriptor,
-    VertexState,
+    ShaderDescriptorKey, StagingDescriptor, Texture, TextureDescriptor, TextureUsage,
+    TextureViewDescriptor, VertexState,
 };
 use crate::util::ExtendOne;
 use crate::{run, shaders};
@@ -77,7 +77,7 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     stage_group_layout: HashMap<u32, usize>,
     known_samplers: HashMap<SamplerDescriptor, usize>,
     fragment_shaders: HashMap<shaders::FragmentShaderKey, usize>,
-    vertex_shaders: HashMap<VertexShader, usize>,
+    vertex_shaders: HashMap<shaders::VertexShader, usize>,
     simple_quad_buffer: Option<DeviceBuffer>,
     /// The render pipeline state for staging a texture.
     staged_to_pipelines: HashMap<Texture, SimpleRenderPipeline>,
@@ -109,6 +109,8 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     pub(crate) texture_by_op: HashMap<usize, TextureDescriptor>,
     /// Annotates which low op allocates a cacheable buffer.
     pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
+    /// Annotates which low op constructs a cacheable shader module.
+    pub(crate) shader_by_op: HashMap<usize, ShaderDescriptorKey>,
 }
 
 /// The GPU buffers associated with a register.
@@ -183,11 +185,6 @@ struct StagingTexture {
 struct BufferMap {
     device: DeviceBuffer,
     layout: BufferLayout,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum VertexShader {
-    Noop,
 }
 
 #[derive(Clone, Copy)]
@@ -290,7 +287,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Low::BufferInit(_) => self.buffers += 1,
             Low::PipelineLayout(_) => self.pipeline_layouts += 1,
             Low::Sampler(_) => self.sampler += 1,
-            Low::Shader(_) => self.shaders += 1,
+            Low::Shader(ref desc) => {
+                if let Some(key) = &desc.key {
+                    self.shader_by_op
+                        .insert(self.instruction_pointer, key.clone());
+                }
+
+                self.shaders += 1
+            }
             Low::Texture(ref desc) => {
                 self.texture_by_op
                     .insert(self.instruction_pointer, desc.clone());
@@ -1226,19 +1230,20 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         kind: Option<shaders::FragmentShaderKey>,
         source: Cow<'static, [u32]>,
     ) -> Result<usize, LaunchError> {
-        if let Some(&shader) = kind.and_then(|k| self.fragment_shaders.get(&k)) {
+        if let Some(&shader) = kind.as_ref().and_then(|k| self.fragment_shaders.get(&k)) {
             return Ok(shader);
         }
 
         self.shader(ShaderDescriptor {
             name: "",
             source_spirv: source,
+            key: kind.map(Into::into),
         })
     }
 
     fn vertex_shader(
         &mut self,
-        kind: Option<VertexShader>,
+        kind: Option<shaders::VertexShader>,
         source: Cow<'static, [u32]>,
     ) -> Result<usize, LaunchError> {
         if let Some(&shader) = kind.and_then(|k| self.vertex_shaders.get(&k)) {
@@ -1248,6 +1253,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.shader(ShaderDescriptor {
             name: "",
             source_spirv: source,
+            key: kind.map(Into::into),
         })
     }
 
@@ -1602,7 +1608,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let (tex_width, tex_height) = self.texture_map[texture].format.size;
 
                 let vertex = self.vertex_shader(
-                    Some(VertexShader::Noop),
+                    Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let shader = shader.shader();
@@ -1646,7 +1652,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             },
             Function::PaintFullScreen { shader } => {
                 let vertex = self.vertex_shader(
-                    Some(VertexShader::Noop),
+                    Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let shader = shader.shader();
@@ -1673,11 +1679,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             },
             Function::ToLinearOpto { parameter, stage_kind } => {
                 let vertex = self.vertex_shader(
-                    Some(VertexShader::Noop),
+                    Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(shaders::FragmentShaderKey::Convert),
+                    Some(shaders::FragmentShaderKey::Convert(shaders::Direction::Decode)),
                     shader_include_to_spirv(stage_kind.decode_src()))?;
 
                 let buffer = parameter.serialize_std140();
@@ -1718,11 +1724,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             }
             Function::FromLinearOpto { parameter, stage_kind } => {
                 let vertex = self.vertex_shader(
-                    Some(VertexShader::Noop),
+                    Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(shaders::FragmentShaderKey::Convert),
+                    Some(shaders::FragmentShaderKey::Convert(shaders::Direction::Encode)),
                     shader_include_to_spirv(stage_kind.encode_src()))?;
 
                 let buffer = parameter.serialize_std140();

@@ -1,11 +1,11 @@
-use core::{fmt, mem, num};
+use core::{fmt, mem};
 use std::collections::HashMap;
 
 use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
 use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer};
-use crate::program::{BufferDescriptor, Capabilities, TextureDescriptor};
+use crate::program::{BufferDescriptor, Capabilities, ShaderDescriptorKey, TextureDescriptor};
 use crate::run::{block_on, Gpu};
 
 /// Holds a number of image buffers, their descriptors and meta data.
@@ -16,6 +16,7 @@ pub struct Pool {
     items: SlotMap<DefaultKey, Image>,
     buffers: SlotMap<DefaultKey, (BufferDescriptor, GpuKey, wgpu::Buffer)>,
     textures: SlotMap<DefaultKey, (TextureDescriptor, GpuKey, wgpu::Texture)>,
+    shaders: SlotMap<DefaultKey, (ShaderDescriptorKey, GpuKey, wgpu::ShaderModule)>,
     devices: SlotMap<DefaultKey, Gpu>,
 }
 
@@ -30,6 +31,9 @@ pub(crate) struct TextureKey(DefaultKey);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct BufferKey(DefaultKey);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ShaderKey(DefaultKey);
 
 pub(crate) struct Image {
     pub(crate) meta: ImageMeta,
@@ -66,6 +70,9 @@ pub struct IterMut<'pool> {
 pub struct Cache<'pool> {
     texture_sets: HashMap<TextureDescriptor, Vec<PoolKey>>,
     buffer_sets: HashMap<BufferDescriptor, Vec<BufferKey>>,
+    // FIXME: really, we should only ever need one instance of each shader!
+    // But since it isn't `Clone` we rely on the encoder for this invariant.
+    shader_sets: HashMap<ShaderDescriptorKey, Vec<ShaderKey>>,
     pool: &'pool mut Pool,
 }
 
@@ -227,6 +234,16 @@ impl Pool {
         BufferKey(key)
     }
 
+    pub(crate) fn insert_cacheable_shader(
+        &mut self,
+        desc: &ShaderDescriptorKey,
+        data: wgpu::ShaderModule,
+    ) -> ShaderKey {
+        let gpu = GpuKey(slotmap::KeyData::from_ffi(0).into());
+        let key = self.shaders.insert((desc.clone(), gpu, data));
+        ShaderKey(key)
+    }
+
     pub(crate) fn reassign_texture_gpu_unguarded(&mut self, key: TextureKey, gpu: GpuKey) {
         if let Some((_, old_gpu, _)) = self.textures.get_mut(key.0) {
             *old_gpu = gpu;
@@ -235,6 +252,12 @@ impl Pool {
 
     pub(crate) fn reassign_buffer_gpu_unguarded(&mut self, key: BufferKey, gpu: GpuKey) {
         if let Some((_, old_gpu, _)) = self.buffers.get_mut(key.0) {
+            *old_gpu = gpu;
+        }
+    }
+
+    pub(crate) fn reassign_shader_gpu_unguarded(&mut self, key: ShaderKey, gpu: GpuKey) {
+        if let Some((_, old_gpu, _)) = self.shaders.get_mut(key.0) {
             *old_gpu = gpu;
         }
     }
@@ -258,11 +281,13 @@ impl Pool {
     pub fn clear_cache(&mut self) {
         self.buffers.clear();
         self.textures.clear();
+        self.shaders.clear();
     }
 
     pub(crate) fn as_cache(&mut self, gpu: GpuKey) -> Cache<'_> {
         let mut buffer_sets = HashMap::<_, Vec<_>>::new();
         let mut texture_sets = HashMap::<_, Vec<_>>::new();
+        let mut shader_sets = HashMap::<_, Vec<_>>::new();
 
         for (key, (descriptor, gpu_key, _)) in self.buffers.iter() {
             if gpu_key.0 != gpu.0 {
@@ -280,14 +305,27 @@ impl Pool {
                 continue;
             }
 
-            texture_sets.entry(descriptor.clone())
+            texture_sets
+                .entry(descriptor.clone())
                 .or_default()
                 .push(PoolKey(key));
+        }
+
+        for (key, (descriptor, gpu_key, _)) in self.shaders.iter() {
+            if gpu_key.0 != gpu.0 {
+                continue;
+            }
+
+            shader_sets
+                .entry(descriptor.clone())
+                .or_default()
+                .push(ShaderKey(key));
         }
 
         Cache {
             buffer_sets,
             texture_sets,
+            shader_sets,
             pool: self,
         }
     }
@@ -560,6 +598,15 @@ impl Cache<'_> {
         let BufferKey(key) = self.buffer_sets.get_mut(desc)?.pop()?;
         let (_, _, buffer) = self.pool.buffers.remove(key)?;
         Some(buffer)
+    }
+
+    pub(crate) fn extract_shader(
+        &mut self,
+        desc: &ShaderDescriptorKey,
+    ) -> Option<wgpu::ShaderModule> {
+        let ShaderKey(key) = self.shader_sets.get_mut(desc)?.pop()?;
+        let (_, _, shader) = self.pool.shaders.remove(key)?;
+        Some(shader)
     }
 }
 
