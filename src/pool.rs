@@ -64,8 +64,8 @@ pub struct IterMut<'pool> {
 
 /// Indexes a pool for extracting unused buffers.
 pub struct Cache<'pool> {
-    texture_sets: HashMap<TextureDescriptor, PoolKey>,
-    buffer_sets: HashMap<BufferDescriptor, BufferKey>,
+    texture_sets: HashMap<TextureDescriptor, Vec<PoolKey>>,
+    buffer_sets: HashMap<BufferDescriptor, Vec<BufferKey>>,
     pool: &'pool mut Pool,
 }
 
@@ -227,6 +227,18 @@ impl Pool {
         BufferKey(key)
     }
 
+    pub(crate) fn reassign_texture_gpu_unguarded(&mut self, key: TextureKey, gpu: GpuKey) {
+        if let Some((_, old_gpu, _)) = self.textures.get_mut(key.0) {
+            *old_gpu = gpu;
+        }
+    }
+
+    pub(crate) fn reassign_buffer_gpu_unguarded(&mut self, key: BufferKey, gpu: GpuKey) {
+        if let Some((_, old_gpu, _)) = self.buffers.get_mut(key.0) {
+            *old_gpu = gpu;
+        }
+    }
+
     /// Iterate over all entries in the pool.
     pub fn iter(&self) -> Iter<'_> {
         Iter {
@@ -242,24 +254,35 @@ impl Pool {
         }
     }
 
-    pub(crate) fn as_cache(&mut self, gpu: GpuKey) -> Cache<'_> {
-        let mut buffer_sets = HashMap::new();
-        let mut texture_sets = HashMap::new();
+    /// Discard all cached textures, buffers, etc.
+    pub fn clear_cache(&mut self) {
+        self.buffers.clear();
+        self.textures.clear();
+    }
 
-        for (key, (descriptor, gpu_key, buffer)) in self.buffers.iter() {
+    pub(crate) fn as_cache(&mut self, gpu: GpuKey) -> Cache<'_> {
+        let mut buffer_sets = HashMap::<_, Vec<_>>::new();
+        let mut texture_sets = HashMap::<_, Vec<_>>::new();
+
+        for (key, (descriptor, gpu_key, _)) in self.buffers.iter() {
             if gpu_key.0 != gpu.0 {
                 continue;
             }
 
-            buffer_sets.insert(descriptor.clone(), BufferKey(key));
+            buffer_sets
+                .entry(descriptor.clone())
+                .or_default()
+                .push(BufferKey(key));
         }
 
-        for (key, (descriptor, gpu_key, buffer)) in self.textures.iter() {
+        for (key, (descriptor, gpu_key, _)) in self.textures.iter() {
             if gpu_key.0 != gpu.0 {
                 continue;
             }
 
-            texture_sets.insert(descriptor.clone(), PoolKey(key));
+            texture_sets.entry(descriptor.clone())
+                .or_default()
+                .push(PoolKey(key));
         }
 
         Cache {
@@ -315,7 +338,7 @@ impl ImageData {
 
     pub(crate) fn gpu_texture(&mut self) -> Option<wgpu::Texture> {
         let late = ImageData::LateBound(self.layout().clone());
-        match mem::replace(self, late)  {
+        match mem::replace(self, late) {
             ImageData::GpuTexture { texture, .. } => Some(texture),
             other => {
                 *self = other;
@@ -481,13 +504,6 @@ impl PoolImageMut<'_> {
         &self.image.data
     }
 
-    pub(crate) fn reassign_gpu_unguarded(&mut self, gpu_key: GpuKey) {
-        match &mut self.image.data {
-            ImageData::Gpu { gpu, .. } => *gpu = gpu_key.0,
-            _ => {}
-        }
-    }
-
     /// Replace the data with a host allocated buffer of the correct layout.
     /// Returns the previous image data.
     /// TODO: figure out if we should expose this..
@@ -535,13 +551,13 @@ impl Cache<'_> {
     // FIXME: what about buffer_init? Avoid allocation? Only if buffer is write-once?
 
     pub(crate) fn extract_texture(&mut self, desc: &TextureDescriptor) -> Option<wgpu::Texture> {
-        let PoolKey(key) = self.texture_sets.remove(desc)?;
+        let PoolKey(key) = self.texture_sets.get_mut(desc)?.pop()?;
         let (_, _, texture) = self.pool.textures.remove(key)?;
         Some(texture)
     }
 
-    pub(crate) fn extract_buffer(&mut self, size: &BufferDescriptor) -> Option<wgpu::Buffer> {
-        let BufferKey(key) = self.buffer_sets.remove(size)?;
+    pub(crate) fn extract_buffer(&mut self, desc: &BufferDescriptor) -> Option<wgpu::Buffer> {
+        let BufferKey(key) = self.buffer_sets.get_mut(desc)?.pop()?;
         let (_, _, buffer) = self.pool.buffers.remove(key)?;
         Some(buffer)
     }

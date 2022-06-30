@@ -213,11 +213,15 @@ impl Surface {
         // Bind the output.
         run.bind_output(out_reg, surface)
             .expect("Valid binding for our executable output");
+        log::warn!("{:?}", run.recover_buffers());
 
         let mut running = normalize
             .exe
             .launch(run)
             .expect("Valid binding to start our executable");
+
+        // Ensure our cache does not grow infinitely.
+        self.pool.clear_cache();
 
         while running.is_running() {
             let mut step = running
@@ -227,6 +231,7 @@ impl Surface {
                 .expect("Valid binding to block on our execution");
         }
 
+        log::warn!("{:?}", running.resources_used());
         let mut retire = running.retire_gracefully(&mut self.pool);
         retire
             .input(in_reg)
@@ -236,6 +241,7 @@ impl Surface {
             .expect("Valid to retire outputof our executable");
 
         retire.prune();
+        log::warn!("{:?}", retire.retire_buffers());
         retire.finish();
 
         self.pool.entry(surface).unwrap().replace_texture_unguarded(&mut surface_tex.texture, gpu);

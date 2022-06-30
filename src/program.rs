@@ -2,6 +2,7 @@ use core::{num::NonZeroU32, ops::Range};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::buffer::{ByteLayout, Descriptor};
 use crate::color_matrix::RowMatrix;
@@ -789,7 +790,7 @@ impl Program {
 
         Ok(run::Executable {
             instructions: encoder.instructions.into(),
-            info: Box::new(run::ProgramInfo {
+            info: Arc::new(run::ProgramInfo {
                 buffer_by_op: encoder.buffer_by_op,
                 texture_by_op: encoder.texture_by_op,
             }),
@@ -1143,6 +1144,29 @@ impl BufferUsage {
             BufferUsage::DataBuffer => U::STORAGE | U::COPY_SRC | U::COPY_DST,
             BufferUsage::Uniform => U::COPY_DST | U::UNIFORM,
         }
+    }
+}
+
+impl BufferDescriptor {
+    pub fn u64_len(&self) -> u64 {
+        self.size
+    }
+}
+
+impl BufferDescriptorInit {
+    pub fn u64_len(&self) -> u64 {
+        match self.content {
+            BufferInitContent::Owned(ref v) => v.len() as u64,
+            BufferInitContent::Defer { start, end } => end.wrapping_sub(start) as u64,
+        }
+    }
+}
+
+impl TextureDescriptor {
+    pub fn u64_len(&self) -> u64 {
+        let (w, h) = self.size;
+        // FIXME: not really accurate.
+        4 * u64::from(w.get()) * u64::from(h.get())
     }
 }
 

@@ -30,6 +30,7 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     pub(crate) binary_data: Vec<u8>,
 
     // Fields from `run::Descriptors` that simulate the length.
+    instruction_pointer: usize,
     bind_groups: usize,
     bind_group_layouts: usize,
     buffers: usize,
@@ -281,11 +282,20 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         match low {
             Low::BindGroupLayout(_) => self.bind_group_layouts += 1,
             Low::BindGroup(_) => self.bind_groups += 1,
-            Low::Buffer(_) | Low::BufferInit(_) => self.buffers += 1,
+            Low::Buffer(ref desc) => {
+                self.buffer_by_op
+                    .insert(self.instruction_pointer, desc.clone());
+                self.buffers += 1;
+            }
+            Low::BufferInit(_) => self.buffers += 1,
             Low::PipelineLayout(_) => self.pipeline_layouts += 1,
             Low::Sampler(_) => self.sampler += 1,
             Low::Shader(_) => self.shaders += 1,
-            Low::Texture(_) => self.textures += 1,
+            Low::Texture(ref desc) => {
+                self.texture_by_op
+                    .insert(self.instruction_pointer, desc.clone());
+                self.textures += 1
+            }
             Low::TextureView(_) => self.texture_views += 1,
             Low::RenderPipeline(_) => self.render_pipelines += 1,
             Low::BeginCommands => {
@@ -363,6 +373,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Low::StackFrame(_) | Low::StackPop => {}
         }
 
+        self.instruction_pointer += 1;
         self.instructions.extend_one(low);
         Ok(())
     }
@@ -985,6 +996,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn make_quad_bind_group(&mut self) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
+        let instruction_pointer = &mut self.instruction_pointer;
         *self.quad_group_layout.get_or_insert_with(|| {
             let descriptor = BindGroupLayoutDescriptor {
                 entries: vec![wgpu::BindGroupLayoutEntry {
@@ -999,6 +1011,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 }],
             };
 
+            *instruction_pointer += 1;
             instructions.extend_one(Low::BindGroupLayout(descriptor));
             let descriptor_id = *bind_group_layouts;
             *bind_group_layouts += 1;
@@ -1009,6 +1022,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn make_generic_fragment_bind_group(&mut self) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
+        let instruction_pointer = &mut self.instruction_pointer;
         *self.fragment_data_group_layout.get_or_insert_with(|| {
             let descriptor = BindGroupLayoutDescriptor {
                 entries: vec![wgpu::BindGroupLayoutEntry {
@@ -1023,6 +1037,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 }],
             };
 
+            *instruction_pointer += 1;
             instructions.extend_one(Low::BindGroupLayout(descriptor));
             let descriptor_id = *bind_group_layouts;
             *bind_group_layouts += 1;
@@ -1033,6 +1048,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn make_paint_group_layout(&mut self, count: usize) -> usize {
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
+        let instruction_pointer = &mut self.instruction_pointer;
         *self.paint_group_layout.entry(count).or_insert_with(|| {
             let mut entries = vec![wgpu::BindGroupLayoutEntry {
                 binding: 0,
@@ -1055,6 +1071,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             }
 
             let descriptor = BindGroupLayoutDescriptor { entries };
+            *instruction_pointer += 1;
             instructions.extend_one(Low::BindGroupLayout(descriptor));
 
             let descriptor_id = *bind_group_layouts;
@@ -1067,6 +1084,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         use shaders::stage::StageKind;
         let bind_group_layouts = &mut self.bind_group_layouts;
         let instructions = &mut self.instructions;
+        let instruction_pointer = &mut self.instruction_pointer;
 
         // For encoding we have two extra bindings, sampler and in_texture.
         let encode: bool = binding > StageKind::ALL.len() as u32;
@@ -1137,6 +1155,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             }
 
             let descriptor = BindGroupLayoutDescriptor { entries };
+            *instruction_pointer += 1;
             instructions.extend_one(Low::BindGroupLayout(descriptor));
             let descriptor_id = *bind_group_layouts;
             *bind_group_layouts += 1;
@@ -1162,6 +1181,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         if let BufferBind::None = desc.fragment_bind_data {
             let layouts = &mut self.pipeline_layouts;
             let instructions = &mut self.instructions;
+            let instruction_pointer = &mut self.instruction_pointer;
 
             *self.paint_pipeline_layout.get_or_insert_with(|| {
                 let descriptor = PipelineLayoutDescriptor {
@@ -1169,6 +1189,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     push_constant_ranges: &[],
                 };
 
+                *instruction_pointer += 1;
                 instructions.extend_one(Low::PipelineLayout(descriptor));
                 let descriptor_id = *layouts;
                 *layouts += 1;
@@ -1179,12 +1200,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             let layouts = &mut self.pipeline_layouts;
             let instructions = &mut self.instructions;
+            let instruction_pointer = &mut self.instruction_pointer;
 
             let descriptor = PipelineLayoutDescriptor {
                 bind_group_layouts,
                 push_constant_ranges: &[],
             };
 
+            *instruction_pointer += 1;
             instructions.extend_one(Low::PipelineLayout(descriptor));
             let descriptor_id = *layouts;
             *layouts += 1;
@@ -1193,9 +1216,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     fn shader(&mut self, desc: ShaderDescriptor) -> Result<usize, LaunchError> {
-        self.instructions.extend_one(Low::Shader(desc));
         let idx = self.shaders;
-        self.shaders += 1;
+        self.push(Low::Shader(desc))?;
         Ok(idx)
     }
 
@@ -1233,6 +1255,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn simple_quad_buffer(&mut self) -> DeviceBuffer {
         let buffers = &mut self.buffers;
         let instructions = &mut self.instructions;
+        let instruction_pointer = &mut self.instruction_pointer;
+
         *self.simple_quad_buffer.get_or_insert_with(|| {
             // Sole quad!
             let content: &'static [f32; 8] = &[
@@ -1247,6 +1271,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 content: bytemuck::cast_slice(content).to_vec().into(),
             };
 
+            *instruction_pointer += 1;
             instructions.extend_one(Low::BufferInit(descriptor));
 
             let buffer = *buffers;
@@ -1281,38 +1306,38 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             ShaderBind::Shader { id, entry_point } => (id, entry_point),
         };
 
-        self.instructions
-            .extend_one(Low::RenderPipeline(RenderPipelineDescriptor {
-                vertex: VertexState {
-                    entry_point: vertex_entry_point,
-                    vertex_module: vertex,
-                },
-                fragment: FragmentState {
-                    entry_point: fragment_entry_point,
-                    fragment_module: fragment,
-                    targets: vec![wgpu::ColorTargetState {
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                        format,
-                    }],
-                },
-                primitive: PrimitiveState::TriangleStrip,
-                layout,
-            }));
-
         let pipeline = self.render_pipelines;
-        self.render_pipelines += 1;
+        self.push(Low::RenderPipeline(RenderPipelineDescriptor {
+            vertex: VertexState {
+                entry_point: vertex_entry_point,
+                vertex_module: vertex,
+            },
+            fragment: FragmentState {
+                entry_point: fragment_entry_point,
+                fragment_module: fragment,
+                targets: vec![wgpu::ColorTargetState {
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                    format,
+                }],
+            },
+            primitive: PrimitiveState::TriangleStrip,
+            layout,
+        }))?;
+
         Ok(pipeline)
     }
 
     fn make_sampler(&mut self, descriptor: SamplerDescriptor) -> usize {
         let instructions = &mut self.instructions;
+        let instruction_pointer = &mut self.instruction_pointer;
         let sampler = &mut self.sampler;
         *self
             .known_samplers
             .entry(descriptor)
             .or_insert_with_key(|desc| {
                 let sampler_id = *sampler;
+                *instruction_pointer += 1;
                 instructions.extend_one(Low::Sampler(SamplerDescriptor {
                     address_mode: desc.address_mode,
                     border_color: desc.border_color,
