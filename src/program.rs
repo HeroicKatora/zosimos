@@ -28,7 +28,11 @@ pub struct Program {
     /// affect any other images.
     /// The encoder can make use of this mapping as intermediate resources for transfer between
     /// different images or from host to graphic device etc.
-    pub(crate) textures: ImageBufferPlan,
+    pub(crate) image_buffers: ImageBufferPlan,
+    /// Annotates which function allocates a cacheable texture.
+    pub(crate) texture_by_op: HashMap<usize, TextureDescriptor>,
+    /// Annotates which function allocates a cacheable buffer.
+    pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
 }
 
 /// Describes a function call in more common terms.
@@ -397,7 +401,7 @@ pub(crate) struct PipelineLayoutDescriptor {
 }
 
 /// For constructing a new buffer, of anonymous memory.
-#[derive(Debug)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct BufferDescriptor {
     pub size: wgpu::BufferAddress,
     pub usage: BufferUsage,
@@ -432,7 +436,7 @@ pub(crate) struct ShaderDescriptor {
     pub source_spirv: Cow<'static, [u32]>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum BufferUsage {
     /// Map Write + Vertex
     InVertices,
@@ -448,7 +452,7 @@ pub(crate) enum BufferUsage {
 
 /// For constructing a new texture.
 /// Ignores mip level, sample count, and some usages.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct TextureDescriptor {
     /// The size, not that zero-sized textures have to be emulated by us.
     pub size: (NonZeroU32, NonZeroU32),
@@ -490,7 +494,7 @@ impl ImageDescriptor {
 }
 
 /// The usage of a texture, of those we differentiate.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum TextureUsage {
     /// Copy Dst + Sampled
     DataIn,
@@ -654,7 +658,7 @@ impl Program {
     ) -> Result<wgpu::Adapter, MismatchError> {
         let request = instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
-            .. *options
+            ..*options
         });
 
         let choice = run::block_on(Box::pin(request), None);
@@ -754,7 +758,7 @@ impl Program {
     pub fn launch<'pool>(&'pool self, pool: &'pool mut Pool) -> Launcher<'pool> {
         // Create empty bind assignments as a start, with respective layouts.
         let binds = self
-            .textures
+            .image_buffers
             .texture
             .iter()
             .map(run::Image::with_late_bound)
@@ -777,7 +781,7 @@ impl Program {
         // FIXME: _All_ textures? No, some amount of textures might not be IO.
         // Currently this is true but no in general.
         let buffers = self
-            .textures
+            .image_buffers
             .texture
             .iter()
             .map(run::Image::with_late_bound)
@@ -785,6 +789,10 @@ impl Program {
 
         Ok(run::Executable {
             instructions: encoder.instructions.into(),
+            info: Box::new(run::ProgramInfo {
+                buffer_by_op: encoder.buffer_by_op,
+                texture_by_op: encoder.texture_by_op,
+            }),
             binary_data: encoder.binary_data,
             descriptors: run::Descriptors::default(),
             buffers,
@@ -801,7 +809,7 @@ impl Program {
         let mut encoder = Encoder::default();
         encoder.enable_capabilities(capabilities);
 
-        encoder.set_buffer_plan(&self.textures);
+        encoder.set_buffer_plan(&self.image_buffers);
         if let Some(pool_plan) = pool_plan {
             encoder.set_pool_plan(pool_plan);
         }
@@ -940,7 +948,7 @@ impl Launcher<'_> {
             return Err(LaunchError::InternalCommandError(line!()));
         }
 
-        let Texture(texture) = match self.program.textures.by_register.get(reg) {
+        let Texture(texture) = match self.program.image_buffers.by_register.get(reg) {
             Some(assigned) => assigned.texture,
             None => return Err(LaunchError::InternalCommandError(line!())),
         };
@@ -959,8 +967,8 @@ impl Launcher<'_> {
     pub fn bind_remaining_outputs(mut self) -> Result<Self, LaunchError> {
         for high in &self.program.ops {
             if let High::Output { src: register, dst } = *high {
-                let assigned = &self.program.textures.by_register[register.0];
-                let descriptor = &self.program.textures.texture[assigned.texture.0];
+                let assigned = &self.program.image_buffers.by_register[register.0];
+                let descriptor = &self.program.image_buffers.texture[assigned.texture.0];
                 let key = self.pool_plan.choose_output(&mut *self.pool, descriptor);
                 self.pool_plan.plan.insert(dst, key);
             }

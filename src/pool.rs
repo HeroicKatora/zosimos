@@ -1,9 +1,11 @@
-use core::fmt;
+use core::{fmt, mem, num};
+use std::collections::HashMap;
+
 use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
 use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer};
-use crate::program::Capabilities;
+use crate::program::{BufferDescriptor, Capabilities, TextureDescriptor};
 use crate::run::{block_on, Gpu};
 
 /// Holds a number of image buffers, their descriptors and meta data.
@@ -12,6 +14,8 @@ use crate::run::{block_on, Gpu};
 #[derive(Default)]
 pub struct Pool {
     items: SlotMap<DefaultKey, Image>,
+    buffers: SlotMap<DefaultKey, (BufferDescriptor, GpuKey, wgpu::Buffer)>,
+    textures: SlotMap<DefaultKey, (TextureDescriptor, GpuKey, wgpu::Texture)>,
     devices: SlotMap<DefaultKey, Gpu>,
 }
 
@@ -20,6 +24,18 @@ pub struct PoolKey(DefaultKey);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GpuKey(DefaultKey);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TextureKey(DefaultKey);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct BufferKey(DefaultKey);
+
+pub(crate) struct Image {
+    pub(crate) meta: ImageMeta,
+    pub(crate) data: ImageData,
+    pub(crate) descriptor: Descriptor,
+}
 
 /// A view on an image inside the pool.
 pub struct PoolImage<'pool> {
@@ -46,10 +62,11 @@ pub struct IterMut<'pool> {
     devices: &'pool SlotMap<DefaultKey, Gpu>,
 }
 
-pub(crate) struct Image {
-    pub(crate) meta: ImageMeta,
-    pub(crate) data: ImageData,
-    pub(crate) descriptor: Descriptor,
+/// Indexes a pool for extracting unused buffers.
+pub struct Cache<'pool> {
+    texture_sets: HashMap<TextureDescriptor, PoolKey>,
+    buffer_sets: HashMap<BufferDescriptor, BufferKey>,
+    pool: &'pool mut Pool,
 }
 
 /// Meta data distinct from the layout questions.
@@ -190,6 +207,26 @@ impl Pool {
         self.new_with_data(ImageData::LateBound(layout), desc)
     }
 
+    pub(crate) fn insert_cacheable_texture(
+        &mut self,
+        desc: &TextureDescriptor,
+        data: wgpu::Texture,
+    ) -> TextureKey {
+        let gpu = GpuKey(slotmap::KeyData::from_ffi(0).into());
+        let key = self.textures.insert((desc.clone(), gpu, data));
+        TextureKey(key)
+    }
+
+    pub(crate) fn insert_cacheable_buffer(
+        &mut self,
+        desc: &BufferDescriptor,
+        data: wgpu::Buffer,
+    ) -> BufferKey {
+        let gpu = GpuKey(slotmap::KeyData::from_ffi(0).into());
+        let key = self.buffers.insert((desc.clone(), gpu, data));
+        BufferKey(key)
+    }
+
     /// Iterate over all entries in the pool.
     pub fn iter(&self) -> Iter<'_> {
         Iter {
@@ -202,6 +239,33 @@ impl Pool {
         IterMut {
             inner: self.items.iter_mut(),
             devices: &mut self.devices,
+        }
+    }
+
+    pub(crate) fn as_cache(&mut self, gpu: GpuKey) -> Cache<'_> {
+        let mut buffer_sets = HashMap::new();
+        let mut texture_sets = HashMap::new();
+
+        for (key, (descriptor, gpu_key, buffer)) in self.buffers.iter() {
+            if gpu_key.0 != gpu.0 {
+                continue;
+            }
+
+            buffer_sets.insert(descriptor.clone(), BufferKey(key));
+        }
+
+        for (key, (descriptor, gpu_key, buffer)) in self.textures.iter() {
+            if gpu_key.0 != gpu.0 {
+                continue;
+            }
+
+            texture_sets.insert(descriptor.clone(), PoolKey(key));
+        }
+
+        Cache {
+            buffer_sets,
+            texture_sets,
+            pool: self,
         }
     }
 
@@ -246,7 +310,18 @@ impl ImageData {
 
     pub(crate) fn host_allocate(&mut self) -> Self {
         let buffer = ImageBuffer::with_layout(self.layout());
-        core::mem::replace(self, ImageData::Host(buffer))
+        mem::replace(self, ImageData::Host(buffer))
+    }
+
+    pub(crate) fn gpu_texture(&mut self) -> Option<wgpu::Texture> {
+        let late = ImageData::LateBound(self.layout().clone());
+        match mem::replace(self, late)  {
+            ImageData::GpuTexture { texture, .. } => Some(texture),
+            other => {
+                *self = other;
+                None
+            }
+        }
     }
 }
 
@@ -358,8 +433,13 @@ impl PoolImageMut<'_> {
         let ttexture = texture;
         let tgpu = gpu;
 
-        if let ImageData::GpuTexture { texture, layout: _, gpu } = &mut self.image.data {
-            core::mem::swap(ttexture, texture);
+        if let ImageData::GpuTexture {
+            texture,
+            layout: _,
+            gpu,
+        } = &mut self.image.data
+        {
+            mem::swap(ttexture, texture);
             *gpu = tgpu;
         }
 
@@ -381,7 +461,7 @@ impl PoolImageMut<'_> {
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 });
 
-                core::mem::swap(&mut replace, ttexture);
+                mem::swap(&mut replace, ttexture);
             }
         }
 
@@ -401,6 +481,13 @@ impl PoolImageMut<'_> {
         &self.image.data
     }
 
+    pub(crate) fn reassign_gpu_unguarded(&mut self, gpu_key: GpuKey) {
+        match &mut self.image.data {
+            ImageData::Gpu { gpu, .. } => *gpu = gpu_key.0,
+            _ => {}
+        }
+    }
+
     /// Replace the data with a host allocated buffer of the correct layout.
     /// Returns the previous image data.
     /// TODO: figure out if we should expose this..
@@ -417,15 +504,15 @@ impl PoolImageMut<'_> {
     }
 
     /// TODO: figure out if assert/panicking is ergonomic enough for making it pub.
-    pub(crate) fn replace(&mut self, image: ImageData) -> ImageData {
-        assert_eq!(self.image.data.layout(), image.layout());
-        core::mem::replace(&mut self.image.data, image)
-    }
-
-    /// TODO: figure out if assert/panicking is ergonomic enough for making it pub.
+    /// FIXME: ignores reference to GPU or others to this pool's other resources.
     pub(crate) fn swap(&mut self, image: &mut ImageData) {
         assert_eq!(self.image.data.layout(), image.layout());
-        core::mem::swap(&mut self.image.data, image)
+        // FIXME: When we are doing this should we temporarily assign a 'dangling' key
+        // (DefaultKey::null) as the gpu is only fixed later in `finish`. In particular, if
+        // this is *not* the same buffer we retrieved input images from then the key may refer
+        // to a different device which can confusingly error later.
+        // For now, the device is not critically relevant and we assume proper usage..
+        mem::swap(&mut self.image.data, image)
     }
 
     /// If this image is not read on the host (as determined by meta) then execute a swap.
@@ -441,6 +528,22 @@ impl PoolImageMut<'_> {
         } else {
             false
         }
+    }
+}
+
+impl Cache<'_> {
+    // FIXME: what about buffer_init? Avoid allocation? Only if buffer is write-once?
+
+    pub(crate) fn extract_texture(&mut self, desc: &TextureDescriptor) -> Option<wgpu::Texture> {
+        let PoolKey(key) = self.texture_sets.remove(desc)?;
+        let (_, _, texture) = self.pool.textures.remove(key)?;
+        Some(texture)
+    }
+
+    pub(crate) fn extract_buffer(&mut self, size: &BufferDescriptor) -> Option<wgpu::Buffer> {
+        let BufferKey(key) = self.buffer_sets.remove(size)?;
+        let (_, _, buffer) = self.pool.buffers.remove(key)?;
+        Some(buffer)
     }
 }
 
@@ -466,7 +569,11 @@ impl<'pool> Iterator for IterMut<'pool> {
     fn next(&mut self) -> Option<Self::Item> {
         let (key, image) = self.inner.next()?;
         let devices = self.devices;
-        Some(PoolImageMut { key, image, devices })
+        Some(PoolImageMut {
+            key,
+            image,
+            devices,
+        })
     }
 }
 

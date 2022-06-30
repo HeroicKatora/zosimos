@@ -23,6 +23,7 @@ impl ModalEditor for Editor {
         }
 
         self.num_frames += 1;
+        self.close_requested |= self.num_frames >= 500;
     }
 
     fn exit(&self) -> bool {

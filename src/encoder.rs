@@ -95,6 +95,19 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     /// Describes which intermediate textures have been mapped to the GPU.
     staging_map: HashMap<Texture, StagingTexture>,
     // Arena style allocators.
+
+    // Output State with additional info relating to the input program.
+    // FIXME: remember masks for ops that can be skipped/replaced if texture is cached? Most ops
+    // build objects (descriptors, etc.) that are used in construction or initialization of a
+    // buffer. If we don't need to build the buffer, because we have its state in a previous cache,
+    // then we don't need the inputs either.
+    // We must always emulate the 'effect' (in terms of object indices) at runtime. Maybe we can
+    // just use a skip-list instead of Vec for those objects though. Or switch run to a pull-based
+    // model? But that would make it hard to provide bounds for `step`. Ahhh! Choices!
+    /// Annotates which low op allocates a cacheable texture.
+    pub(crate) texture_by_op: HashMap<usize, TextureDescriptor>,
+    /// Annotates which low op allocates a cacheable buffer.
+    pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
 }
 
 /// The GPU buffers associated with a register.

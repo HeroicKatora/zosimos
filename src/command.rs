@@ -1209,7 +1209,7 @@ impl CommandBuffer {
             }
         }
 
-        let mut textures = ImageBufferPlan::default();
+        let mut image_buffers = ImageBufferPlan::default();
         let mut reg_to_texture: HashMap<Register, Texture> = HashMap::default();
 
         for (idx, op) in self.ops.iter().enumerate() {
@@ -1223,7 +1223,7 @@ impl CommandBuffer {
                 .expect("A non-output register");
 
             let ImageBufferAssignment { buffer: _, texture } =
-                textures.allocate_for(descriptor, liveness);
+                image_buffers.allocate_for(descriptor, liveness);
 
             high_ops.push(High::StackPush(Frame {
                 name: format!("Command: {:#?}", op),
@@ -1505,7 +1505,9 @@ impl CommandBuffer {
 
         Ok(Program {
             ops: high_ops,
-            textures,
+            image_buffers,
+            buffer_by_op: HashMap::default(),
+            texture_by_op: HashMap::default(),
         })
     }
 

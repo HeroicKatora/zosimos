@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::buffer::{ByteLayout, Descriptor};
 use crate::command::Register;
-use crate::pool::{ImageData, Pool, PoolImage, PoolKey};
+use crate::pool::{ImageData, Pool, PoolImage, PoolKey, TextureKey};
 use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
 
 use wgpu::{Device, Queue};
@@ -23,6 +23,8 @@ use wgpu::{Device, Queue};
 pub struct Executable {
     /// The list of instructions to perform.
     pub(crate) instructions: Arc<[Low]>,
+    /// The auxiliary information on the program.
+    pub(crate) info: Box<ProgramInfo>,
     /// The host-side data which is used to initialize buffers.
     pub(crate) binary_data: Vec<u8>,
     /// All device related state which we have preserved.
@@ -33,6 +35,12 @@ pub struct Executable {
     pub(crate) io_map: Arc<IoMap>,
     /// The capabilities required from devices to execute this.
     pub(crate) capabilities: Capabilities,
+}
+
+pub(crate) struct ProgramInfo {
+    pub(crate) texture_by_op: HashMap<usize, program::TextureDescriptor>,
+    /// Annotates which low op allocates a cacheable buffer.
+    pub(crate) buffer_by_op: HashMap<usize, program::BufferDescriptor>,
 }
 
 /// Configures devices and input/output buffers for an executable.
@@ -118,11 +126,29 @@ pub(crate) struct Descriptors {
     sampler: Vec<wgpu::Sampler>,
     textures: Vec<wgpu::Texture>,
     texture_views: Vec<wgpu::TextureView>,
+    /// Post-information: descriptors with which buffers were created.
+    /// These buffers can be reused if retired to a pool.
+    buffer_descriptors: HashMap<usize, program::BufferDescriptor>,
+    /// Post-information: descriptors with which textures were created.
+    /// These textures may be reused.
+    texture_descriptors: HashMap<usize, program::TextureDescriptor>,
 }
 
 pub(crate) struct Gpu {
     pub(crate) device: Device,
     pub(crate) queue: Queue,
+}
+
+/// Total memory recovered from previous buffers.
+pub struct RecoveredBufferStats {
+    mem: u64,
+}
+
+/// Total memory retired into retained buffers.
+#[derive(Debug)]
+pub struct RetiredBufferStats {
+    mem: u64,
+    keys: Vec<TextureKey>,
 }
 
 trait WithGpu {
@@ -160,6 +186,7 @@ pub struct Retire<'pool> {
     /// The retiring execution instance.
     execution: Execution,
     pool: &'pool mut Pool,
+    uncorrected_gpu_data: Vec<TextureKey>,
 }
 
 pub(crate) struct Machine {
@@ -417,6 +444,14 @@ impl Environment<'_> {
 
         Ok(())
     }
+
+    /// Retrieve matching temporary buffers from the pool.
+    ///
+    /// This reuses of allocations of buffers, textures, etc. from previous iterations of this
+    /// program run where possible.
+    pub fn recover_buffers(&mut self) -> RecoveredBufferStats {
+        todo!()
+    }
 }
 
 impl Execution {
@@ -493,6 +528,7 @@ impl Execution {
         Retire {
             execution: self,
             pool,
+            uncorrected_gpu_data: vec![],
         }
     }
 }
@@ -1528,6 +1564,26 @@ impl Retire<'_> {
         Ok(self.execution.host.buffers[index].key)
     }
 
+    /// Retain temporary buffers that had been allocated during execution.
+    pub fn retire_buffers(&mut self) -> RetiredBufferStats {
+        let mut stats = RetiredBufferStats { mem: 0, keys: vec![] };
+
+        for buffer in &mut self.execution.host.buffers {
+            let texture = match buffer.data.gpu_texture() {
+                Some(texture) => texture,
+                _ => continue,
+            };
+
+            let key = self.pool.insert_cacheable_texture(descriptor, texture);
+
+            stats.mem += buffer.descriptor.to_canvas().u64_len();
+            stats.keys.push(key);
+            self.uncorrected_gpu_data.push(key);
+        }
+
+        stats
+    }
+
     /// Drop any temporary buffers that had been allocated during execution.
     ///
     /// This leaves only IO resources alive, potentially reducing the amount of allocated memory
@@ -1546,9 +1602,18 @@ impl Retire<'_> {
     ///
     /// You might wish to call [`prune`](Self::prune) to prevent such buffers from staying
     /// allocated in the pool in the first place.
-    pub fn finish(self) {
+    pub fn finish(mut self) {
+        let _ = self.retire_buffers();
+
         let gpu = self.execution.gpu.into_inner();
-        self.pool.reinsert_device(gpu);
+        let gpu_key = self.pool.reinsert_device(gpu);
+
+        // Fixup the gpu reference for all inserted gpu buffers.
+        for pool_key in self.uncorrected_gpu_data.into_iter() {
+            if let Some(mut img) = self.pool.entry(pool_key) {
+                img.reassign_gpu_unguarded(gpu_key);
+            }
+        }
     }
 
     /// Explicitly discard all remaining items.
