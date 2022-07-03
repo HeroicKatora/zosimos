@@ -1,3 +1,5 @@
+mod ping_future;
+
 /// An object-safe version of `Extend`.
 pub(crate) trait ExtendOne<Item> {
     fn extend_one(&mut self, item: Item);
@@ -18,3 +20,5 @@ impl<Item, T: Extend<Item> + ?Sized> ExtendOne<Item> for T {
         Extend::extend(self, iter)
     }
 }
+
+pub use ping_future::Ping;
