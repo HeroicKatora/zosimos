@@ -53,10 +53,10 @@ impl FragmentShaderData for Shader {
     #[rustfmt::skip]
     fn binary_data(&self, buffer: &mut Vec<u8>) -> Option<BufferInitContent> {
         let mat4x2 = [
-            self.x_coord[0], self.y_coord[0], 0.0, 0.0,
-            self.x_coord[1], self.y_coord[1], 0.0, 0.0,
-            self.x_coord[2], self.y_coord[2], 0.0, 0.0,
-            self.x_coord[3], self.y_coord[3], 0.0, 0.0,
+            self.x_coord[0], self.y_coord[0],
+            self.x_coord[1], self.y_coord[1],
+            self.x_coord[2], self.y_coord[2],
+            self.x_coord[3], self.y_coord[3],
         ];
 
         Some(BufferInitContent::new(buffer, &mat4x2))
