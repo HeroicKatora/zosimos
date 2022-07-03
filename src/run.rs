@@ -6,6 +6,7 @@ use crate::buffer::{ByteLayout, Descriptor};
 use crate::command::Register;
 use crate::pool::{BufferKey, GpuKey, ImageData, Pool, PoolImage, PoolKey, ShaderKey, TextureKey};
 use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
+use crate::util::Ping;
 
 use wgpu::{Device, Queue};
 
@@ -41,6 +42,7 @@ pub(crate) struct ProgramInfo {
     pub(crate) texture_by_op: HashMap<usize, program::TextureDescriptor>,
     pub(crate) buffer_by_op: HashMap<usize, program::BufferDescriptor>,
     pub(crate) shader_by_op: HashMap<usize, program::ShaderDescriptorKey>,
+    pub(crate) pipeline_by_op: HashMap<usize, program::RenderPipelineKey>,
 }
 
 /// Configures devices and input/output buffers for an executable.
@@ -214,6 +216,8 @@ struct DevicePolled<'exe, T: WithGpu> {
 pub struct SyncPoint<'exe> {
     future: Option<DevicePolled<'exe, &'exe core::cell::RefCell<Gpu>>>,
     marker: core::marker::PhantomData<&'exe mut Execution>,
+    host_start: std::time::Instant,
+    debug_mark: Option<String>,
 }
 
 /// Represents a stopped execution instance, without information abouts its outputs.
@@ -556,6 +560,13 @@ impl Execution {
     /// Otherwise, have to make an extra copy call in the pool.
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
         let instruction_pointer = self.host.machine.instruction_pointer;
+        let host_start = std::time::Instant::now();
+        let debug_mark = self
+            .host
+            .machine
+            .instructions
+            .get(instruction_pointer)
+            .map(|instr| format!("{:?}", instr));
 
         let Execution {
             ref gpu,
@@ -580,6 +591,8 @@ impl Execution {
                 gpu: &self.gpu,
             }),
             marker: core::marker::PhantomData,
+            host_start,
+            debug_mark,
         })
     }
 
@@ -699,7 +712,7 @@ impl Host {
             Low::Shader(desc) => {
                 let shader;
                 if std::env::var("STEALTH_PAINT_PASSTHROUGH").is_err() {
-                    let desc = wgpu::ShaderModuleDescriptor {
+                    let wgpu_desc = wgpu::ShaderModuleDescriptor {
                         label: Some(desc.name),
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
@@ -709,10 +722,10 @@ impl Host {
                         shader
                     } else {
                         self.usage.shaders_compiled += 1;
-                        gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc))
+                        gpu.with_gpu(|gpu| gpu.device.create_shader_module(wgpu_desc))
                     };
                 } else {
-                    let desc = wgpu::ShaderModuleDescriptor {
+                    let wgpu_desc = wgpu::ShaderModuleDescriptor {
                         label: Some(desc.name),
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
@@ -722,7 +735,7 @@ impl Host {
                         shader
                     } else {
                         self.usage.shaders_compiled += 1;
-                        gpu.with_gpu(|gpu| gpu.device.create_shader_module(&desc))
+                        gpu.with_gpu(|gpu| gpu.device.create_shader_module(wgpu_desc))
                     };
                 };
 
@@ -832,6 +845,7 @@ impl Host {
                 let pipeline =
                     self.descriptors
                         .pipeline(desc, &mut vertex_buffers, &mut fragments)?;
+
                 let pipeline = gpu.with_gpu(|gpu| gpu.device.create_render_pipeline(&pipeline));
                 self.descriptors.render_pipelines.push(pipeline);
                 Ok(())
@@ -987,9 +1001,10 @@ impl Host {
                 }
 
                 let slice = buffer.slice(..);
-                slice
-                    .map_async(wgpu::MapMode::Write)
-                    .await
+                let (ping, waker) = Ping::new(Box::new(|| wgpu::BufferAsyncError));
+                slice.map_async(wgpu::MapMode::Write, |res| waker.complete(res.is_ok()));
+
+                ping.await
                     .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
 
                 // eprintln!("WriteImageToBuffer");
@@ -1183,9 +1198,10 @@ impl Host {
                 }
 
                 let slice = buffer.slice(..);
-                slice
-                    .map_async(wgpu::MapMode::Read)
-                    .await
+                let (ping, waker) = Ping::new(Box::new(|| wgpu::BufferAsyncError));
+                slice.map_async(wgpu::MapMode::Read, |res| waker.complete(res.is_ok()));
+
+                ping.await
                     .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
 
                 let data = slice.get_mapped_range();
@@ -1317,12 +1333,12 @@ impl Descriptors {
     fn render_pass<'set, 'buf>(
         &'set self,
         desc: &program::RenderPassDescriptor,
-        buf: &'buf mut Vec<wgpu::RenderPassColorAttachment<'set>>,
+        buf: &'buf mut Vec<Option<wgpu::RenderPassColorAttachment<'set>>>,
     ) -> Result<wgpu::RenderPassDescriptor<'set, 'buf>, StepError> {
         buf.clear();
 
         for attachment in &desc.color_attachments {
-            buf.push(self.color_attachment(attachment)?);
+            buf.push(Some(self.color_attachment(attachment)?));
         }
 
         Ok(wgpu::RenderPassDescriptor {
@@ -1351,7 +1367,7 @@ impl Descriptors {
         &'set self,
         desc: &program::RenderPipelineDescriptor,
         vertex_buffers: &'set mut Vec<wgpu::VertexBufferLayout<'set>>,
-        fragments: &'set mut Vec<wgpu::ColorTargetState>,
+        fragments: &'set mut Vec<Option<wgpu::ColorTargetState>>,
     ) -> Result<wgpu::RenderPipelineDescriptor<'set>, StepError> {
         Ok(wgpu::RenderPipelineDescriptor {
             label: None,
@@ -1435,10 +1451,10 @@ impl Descriptors {
     fn fragment_state<'set>(
         &'set self,
         desc: &program::FragmentState,
-        buf: &'set mut Vec<wgpu::ColorTargetState>,
+        buf: &'set mut Vec<Option<wgpu::ColorTargetState>>,
     ) -> Result<wgpu::FragmentState<'_>, StepError> {
         buf.clear();
-        buf.extend_from_slice(&desc.targets);
+        buf.extend(desc.targets.iter().cloned().map(Some));
         Ok(wgpu::FragmentState {
             module: self
                 .shaders
@@ -1801,6 +1817,14 @@ impl SyncPoint<'_> {
             Some(polled) => {
                 let DevicePolled { future, gpu } = polled;
                 block_on(future, Some(gpu))?;
+                let _took_time =
+                    std::time::Instant::now().saturating_duration_since(self.host_start);
+                eprint!("{:?}", _took_time);
+                if let Some(dbg) = &self.debug_mark {
+                    eprintln!("{}", dbg)
+                } else {
+                    eprintln!()
+                };
                 Ok(())
             }
         }

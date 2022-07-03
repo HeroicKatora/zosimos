@@ -95,7 +95,7 @@ pub(crate) enum FragmentShaderKey {
     LinearColorMatrix,
     /// The conversion of texel format.
     /// FIXME: there are multiple sources of this.
-    Convert(Direction),
+    Convert(Direction, stage::StageKind),
     /// The generic distribution normal 2d.
     DistributionNormal2d,
     /// Generic fractal brownian noise.

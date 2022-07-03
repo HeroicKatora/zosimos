@@ -93,7 +93,10 @@ pub fn run_executable_with_output<T>(
         environment.bind(target, key).unwrap();
     }
 
+    let _ = environment.recover_buffers();
     let mut execution = executable.launch(environment).expect("Launching failed");
+    // Prepare pool to be clear for cache.
+    pool.clear_cache();
 
     while execution.is_running() {
         let _wait_point = execution.step().expect("Shouldn't fail but");
@@ -101,6 +104,7 @@ pub fn run_executable_with_output<T>(
 
     let mut retire = execution.retire_gracefully(pool);
     let result = output(&mut retire);
+    let _ = retire.retire_buffers();
     retire.finish();
     result
 }

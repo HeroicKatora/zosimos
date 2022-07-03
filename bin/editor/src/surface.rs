@@ -186,6 +186,8 @@ impl Surface {
             }
         };
 
+        let start = std::time::Instant::now();
+
         let present_desc = self.pool.entry(present).unwrap().descriptor();
         let surface_desc = self.pool.entry(surface).unwrap().descriptor();
 
@@ -210,18 +212,27 @@ impl Surface {
             .from_pool(&mut self.pool)
             .expect("Valid pool for our own executable");
 
+        let end = std::time::Instant::now();
+        log::warn!("Time setup {:?}", end.saturating_duration_since(start));
+        let start = end;
+
         // Bind the input.
         run.bind(in_reg, present)
             .expect("Valid binding for our executable input");
         // Bind the output.
         run.bind_output(out_reg, surface)
             .expect("Valid binding for our executable output");
+        log::warn!("Sub- optimality: {:?}", surface_tex.suboptimal);
         log::warn!("{:?}", run.recover_buffers());
 
         let mut running = normalize
             .exe
             .launch(run)
             .expect("Valid binding to start our executable");
+
+        let end = std::time::Instant::now();
+        log::warn!("Time launch {:?}", end.saturating_duration_since(start));
+        let start = end;
 
         // Ensure our cache does not grow infinitely.
         self.pool.clear_cache();
@@ -233,6 +244,10 @@ impl Surface {
             step.block_on()
                 .expect("Valid binding to block on our execution");
         }
+
+        let end = std::time::Instant::now();
+        log::warn!("Time run {:?}", end.saturating_duration_since(start));
+        let start = end;
 
         log::warn!("{:?}", running.resources_used());
         let mut retire = running.retire_gracefully(&mut self.pool);
@@ -251,7 +266,10 @@ impl Surface {
             .entry(surface)
             .unwrap()
             .replace_texture_unguarded(&mut surface_tex.texture, gpu);
-        log::info!("Presented!");
+
+        let end = std::time::Instant::now();
+        log::warn!("Time finish {:?}", end.saturating_duration_since(start));
+        let start = end;
     }
 
     pub fn descriptor(&self) -> Descriptor {

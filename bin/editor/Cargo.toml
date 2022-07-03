@@ -20,10 +20,10 @@ path = "src/main.rs"
 path = "../../"
 
 ## 'Optional' dependencies for the binary.
-[dependencies.egui]
-version = "0.18"
-[dependencies.egui-wgpu]
-version = "0.18"
+# [dependencies.egui]
+# version = "0.18"
+# [dependencies.egui-wgpu]
+# version = "0.18"
 [dependencies.image]
 version = "0.24"
 default-features = false
@@ -33,7 +33,7 @@ version = "0.4"
 [dependencies.winit]
 version = "0.26"
 [dependencies.wgpu]
-version = "0.12"
+version = "0.13"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = "0.9.0"
@@ -41,10 +41,10 @@ env_logger = "0.9.0"
 # Wasm compatibility following, roughly
 # <https://sotrh.github.io/learn-wgpu/beginner/tutorial1-window/#the-code>
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wgpu = { version = "0.12", features = ["webgl"]}
+wgpu = { version = "0.13", features = ["webgl"]}
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4.30"
-web-sys = { version = "=0.3.53", features = [
+web-sys = { version = "=0.3.58", features = [
     "Document",
     "Window",
     "Element",

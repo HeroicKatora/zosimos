@@ -12,10 +12,10 @@ use crate::program::{
     BindGroupDescriptor, BindGroupLayoutDescriptor, BindingResource, Buffer, BufferDescriptor,
     BufferDescriptorInit, BufferInitContent, BufferUsage, Capabilities, ColorAttachmentDescriptor,
     DeviceBuffer, DeviceTexture, FragmentState, Function, ImageBufferAssignment, ImageBufferPlan,
-    ImageDescriptor, ImagePoolPlan, LaunchError, Low, PipelineLayoutDescriptor, PrimitiveState,
-    RenderPassDescriptor, RenderPipelineDescriptor, SamplerDescriptor, ShaderDescriptor,
-    ShaderDescriptorKey, StagingDescriptor, Texture, TextureDescriptor, TextureUsage,
-    TextureViewDescriptor, VertexState,
+    ImageDescriptor, ImagePoolPlan, LaunchError, Low, PipelineLayoutDescriptor, PipelineLayoutKey,
+    PrimitiveState, RenderPassDescriptor, RenderPipelineDescriptor, RenderPipelineKey,
+    SamplerDescriptor, ShaderDescriptor, ShaderDescriptorKey, StagingDescriptor, Texture,
+    TextureDescriptor, TextureUsage, TextureViewDescriptor, VertexState,
 };
 use crate::util::ExtendOne;
 use crate::{run, shaders};
@@ -111,6 +111,10 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
     /// Annotates which low op constructs a cacheable shader module.
     pub(crate) shader_by_op: HashMap<usize, ShaderDescriptorKey>,
+    /// Annotates which shader is built by what key.
+    pub(crate) shader_by_idx: HashMap<usize, ShaderDescriptorKey>,
+    /// Annotates which low op allocates a pipeline that may be reused.
+    pub(crate) pipeline_by_op: HashMap<usize, RenderPipelineKey>,
 }
 
 /// The GPU buffers associated with a register.
@@ -291,6 +295,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 if let Some(key) = &desc.key {
                     self.shader_by_op
                         .insert(self.instruction_pointer, key.clone());
+                    self.shader_by_idx.insert(self.shaders, key.clone());
                 }
 
                 self.shaders += 1
@@ -1290,6 +1295,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         &mut self,
         desc: &SimpleRenderPipelineDescriptor,
     ) -> Result<usize, LaunchError> {
+        // Careful of `RenderPipelineKey` if changed, i.e. no longer deterministic from other `desc` fields.
         let layout = self.make_paint_layout(desc);
         let format = match desc.pipeline_target {
             PipelineTarget::Texture(texture) => {
@@ -1312,6 +1318,24 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             ShaderBind::Shader { id, entry_point } => (id, entry_point),
         };
 
+        let desc_vertex = self.shader_by_idx.get(&vertex);
+        let desc_fragment = self.shader_by_idx.get(&fragment);
+        match (desc_vertex, desc_fragment) {
+            (Some(v), Some(f)) => {
+                let key = RenderPipelineKey {
+                    pipeline_flavor: PipelineLayoutKey::Simple,
+                    vertex_module: v.clone(),
+                    vertex_entry: vertex_entry_point,
+                    fragment_module: f.clone(),
+                    fragment_entry: fragment_entry_point,
+                    primitive: PrimitiveState::TriangleStrip,
+                };
+
+                self.pipeline_by_op.insert(self.instruction_pointer, key);
+            }
+            _ => {}
+        }
+
         let pipeline = self.render_pipelines;
         self.push(Low::RenderPipeline(RenderPipelineDescriptor {
             vertex: VertexState {
@@ -1321,13 +1345,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             fragment: FragmentState {
                 entry_point: fragment_entry_point,
                 fragment_module: fragment,
+                // Careful of `RenderPipelineKey` if changed.
                 targets: vec![wgpu::ColorTargetState {
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                     format,
                 }],
             },
+            // Careful of `RenderPipelineKey` if changed.
             primitive: PrimitiveState::TriangleStrip,
+            // Careful of `RenderPipelineKey` if changed.
             layout,
         }))?;
 
@@ -1683,7 +1710,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(shaders::FragmentShaderKey::Convert(shaders::Direction::Decode)),
+                    Some(shaders::FragmentShaderKey::Convert(shaders::Direction::Decode, *stage_kind)),
                     shader_include_to_spirv(stage_kind.decode_src()))?;
 
                 let buffer = parameter.serialize_std140();
@@ -1728,7 +1755,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
                 let fragment = self.fragment_shader(
-                    Some(shaders::FragmentShaderKey::Convert(shaders::Direction::Encode)),
+                    Some(shaders::FragmentShaderKey::Convert(shaders::Direction::Encode, *stage_kind)),
                     shader_include_to_spirv(stage_kind.encode_src()))?;
 
                 let buffer = parameter.serialize_std140();

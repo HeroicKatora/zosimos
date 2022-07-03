@@ -27,7 +27,7 @@ version = "1"
 default-features = false
 
 [dependencies.wgpu]
-version = "0.12"
+version = "0.13"
 features = ["spirv"]
 
 [workspace]
