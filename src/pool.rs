@@ -5,7 +5,9 @@ use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
 use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer};
-use crate::program::{BufferDescriptor, Capabilities, PipelineLayoutKey, ShaderDescriptorKey, TextureDescriptor};
+use crate::program::{
+    BufferDescriptor, Capabilities, PipelineLayoutKey, ShaderDescriptorKey, TextureDescriptor,
+};
 use crate::run::{block_on, Gpu};
 
 /// Holds a number of image buffers, their descriptors and meta data.
@@ -350,7 +352,7 @@ impl Pool {
                 continue;
             }
 
-            pipeline_sets 
+            pipeline_sets
                 .entry(descriptor.clone())
                 .or_default()
                 .push(PipelineKey(key));

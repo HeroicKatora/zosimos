@@ -41,10 +41,16 @@ impl Editor {
         let start = end;
         surface.present_to_texture(&mut texture);
         let end = std::time::Instant::now();
-        log::warn!("Time rendering total {:?}", end.saturating_duration_since(start));
+        log::warn!(
+            "Time rendering total {:?}",
+            end.saturating_duration_since(start)
+        );
         texture.present();
         let end = std::time::Instant::now();
-        log::warn!("Time present total {:?}", end.saturating_duration_since(full_start));
+        log::warn!(
+            "Time present total {:?}",
+            end.saturating_duration_since(full_start)
+        );
         Ok(())
     }
 

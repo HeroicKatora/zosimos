@@ -1004,8 +1004,7 @@ impl Host {
                 let (ping, waker) = Ping::new(Box::new(|| wgpu::BufferAsyncError));
                 slice.map_async(wgpu::MapMode::Write, |res| waker.complete(res.is_ok()));
 
-                ping
-                    .await
+                ping.await
                     .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
 
                 // eprintln!("WriteImageToBuffer");
@@ -1202,8 +1201,7 @@ impl Host {
                 let (ping, waker) = Ping::new(Box::new(|| wgpu::BufferAsyncError));
                 slice.map_async(wgpu::MapMode::Read, |res| waker.complete(res.is_ok()));
 
-                ping
-                    .await
+                ping.await
                     .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
 
                 let data = slice.get_mapped_range();
@@ -1822,7 +1820,11 @@ impl SyncPoint<'_> {
                 let _took_time =
                     std::time::Instant::now().saturating_duration_since(self.host_start);
                 eprint!("{:?}", _took_time);
-                if let Some(dbg) = &self.debug_mark { eprintln!("{}", dbg) } else { eprintln!() };
+                if let Some(dbg) = &self.debug_mark {
+                    eprintln!("{}", dbg)
+                } else {
+                    eprintln!()
+                };
                 Ok(())
             }
         }

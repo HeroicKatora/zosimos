@@ -68,7 +68,8 @@ impl State {
 
     fn wait_for_inner(&self, with: &mut dyn FnMut() -> bool) -> Option<bool> {
         let lock = self.wake.lock().unwrap();
-        let lock = self.waiter
+        let lock = self
+            .waiter
             .wait_while(lock, |state: &mut Shared| state.done == 0 || with())
             .unwrap();
         match lock.done {
@@ -86,7 +87,7 @@ impl<T> Future for Ping<T> {
         let mut lock = self.complete.wake.lock().unwrap();
 
         match lock.done {
-            0 => {},
+            0 => {}
             1 => return Poll::Ready(Ok(())),
             _ => return Poll::Ready(Err((self.with)())),
         }
