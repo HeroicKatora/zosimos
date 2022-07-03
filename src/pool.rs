@@ -5,7 +5,7 @@ use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
 use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer};
-use crate::program::{BufferDescriptor, Capabilities, ShaderDescriptorKey, TextureDescriptor};
+use crate::program::{BufferDescriptor, Capabilities, PipelineLayoutKey, ShaderDescriptorKey, TextureDescriptor};
 use crate::run::{block_on, Gpu};
 
 /// Holds a number of image buffers, their descriptors and meta data.
@@ -17,6 +17,7 @@ pub struct Pool {
     buffers: SlotMap<DefaultKey, (BufferDescriptor, GpuKey, wgpu::Buffer)>,
     textures: SlotMap<DefaultKey, (TextureDescriptor, GpuKey, wgpu::Texture)>,
     shaders: SlotMap<DefaultKey, (ShaderDescriptorKey, GpuKey, wgpu::ShaderModule)>,
+    pipelines: SlotMap<DefaultKey, (PipelineLayoutKey, GpuKey, wgpu::RenderPipeline)>,
     devices: SlotMap<DefaultKey, Gpu>,
 }
 
@@ -34,6 +35,9 @@ pub(crate) struct BufferKey(DefaultKey);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ShaderKey(DefaultKey);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PipelineKey(DefaultKey);
 
 pub(crate) struct Image {
     pub(crate) meta: ImageMeta,
@@ -73,6 +77,7 @@ pub struct Cache<'pool> {
     // FIXME: really, we should only ever need one instance of each shader!
     // But since it isn't `Clone` we rely on the encoder for this invariant.
     shader_sets: HashMap<ShaderDescriptorKey, Vec<ShaderKey>>,
+    pipeline_sets: HashMap<PipelineLayoutKey, Vec<PipelineKey>>,
     pool: &'pool mut Pool,
 }
 
@@ -244,6 +249,16 @@ impl Pool {
         ShaderKey(key)
     }
 
+    pub(crate) fn insert_cacheable_pipeline(
+        &mut self,
+        desc: &PipelineLayoutKey,
+        data: wgpu::RenderPipeline,
+    ) -> PipelineKey {
+        let gpu = GpuKey(slotmap::KeyData::from_ffi(0).into());
+        let key = self.pipelines.insert((desc.clone(), gpu, data));
+        PipelineKey(key)
+    }
+
     pub(crate) fn reassign_texture_gpu_unguarded(&mut self, key: TextureKey, gpu: GpuKey) {
         if let Some((_, old_gpu, _)) = self.textures.get_mut(key.0) {
             *old_gpu = gpu;
@@ -258,6 +273,12 @@ impl Pool {
 
     pub(crate) fn reassign_shader_gpu_unguarded(&mut self, key: ShaderKey, gpu: GpuKey) {
         if let Some((_, old_gpu, _)) = self.shaders.get_mut(key.0) {
+            *old_gpu = gpu;
+        }
+    }
+
+    pub(crate) fn reassign_pipeline_gpu_unguarded(&mut self, key: PipelineKey, gpu: GpuKey) {
+        if let Some((_, old_gpu, _)) = self.pipelines.get_mut(key.0) {
             *old_gpu = gpu;
         }
     }
@@ -282,12 +303,14 @@ impl Pool {
         self.buffers.clear();
         self.textures.clear();
         self.shaders.clear();
+        self.pipelines.clear();
     }
 
     pub(crate) fn as_cache(&mut self, gpu: GpuKey) -> Cache<'_> {
         let mut buffer_sets = HashMap::<_, Vec<_>>::new();
         let mut texture_sets = HashMap::<_, Vec<_>>::new();
         let mut shader_sets = HashMap::<_, Vec<_>>::new();
+        let mut pipeline_sets = HashMap::<_, Vec<_>>::new();
 
         for (key, (descriptor, gpu_key, _)) in self.buffers.iter() {
             if gpu_key.0 != gpu.0 {
@@ -322,10 +345,22 @@ impl Pool {
                 .push(ShaderKey(key));
         }
 
+        for (key, (descriptor, gpu_key, _)) in self.pipelines.iter() {
+            if gpu_key.0 != gpu.0 {
+                continue;
+            }
+
+            pipeline_sets 
+                .entry(descriptor.clone())
+                .or_default()
+                .push(PipelineKey(key));
+        }
+
         Cache {
             buffer_sets,
             texture_sets,
             shader_sets,
+            pipeline_sets,
             pool: self,
         }
     }

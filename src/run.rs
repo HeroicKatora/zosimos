@@ -41,6 +41,7 @@ pub(crate) struct ProgramInfo {
     pub(crate) texture_by_op: HashMap<usize, program::TextureDescriptor>,
     pub(crate) buffer_by_op: HashMap<usize, program::BufferDescriptor>,
     pub(crate) shader_by_op: HashMap<usize, program::ShaderDescriptorKey>,
+    pub(crate) pipeline_by_op: HashMap<usize, program::RenderPipelineKey>,
 }
 
 /// Configures devices and input/output buffers for an executable.
@@ -843,6 +844,7 @@ impl Host {
                 let pipeline =
                     self.descriptors
                         .pipeline(desc, &mut vertex_buffers, &mut fragments)?;
+
                 let pipeline = gpu.with_gpu(|gpu| gpu.device.create_render_pipeline(&pipeline));
                 self.descriptors.render_pipelines.push(pipeline);
                 Ok(())
@@ -1814,6 +1816,8 @@ impl SyncPoint<'_> {
                 block_on(future, Some(gpu))?;
                 let _took_time =
                     std::time::Instant::now().saturating_duration_since(self.host_start);
+                eprint!("{:?}", _took_time);
+                if let Some(dbg) = &self.debug_mark { eprintln!("{}", dbg) } else { eprintln!() };
                 Ok(())
             }
         }

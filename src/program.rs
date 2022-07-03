@@ -377,13 +377,29 @@ pub(crate) struct RenderPipelineDescriptor {
     pub fragment: FragmentState,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct RenderPipelineKey {
+    pub pipeline_flavor: PipelineLayoutKey,
+    pub vertex_module: ShaderDescriptorKey,
+    pub vertex_entry: &'static str,
+    pub fragment_module: ShaderDescriptorKey,
+    pub fragment_entry: &'static str,
+    pub primitive: PrimitiveState,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) enum PipelineLayoutKey {
+    /// The pipeline layout is uniquely determined for its modules / primitive.
+    Simple,
+}
+
 #[derive(Debug)]
 pub(crate) struct VertexState {
     pub vertex_module: usize,
     pub entry_point: &'static str,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum PrimitiveState {
     TriangleStrip,
 }
@@ -813,6 +829,7 @@ impl Program {
                 buffer_by_op: encoder.buffer_by_op,
                 texture_by_op: encoder.texture_by_op,
                 shader_by_op: encoder.shader_by_op,
+                pipeline_by_op: encoder.pipeline_by_op,
             }),
             binary_data: encoder.binary_data,
             descriptors: run::Descriptors::default(),
