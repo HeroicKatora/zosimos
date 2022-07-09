@@ -6,7 +6,8 @@ use wgpu::{Buffer, Texture};
 
 use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer};
 use crate::program::{
-    BufferDescriptor, Capabilities, PipelineLayoutKey, ShaderDescriptorKey, TextureDescriptor,
+    BufferDescriptor, Capabilities, PipelineLayoutKey, RenderPipelineKey, ShaderDescriptorKey,
+    TextureDescriptor,
 };
 use crate::run::{block_on, Gpu};
 
@@ -19,8 +20,8 @@ pub struct Pool {
     buffers: SlotMap<DefaultKey, (BufferDescriptor, GpuKey, wgpu::Buffer)>,
     textures: SlotMap<DefaultKey, (TextureDescriptor, GpuKey, wgpu::Texture)>,
     shaders: SlotMap<DefaultKey, (ShaderDescriptorKey, GpuKey, wgpu::ShaderModule)>,
-    pipelines: SlotMap<DefaultKey, (PipelineLayoutKey, GpuKey, wgpu::RenderPipeline)>,
-    devices: SlotMap<DefaultKey, Gpu>,
+    pipelines: SlotMap<DefaultKey, (RenderPipelineKey, GpuKey, wgpu::RenderPipeline)>,
+    devices: SlotMap<DefaultKey, Device>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -41,6 +42,11 @@ pub(crate) struct ShaderKey(DefaultKey);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct PipelineKey(DefaultKey);
 
+pub(crate) enum Device {
+    Active(Gpu),
+    Inactive,
+}
+
 pub(crate) struct Image {
     pub(crate) meta: ImageMeta,
     pub(crate) data: ImageData,
@@ -60,7 +66,7 @@ pub struct PoolImageMut<'pool> {
     /// The image inside the pool.
     image: &'pool mut Image,
     /// All other devices.
-    devices: &'pool SlotMap<DefaultKey, Gpu>,
+    devices: &'pool SlotMap<DefaultKey, Device>,
 }
 
 pub struct Iter<'pool> {
@@ -69,7 +75,7 @@ pub struct Iter<'pool> {
 
 pub struct IterMut<'pool> {
     inner: slotmap::basic::IterMut<'pool, DefaultKey, Image>,
-    devices: &'pool SlotMap<DefaultKey, Gpu>,
+    devices: &'pool SlotMap<DefaultKey, Device>,
 }
 
 /// Indexes a pool for extracting unused buffers.
@@ -79,7 +85,7 @@ pub struct Cache<'pool> {
     // FIXME: really, we should only ever need one instance of each shader!
     // But since it isn't `Clone` we rely on the encoder for this invariant.
     shader_sets: HashMap<ShaderDescriptorKey, Vec<ShaderKey>>,
-    pipeline_sets: HashMap<PipelineLayoutKey, Vec<PipelineKey>>,
+    pipeline_sets: HashMap<RenderPipelineKey, Vec<PipelineKey>>,
     pool: &'pool mut Pool,
 }
 
@@ -98,6 +104,13 @@ pub(crate) struct ImageMeta {
 pub(crate) enum ImageData {
     Host(ImageBuffer),
     /// The data lives in a generic buffer.
+    /// The semantics is data in the GPU layout but in a buffer instead of an uploaded texture but
+    /// represents the same buffer as an image on the host. Necessarily, individual lines are very
+    /// highly aligned as required by `wgpu` in order to be usable as copy sources and copy
+    /// targets.
+    ///
+    /// Which may be relevant if the main case is for running a compute shader module.
+    ///
     /// This buffer should be associated to one of the GPU devices.
     Gpu {
         buffer: Buffer,
@@ -143,22 +156,30 @@ impl Pool {
         let request = adapter.request_device(&device, None);
         let request = Box::pin(request);
         let (device, queue) = block_on(request, None)?;
-        let gpu_key = self.devices.insert(Gpu { device, queue });
+        let gpu_key = self.devices.insert(Device::Active(Gpu { device, queue }));
         Ok(GpuKey(gpu_key))
     }
 
     pub fn iter_devices(&self) -> impl Iterator<Item = &'_ wgpu::Device> {
-        self.devices.iter().map(|kv| &kv.1.device)
+        self.devices.iter().filter_map(|kv| match kv.1 {
+            Device::Active(gpu) => Some(&gpu.device),
+            _ => None,
+        })
     }
 
-    pub(crate) fn reinsert_device(&mut self, gpu: Gpu) -> GpuKey {
-        GpuKey(self.devices.insert(gpu))
+    pub(crate) fn reinsert_device(&mut self, key: GpuKey, gpu: Gpu) {
+        if let Some(device) = self.devices.get_mut(key.0) {
+            *device = Device::Active(gpu);
+        }
     }
 
     pub(crate) fn select_device(&mut self, caps: &Capabilities) -> Option<(GpuKey, Gpu)> {
         let key = self.select_device_key(caps)?;
-        let device = self.devices.remove(key).unwrap();
-        Some((GpuKey(key), device))
+        let device = self.devices.get_mut(key).unwrap();
+        match mem::replace(device, Device::Inactive) {
+            Device::Active(gpu) => Some((GpuKey(key), gpu)),
+            Device::Inactive => None,
+        }
     }
 
     fn select_device_key(&mut self, _: &Capabilities) -> Option<DefaultKey> {
@@ -221,6 +242,97 @@ impl Pool {
         self.new_with_data(ImageData::LateBound(layout), desc)
     }
 
+    /// Move the texture onto a specific GPU device.
+    ///
+    /// Note that this creates a completely new command encoder, and synchronizes with the internal
+    /// queue of the device which isn't extremely efficient. For larger moves, prefer different
+    /// methods of moving.
+    pub fn upload(&mut self, img: PoolKey, GpuKey(key): GpuKey) -> bool {
+        use crate::command::CommandBuffer;
+
+        let image = match self.items.get_mut(img.0) {
+            None => return false,
+            Some(image) => image,
+        };
+
+        match image.data {
+            ImageData::GpuTexture { gpu, .. } if gpu == key => return true,
+            ImageData::LateBound(_) => return false,
+            _ => {}
+        }
+
+        // Build a temporary pool, encode a program to upload the texture.. That takes care of all
+        // the transformations we may intend to perform. Pretty wasteful to throw away everything
+        // but that's okay here. Invent another method of moving textures down the road, i.e. some
+        // stateful pool for all tools utilized here. In particular don't recompile and encode the
+        // commands that don't change (almost everything until lowering).
+        let gpu = match self.devices.get_mut(key) {
+            None => return false,
+            Some(device) => match mem::replace(device, Device::Inactive) {
+                Device::Inactive => return false,
+                Device::Active(gpu) => gpu,
+            }
+        };
+
+        let capabilities = Capabilities::from(&gpu.device);
+
+        let mut pool = Pool::default();
+        let temp_key = pool.devices.insert(Device::Active(gpu));
+        let mut in_entry = pool.declare(image.descriptor.clone());
+        in_entry.swap(&mut image.data);
+        let in_key = in_entry.key();
+        let mut out_entry = pool.declare(image.descriptor.clone());
+        out_entry.texture_allocate(temp_key);
+        let out_key = out_entry.key();
+
+        let mut commands = CommandBuffer::default();
+        let input = commands.input(image.descriptor.clone())
+            .expect("bug, bad input");
+        let (output, _) = commands.output(input)
+            .expect("bug, bad output");
+
+        let program = commands.compile()
+            .expect("bug, bad program");
+        let exe = program.lower_to(capabilities)
+            .expect("bug, insufficient capabilities");
+
+        let mut env = exe.from_pool(&mut pool)
+            .expect("bug, no device");
+        env.bind(input, in_key)
+            .expect("bug, binding input");
+        env.bind_output(output, out_key)
+            .expect("bug, binding output");
+        let mut run = exe.launch_once(env)
+            .expect("bug, failed to start");
+
+        while run.is_running() {
+            run.step().expect("bug, failed to run");
+        }
+
+        let mut retire = run.retire_gracefully(&mut pool);
+        retire.input(input)
+            .expect("bug, failed to recover input");
+        retire.output(output)
+            .expect("bug, failed to recover output");
+
+        // Swap out the texture ..
+        let mut entry = pool.entry(out_key)
+            .expect("bug, failed to output pool");
+        entry.swap(&mut image.data);
+
+        match &mut image.data {
+            ImageData::GpuTexture { gpu, .. } => *gpu = key,
+            _ => panic!("can't fix broken non-GPU texture"),
+        }
+
+        match pool.devices.remove(temp_key) {
+            Some(Device::Active(gpu)) => self.reinsert_device(GpuKey(key), gpu),
+            _ => panic!("can't fix missing GPU device"),
+        }
+
+        true
+    }
+
     pub(crate) fn insert_cacheable_texture(
         &mut self,
         desc: &TextureDescriptor,
@@ -253,7 +365,7 @@ impl Pool {
 
     pub(crate) fn insert_cacheable_pipeline(
         &mut self,
-        desc: &PipelineLayoutKey,
+        desc: &RenderPipelineKey,
         data: wgpu::RenderPipeline,
     ) -> PipelineKey {
         let gpu = GpuKey(slotmap::KeyData::from_ffi(0).into());
@@ -400,7 +512,6 @@ impl ImageData {
     pub(crate) fn layout(&self) -> &BufferLayout {
         match self {
             ImageData::Host(canvas) => canvas.layout(),
-            ImageData::Gpu { layout, .. } => layout,
             ImageData::GpuTexture { layout, .. } => layout,
             ImageData::LateBound(layout) => layout,
         }
@@ -543,8 +654,8 @@ impl PoolImageMut<'_> {
 
         let mut replace;
         match self.devices.get(tgpu) {
-            None => return,
-            Some(gpu) => {
+            None | Some(Device::Inactive) => return,
+            Some(Device::Active(gpu)) => {
                 replace = gpu.device.create_texture(&wgpu::TextureDescriptor {
                     label: None,
                     size: wgpu::Extent3d {
@@ -584,6 +695,14 @@ impl PoolImageMut<'_> {
     /// TODO: figure out if we should expose this..
     pub(crate) fn host_allocate(&mut self) -> ImageData {
         self.image.data.host_allocate()
+    }
+
+    /// Allocate a texture of data for the selected device.
+    pub(crate) fn texture_allocate(&mut self, GpuKey(gpu): GpuKey) {
+        if let Some(device) = self.devices.get(gpu) {
+            // FU: maybe add Buffer { } afterall
+            todo!()
+        }
     }
 
     /// Make a copy of this host accessible image as a host allocated image.
@@ -645,6 +764,15 @@ impl Cache<'_> {
         let (_, _, shader) = self.pool.shaders.remove(key)?;
         Some(shader)
     }
+
+    pub(crate) fn extract_pipeline(
+        &mut self,
+        desc: &RenderPipelineKey,
+    ) -> Option<wgpu::RenderPipeline> {
+        let PipelineKey(key) = self.pipeline_sets.get_mut(desc)?.pop()?;
+        let (_, _, pipeline) = self.pool.pipelines.remove(key)?;
+        Some(pipeline)
+    }
 }
 
 impl<'pool> From<PoolImageMut<'pool>> for PoolImage<'pool> {
@@ -693,8 +821,7 @@ impl fmt::Debug for ImageData {
             ImageData::Host(buffer) => write!(f, "ImageData::Host({:?})", buffer.layout()),
             ImageData::GpuTexture { layout, .. } => {
                 write!(f, "ImageData::GpuTexture({:?})", layout)
-            }
-            ImageData::Gpu { layout, .. } => write!(f, "ImageData::GpuBuffer({:?})", layout),
+            } // ImageData::Gpu { layout, .. } => write!(f, "ImageData::GpuBuffer({:?})", layout),
         }
     }
 }

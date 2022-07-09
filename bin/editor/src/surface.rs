@@ -66,7 +66,7 @@ impl Surface {
         let (color, texel);
         let config = SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
-            format: match inner.get_preferred_format(&adapter) {
+            format: match inner.get_supported_formats(&adapter).get(0) {
                 None => {
                     color = Color::SRGB;
                     texel = Texel::new_u8(SampleParts::RgbA);
@@ -143,13 +143,27 @@ impl Surface {
             .expect("to get a device")
     }
 
+    pub(crate) fn reconfigure_gpu(&mut self) -> GpuKey {
+        if let Some(gpu) = self.entry.gpu {
+            gpu
+        } else {
+            let mut pool = core::mem::take(&mut self.pool);
+            let gpu = self.configure_pool(&mut pool);
+            self.pool = pool;
+            gpu
+        }
+    }
+
     pub fn set_image(&mut self, image: &image::DynamicImage) {
+        let gpu = self.reconfigure_gpu();
         if let Some(key) = self.entry.presentable {
             let mut entry = self.pool.entry(key).unwrap();
             entry.set_srgb(&image);
+            entry.upload(gpu);
         } else {
-            let entry = self.pool.insert_srgb(image);
+            let mut entry = self.pool.insert_srgb(image);
             self.entry.presentable = Some(entry.key());
+            entry.upload(gpu);
         }
     }
 

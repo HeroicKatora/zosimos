@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::buffer::{ByteLayout, Descriptor};
 use crate::command::Register;
-use crate::pool::{BufferKey, GpuKey, ImageData, Pool, PoolImage, PoolKey, ShaderKey, TextureKey};
+use crate::pool::{BufferKey, GpuKey, ImageData, Pool, PoolImage, PoolKey, ShaderKey, TextureKey, PipelineKey};
 use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
 use crate::util::Ping;
 
@@ -75,6 +75,8 @@ pub struct Environment<'pool> {
 pub struct Execution {
     /// The gpu processor handles.
     pub(crate) gpu: core::cell::RefCell<Gpu>,
+    /// The key of the gpu if it was extracted from a pool.
+    pub(crate) gpu_key: Option<GpuKey>,
     /// All the host state of execution.
     pub(crate) host: Host,
     /// All cached data (from one or more pools).
@@ -88,6 +90,7 @@ pub(crate) struct Host {
     pub(crate) buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
     pub(crate) io_map: Arc<IoMap>,
+    pub(crate) info: Arc<ProgramInfo>,
     pub(crate) debug_stack: Vec<Frame>,
     pub(crate) usage: ResourcesUsed,
 }
@@ -97,6 +100,7 @@ pub(crate) struct Cache {
     preallocated_textures: HashMap<usize, wgpu::Texture>,
     preallocated_buffers: HashMap<usize, wgpu::Buffer>,
     precompiled_shader: HashMap<usize, wgpu::ShaderModule>,
+    precompiled_pipelines: HashMap<usize, wgpu::RenderPipeline>,
 }
 
 #[derive(Debug, Default)]
@@ -107,6 +111,8 @@ pub struct ResourcesUsed {
     texture_reused: u64,
     shaders_compiled: u64,
     shaders_reused: u64,
+    pipelines_compiled: u64,
+    pipelines_reused: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +124,7 @@ pub(crate) struct Frame {
 
 pub(crate) struct InitialState {
     pub(crate) instructions: Arc<[Low]>,
+    pub(crate) info: Arc<ProgramInfo>,
     pub(crate) device: Device,
     pub(crate) queue: Queue,
     pub(crate) buffers: Vec<Image>,
@@ -166,6 +173,9 @@ pub(crate) struct Descriptors {
     /// Post-information: descriptors with which textures were created.
     /// These textures may be reused.
     shader_descriptors: HashMap<usize, program::ShaderDescriptorKey>,
+    /// Post-information: descriptors of shaders and parameters part of a pipeline.
+    /// These may be reused as compiling modules is expensive on the driver.
+    pipeline_descriptors: HashMap<usize, program::RenderPipelineKey>,
 }
 
 pub(crate) struct Gpu {
@@ -186,6 +196,7 @@ pub struct RetiredBufferStats {
     texture_keys: Vec<TextureKey>,
     buffer_keys: Vec<BufferKey>,
     shader_keys: Vec<ShaderKey>,
+    pipeline_keys: Vec<PipelineKey>,
 }
 
 trait WithGpu {
@@ -228,6 +239,7 @@ pub struct Retire<'pool> {
     uncorrected_gpu_textures: Vec<TextureKey>,
     uncorrected_gpu_buffers: Vec<BufferKey>,
     uncorrected_shaders: Vec<ShaderKey>,
+    uncorrected_pipelines: Vec<PipelineKey>,
 }
 
 pub(crate) struct Machine {
@@ -314,6 +326,7 @@ impl Executable {
         self.check_satisfiable(&mut env)?;
         Ok(Execution {
             gpu: env.gpu.into(),
+            gpu_key: env.gpu_key,
             host: Host {
                 machine: Machine::new(Arc::clone(&self.instructions)),
                 descriptors: Descriptors::default(),
@@ -321,6 +334,7 @@ impl Executable {
                 buffers: env.buffers,
                 binary_data: self.binary_data.clone(),
                 io_map: self.io_map.clone(),
+                info: self.info.clone(),
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
             },
@@ -333,6 +347,7 @@ impl Executable {
         self.check_satisfiable(&mut env)?;
         Ok(Execution {
             gpu: env.gpu.into(),
+            gpu_key: env.gpu_key,
             host: Host {
                 machine: Machine::new(Arc::clone(&self.instructions)),
                 descriptors: self.descriptors,
@@ -340,6 +355,7 @@ impl Executable {
                 buffers: env.buffers,
                 binary_data: self.binary_data,
                 io_map: self.io_map.clone(),
+                info: self.info.clone(),
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
             },
@@ -524,6 +540,12 @@ impl Environment<'_> {
             }
         }
 
+        for (&inst, desc) in &self.info.pipeline_by_op {
+            if let Some(pipeline) = pool_cache.extract_pipeline(desc) {
+                self.cache.precompiled_pipelines.insert(inst, pipeline);
+            }
+        }
+
         stats
     }
 }
@@ -537,6 +559,7 @@ impl Execution {
                 queue: init.queue,
             }
             .into(),
+            gpu_key: None,
             host: Host {
                 machine: Machine::new(init.instructions),
                 descriptors: Descriptors::default(),
@@ -544,6 +567,7 @@ impl Execution {
                 command_encoder: None,
                 binary_data: init.binary_data,
                 io_map: Arc::new(init.io_map),
+                info: init.info,
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
             },
@@ -570,6 +594,7 @@ impl Execution {
 
         let Execution {
             ref gpu,
+            gpu_key: _,
             host,
             cache,
         } = self;
@@ -619,6 +644,7 @@ impl Execution {
             uncorrected_gpu_textures: vec![],
             uncorrected_gpu_buffers: vec![],
             uncorrected_shaders: vec![],
+            uncorrected_pipelines: vec![],
         }
     }
 
@@ -839,14 +865,31 @@ impl Host {
                 Ok(())
             }
             Low::RenderPipeline(desc) => {
-                let mut vertex_buffers = vec![];
-                let mut fragments = vec![];
+                let pipeline = if let Some(pipeline) = cache.precompiled_pipelines.remove(&inst) {
+                    self.usage.pipelines_reused += 1;
+                    pipeline
+                } else {
+                    self.usage.pipelines_compiled += 1;
 
-                let pipeline =
+                    let mut vertex_buffers = vec![];
+                    let mut fragments = vec![];
+
+                    let pipeline =
+                        self.descriptors
+                            .pipeline(desc, &mut vertex_buffers, &mut fragments)?;
+                    gpu.with_gpu(|gpu| gpu.device.create_render_pipeline(&pipeline))
+                };
+
+                let pipeline_idx = self.descriptors.render_pipelines.len();
+                // Pipelines are not cacheable (at least we don't assume so) from their descriptor
+                // alone which may refer to some arbitrary module instances and state that are not
+                // easily summarized. So, only cache this if the encoder generated a key for it.
+                if let Some(desc) = self.info.pipeline_by_op.get(&inst) {
                     self.descriptors
-                        .pipeline(desc, &mut vertex_buffers, &mut fragments)?;
+                        .pipeline_descriptors
+                        .insert(pipeline_idx, desc.clone());
+                }
 
-                let pipeline = gpu.with_gpu(|gpu| gpu.device.create_render_pipeline(&pipeline));
                 self.descriptors.render_pipelines.push(pipeline);
                 Ok(())
             }
@@ -1755,6 +1798,19 @@ impl Retire<'_> {
             self.uncorrected_shaders.push(key);
         }
 
+        let tidx = 0..descriptors.render_pipelines.len();
+        let pipelines = descriptors.render_pipelines.drain(..).zip(tidx);
+        for (pipeline, idx) in pipelines {
+            let descriptor = match descriptors.pipeline_descriptors.get(&idx) {
+                None => continue,
+                Some(descriptor) => descriptor,
+            };
+
+            let key = self.pool.insert_cacheable_pipeline(descriptor, pipeline);
+            stats.pipeline_keys.push(key);
+            self.uncorrected_pipelines.push(key);
+        }
+
         stats
     }
 
@@ -1780,19 +1836,25 @@ impl Retire<'_> {
         let _ = self.retire_buffers();
 
         let gpu = self.execution.gpu.into_inner();
-        let gpu_key = self.pool.reinsert_device(gpu);
+        if let Some(gpu_key) = self.execution.gpu_key {
+            self.pool.reinsert_device(gpu_key, gpu);
 
-        // Fixup the gpu reference for all inserted gpu buffers.
-        for pool_key in self.uncorrected_gpu_textures.into_iter() {
-            self.pool.reassign_texture_gpu_unguarded(pool_key, gpu_key);
-        }
+            // Fixup the gpu reference for all inserted gpu buffers.
+            for pool_key in self.uncorrected_gpu_textures.into_iter() {
+                self.pool.reassign_texture_gpu_unguarded(pool_key, gpu_key);
+            }
 
-        for pool_key in self.uncorrected_gpu_buffers.into_iter() {
-            self.pool.reassign_buffer_gpu_unguarded(pool_key, gpu_key);
-        }
+            for pool_key in self.uncorrected_gpu_buffers.into_iter() {
+                self.pool.reassign_buffer_gpu_unguarded(pool_key, gpu_key);
+            }
 
-        for shader_key in self.uncorrected_shaders.into_iter() {
-            self.pool.reassign_shader_gpu_unguarded(shader_key, gpu_key);
+            for shader_key in self.uncorrected_shaders.into_iter() {
+                self.pool.reassign_shader_gpu_unguarded(shader_key, gpu_key);
+            }
+
+            for pipeline_key in self.uncorrected_pipelines.into_iter() {
+                self.pool.reassign_pipeline_gpu_unguarded(pipeline_key, gpu_key);
+            }
         }
     }
 
@@ -1817,6 +1879,7 @@ impl SyncPoint<'_> {
             Some(polled) => {
                 let DevicePolled { future, gpu } = polled;
                 block_on(future, Some(gpu))?;
+                /*
                 let _took_time =
                     std::time::Instant::now().saturating_duration_since(self.host_start);
                 eprint!("{:?}", _took_time);
@@ -1824,7 +1887,7 @@ impl SyncPoint<'_> {
                     eprintln!("{}", dbg)
                 } else {
                     eprintln!()
-                };
+                };*/
                 Ok(())
             }
         }

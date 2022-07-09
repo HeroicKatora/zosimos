@@ -1051,7 +1051,15 @@ impl Launcher<'_> {
         let io_map = encoder.io_map();
 
         let init = run::InitialState {
+            // TODO: shared with lower_to. Find a better way to reap the `encoder` for its
+            // resources and descriptors.
             instructions: encoder.instructions.into(),
+            info: Arc::new(run::ProgramInfo {
+                buffer_by_op: encoder.buffer_by_op,
+                texture_by_op: encoder.texture_by_op,
+                shader_by_op: encoder.shader_by_op,
+                pipeline_by_op: encoder.pipeline_by_op,
+            }),
             device,
             queue,
             buffers,
