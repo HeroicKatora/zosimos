@@ -567,27 +567,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let staging_format = staged.to_staging_texture();
         let descriptor = &self.buffer_plan.texture[reg_texture.0];
 
-        let bytes_per_row = (descriptor.layout.texel_stride as u32)
-            .checked_mul(texture_format.size.0.get())
-            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-        let bytes_per_row = (bytes_per_row / 256 + u32::from(bytes_per_row % 256 != 0))
-            .checked_mul(256)
+        let byte_layout = descriptor.to_aligned()
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
         let buffer_layout = CanvasLayout::with_row_layout(&RowLayoutDescription {
             texel: descriptor.texel.clone(),
             width: texture_format.size.0.get(),
             height: texture_format.size.1.get(),
-            row_stride: bytes_per_row.into(),
+            row_stride: byte_layout.row_stride,
         })
         .expect("valid layout");
-
-        let byte_layout = ByteLayout {
-            texel_stride: descriptor.texel.bits.bytes(),
-            width: texture_format.size.0.get(),
-            height: texture_format.size.1.get(),
-            row_stride: bytes_per_row.into(),
-        };
 
         let (buffer, map_write, map_read) = {
             let buffer = self.buffers;

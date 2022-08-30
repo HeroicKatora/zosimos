@@ -2,9 +2,11 @@ use core::{future::Future, iter::once, marker::Unpin, num::NonZeroU32, pin::Pin}
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::buffer::{ByteLayout, Descriptor};
+use crate::buffer::{BufferLayout, ByteLayout, Descriptor};
 use crate::command::Register;
-use crate::pool::{BufferKey, GpuKey, ImageData, Pool, PoolImage, PoolKey, ShaderKey, TextureKey, PipelineKey};
+use crate::pool::{
+    BufferKey, GpuKey, ImageData, PipelineKey, Pool, PoolImage, PoolKey, ShaderKey, TextureKey,
+};
 use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
 use crate::util::Ping;
 
@@ -459,9 +461,8 @@ impl Environment<'_> {
         }
 
         match pool_img.data() {
-            ImageData::Host(_) | ImageData::GpuTexture { .. } => {}
+            ImageData::Host(_) | ImageData::GpuTexture { .. } | ImageData::GpuBuffer { .. } => {}
             _ => {
-                eprintln!("Bad binding: {:?}", reg);
                 return Err(StartError::InternalCommandError(line!()));
             }
         }
@@ -496,7 +497,7 @@ impl Environment<'_> {
         }
 
         match pool_img.data() {
-            ImageData::Host(_) | ImageData::GpuTexture { .. } => {}
+            ImageData::Host(_) | ImageData::GpuTexture { .. } | ImageData::GpuBuffer { .. } => {}
             _ => {
                 eprintln!("Bad binding: {:?}", reg);
                 return Err(StartError::InternalCommandError(line!()));
@@ -1003,7 +1004,6 @@ impl Host {
                 let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
                 let image = &mut self.buffers[source_image.0].data;
-                let buffer = &self.descriptors.buffers[target_buffer.0];
 
                 if let ImageData::GpuTexture {
                     texture,
@@ -1037,12 +1037,39 @@ impl Host {
                     gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
 
                     return Ok(());
+                } else if let ImageData::GpuBuffer {
+                    buffer: src_buffer,
+                    // FIXME: validate layout? What for?
+                    layout: _,
+                    gpu: _,
+                } = image
+                {
+                    let descriptor = wgpu::CommandEncoderDescriptor { label: None };
+                    let mut encoder =
+                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+
+                    encoder.copy_buffer_to_buffer(
+                        src_buffer,
+                        0,
+                        &self.descriptors.buffers[copy_dst_buffer.0],
+                        0,
+                        layout.u64_len(),
+                    );
+
+                    let command = encoder.finish();
+                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+
+                    return Ok(());
                 }
+
+                eprintln!("{:?}", &image);
 
                 if image.as_bytes().is_none() {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
+                // The buffer we copy to is specifically for uploading this argument.
+                let buffer = &self.descriptors.buffers[target_buffer.0];
                 let slice = buffer.slice(..);
                 let (ping, waker) = Ping::new(Box::new(|| wgpu::BufferAsyncError));
                 slice.map_async(wgpu::MapMode::Write, |res| waker.complete(res.is_ok()));
@@ -1058,23 +1085,7 @@ impl Host {
                 // We've checked that this image can be seen as host bytes.
                 let source: &[u8] = image.as_bytes().unwrap();
                 let target: &mut [u8] = &mut data[..];
-
-                // TODO: defensive programming, don't assume cast works. Proof?
-                let target_pitch = bytes_per_row as usize;
-                // TODO(perf): should this use our internal descriptor?
-                let source_pitch = image.layout().as_row_layout().row_stride as usize;
-
-                for x in 0..height {
-                    let source_line = x as usize * source_pitch;
-                    debug_assert!(source.get(source_line..).is_some());
-                    debug_assert!(source[source_line..].len() >= source_pitch);
-                    let source_row = &source[source_line..][..source_pitch];
-                    let target_line = x as usize * target_pitch;
-                    debug_assert!(target.get(target_line..).is_some());
-                    debug_assert!(target[target_line..].len() >= target_pitch);
-                    let target_row = &mut target[target_line..][..target_pitch];
-                    target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
-                }
+                copy_host_to_buffer(source, target, image.layout(), *target_layout);
 
                 drop(data);
                 buffer.unmap();
@@ -1853,7 +1864,8 @@ impl Retire<'_> {
             }
 
             for pipeline_key in self.uncorrected_pipelines.into_iter() {
-                self.pool.reassign_pipeline_gpu_unguarded(pipeline_key, gpu_key);
+                self.pool
+                    .reassign_pipeline_gpu_unguarded(pipeline_key, gpu_key);
             }
         }
     }
@@ -1957,5 +1969,34 @@ where
         spin_block(DevicePolled { future, device })
     } else {
         spin_block(future)
+    }
+}
+
+pub(crate) fn copy_host_to_buffer(
+    source: &[u8],
+    target: &mut [u8],
+    source_layout: &BufferLayout,
+    target_layout: ByteLayout,
+) {
+    let width = target_layout.width;
+    let height = target_layout.height;
+
+    // TODO: defensive programming, don't assume cast works. Proof?
+    let target_pitch = target_layout.row_stride as usize;
+    let bytes_per_texel = target_layout.texel_stride;
+    let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
+    // TODO(perf): should this use our internal descriptor?
+    let source_pitch = source_layout.as_row_layout().row_stride as usize;
+
+    for x in 0..height {
+        let source_line = x as usize * source_pitch;
+        debug_assert!(source.get(source_line..).is_some());
+        debug_assert!(source[source_line..].len() >= source_pitch);
+        let source_row = &source[source_line..][..source_pitch];
+        let target_line = x as usize * target_pitch;
+        debug_assert!(target.get(target_line..).is_some());
+        debug_assert!(target[target_line..].len() >= target_pitch);
+        let target_row = &mut target[target_line..][..target_pitch];
+        target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
     }
 }

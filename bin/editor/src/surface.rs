@@ -159,11 +159,11 @@ impl Surface {
         if let Some(key) = self.entry.presentable {
             let mut entry = self.pool.entry(key).unwrap();
             entry.set_srgb(&image);
-            entry.upload(gpu);
+            self.pool.upload(key, gpu);
         } else {
-            let mut entry = self.pool.insert_srgb(image);
-            self.entry.presentable = Some(entry.key());
-            entry.upload(gpu);
+            let key = self.pool.insert_srgb(image).key();
+            self.entry.presentable = Some(key);
+            self.pool.upload(key, gpu);
         }
     }
 

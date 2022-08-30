@@ -1,15 +1,16 @@
 use core::{fmt, mem};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
 use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer};
 use crate::program::{
-    BufferDescriptor, Capabilities, PipelineLayoutKey, RenderPipelineKey, ShaderDescriptorKey,
+    BufferDescriptor, BufferUsage, Capabilities, RenderPipelineKey, ShaderDescriptorKey,
     TextureDescriptor,
 };
-use crate::run::{block_on, Gpu};
+use crate::run::{block_on, copy_host_to_buffer, Gpu};
 
 /// Holds a number of image buffers, their descriptors and meta data.
 ///
@@ -112,8 +113,11 @@ pub(crate) enum ImageData {
     /// Which may be relevant if the main case is for running a compute shader module.
     ///
     /// This buffer should be associated to one of the GPU devices.
-    Gpu {
-        buffer: Buffer,
+    GpuBuffer {
+        /// Shared buffer. NOTE: could be a dedicated type with copy-on-write semantics and an
+        /// offset. In particular, any modification will require a device (and queue) anyways,
+        /// which is also sufficient to setup a new allocation where necessary.
+        buffer: Arc<Buffer>,
         layout: BufferLayout,
         gpu: DefaultKey,
     },
@@ -248,8 +252,6 @@ impl Pool {
     /// queue of the device which isn't extremely efficient. For larger moves, prefer different
     /// methods of moving.
     pub fn upload(&mut self, img: PoolKey, GpuKey(key): GpuKey) -> bool {
-        use crate::command::CommandBuffer;
-
         let image = match self.items.get_mut(img.0) {
             None => return false,
             Some(image) => image,
@@ -257,6 +259,7 @@ impl Pool {
 
         match image.data {
             ImageData::GpuTexture { gpu, .. } if gpu == key => return true,
+            ImageData::GpuBuffer { gpu, .. } if gpu == key => return true,
             ImageData::LateBound(_) => return false,
             _ => {}
         }
@@ -271,64 +274,59 @@ impl Pool {
             Some(device) => match mem::replace(device, Device::Inactive) {
                 Device::Inactive => return false,
                 Device::Active(gpu) => gpu,
-            }
+            },
         };
 
-        let capabilities = Capabilities::from(&gpu.device);
+        let aligned = match image.descriptor.to_aligned() {
+            Some(aligned) => aligned,
+            None => return false,
+        };
 
-        let mut pool = Pool::default();
-        let temp_key = pool.devices.insert(Device::Active(gpu));
-        let mut in_entry = pool.declare(image.descriptor.clone());
-        in_entry.swap(&mut image.data);
-        let in_key = in_entry.key();
-        let mut out_entry = pool.declare(image.descriptor.clone());
-        out_entry.texture_allocate(temp_key);
-        let out_key = out_entry.key();
+        // Create a data buffer, i.e. can't be mapped for read/write directly but can be used for
+        // storage, copy_dst, copy_src.
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: aligned.row_stride * u64::from(aligned.height),
+            usage: BufferUsage::DataBuffer.to_wgpu(),
+            mapped_at_creation: true,
+        });
 
-        let mut commands = CommandBuffer::default();
-        let input = commands.input(image.descriptor.clone())
-            .expect("bug, bad input");
-        let (output, _) = commands.output(input)
-            .expect("bug, bad output");
+        match &image.data {
+            ImageData::GpuTexture { texture: _, .. } => {
+                // FIXME: would be more performant to keep data in the texture (staged).
+                // How could we end up here anyways.
+                todo!("Copy texture to buffer");
+                buffer.unmap();
+            }
+            ImageData::GpuBuffer { buffer, .. } => {
+                buffer.unmap();
+            }
+            ImageData::Host(canvas) => {
+                let mut slice = buffer.slice(..).get_mapped_range_mut();
+                let layout = image.descriptor.to_canvas();
+                copy_host_to_buffer(canvas.as_bytes(), &mut slice, &layout, aligned);
 
-        let program = commands.compile()
-            .expect("bug, bad program");
-        let exe = program.lower_to(capabilities)
-            .expect("bug, insufficient capabilities");
+                drop(slice);
+                buffer.unmap();
 
-        let mut env = exe.from_pool(&mut pool)
-            .expect("bug, no device");
-        env.bind(input, in_key)
-            .expect("bug, binding input");
-        env.bind_output(output, out_key)
-            .expect("bug, binding output");
-        let mut run = exe.launch_once(env)
-            .expect("bug, failed to start");
-
-        while run.is_running() {
-            run.step().expect("bug, failed to run");
+                // Replace our own data. NOTE: recycle host buffer?
+                image.data = ImageData::GpuBuffer {
+                    buffer: Arc::new(buffer),
+                    layout,
+                    gpu: key,
+                }
+            }
+            ImageData::LateBound(_) => unreachable!("return false previously"),
         }
-
-        let mut retire = run.retire_gracefully(&mut pool);
-        retire.input(input)
-            .expect("bug, failed to recover input");
-        retire.output(output)
-            .expect("bug, failed to recover output");
-
-        // Swap out the texture ..
-        let mut entry = pool.entry(out_key)
-            .expect("bug, failed to output pool");
-        entry.swap(&mut image.data);
 
         match &mut image.data {
             ImageData::GpuTexture { gpu, .. } => *gpu = key,
+            ImageData::GpuBuffer { gpu, .. } => *gpu = key,
             _ => panic!("can't fix broken non-GPU texture"),
         }
 
-        match pool.devices.remove(temp_key) {
-            Some(Device::Active(gpu)) => self.reinsert_device(GpuKey(key), gpu),
-            _ => panic!("can't fix missing GPU device"),
-        }
+        let device = self.devices.get_mut(key).unwrap();
+        let _ = mem::replace(device, Device::Active(gpu));
 
         true
     }
@@ -512,6 +510,7 @@ impl ImageData {
     pub(crate) fn layout(&self) -> &BufferLayout {
         match self {
             ImageData::Host(canvas) => canvas.layout(),
+            ImageData::GpuBuffer { layout, .. } => layout,
             ImageData::GpuTexture { layout, .. } => layout,
             ImageData::LateBound(layout) => layout,
         }
@@ -730,13 +729,30 @@ impl PoolImageMut<'_> {
     pub(crate) fn trade(&mut self, image: &mut ImageData) -> bool {
         if self.meta().no_read {
             self.swap(image);
-            true
-        } else if let Some(copy) = self.host_copy() {
-            // TODO: this variant _mighty_ be able to re-use existing buffer in `image`.
-            *image = ImageData::Host(copy);
-            true
-        } else {
-            false
+            return true;
+        }
+
+        match &self.image.data {
+            ImageData::Host(buffer) => {
+                // TODO: this variant _mighty_ be able to re-use existing buffer in `image`.
+                *image = ImageData::Host(buffer.clone());
+                true
+            }
+            ImageData::GpuBuffer {
+                buffer,
+                layout,
+                gpu,
+            } => {
+                *image = ImageData::GpuBuffer {
+                    buffer: Arc::clone(buffer),
+                    layout: layout.clone(),
+                    gpu: *gpu,
+                };
+                true
+            }
+            // FIXME: Maybe also an Arc-based sharing scheme?
+            ImageData::GpuTexture { .. } => false,
+            ImageData::LateBound(_) => false,
         }
     }
 }
@@ -783,7 +799,6 @@ impl<'pool> From<PoolImageMut<'pool>> for PoolImage<'pool> {
         }
     }
 }
-
 impl<'pool> Iterator for Iter<'pool> {
     type Item = PoolImage<'pool>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -821,7 +836,8 @@ impl fmt::Debug for ImageData {
             ImageData::Host(buffer) => write!(f, "ImageData::Host({:?})", buffer.layout()),
             ImageData::GpuTexture { layout, .. } => {
                 write!(f, "ImageData::GpuTexture({:?})", layout)
-            } // ImageData::Gpu { layout, .. } => write!(f, "ImageData::GpuBuffer({:?})", layout),
+            }
+            ImageData::GpuBuffer { layout, .. } => write!(f, "ImageData::GpuBuffer({:?})", layout),
         }
     }
 }
