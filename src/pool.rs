@@ -289,12 +289,12 @@ impl Pool {
             None => {
                 eprintln!("No GPU {:?}", key);
                 return Err(ImageUploadError::BadGpu);
-            },
+            }
             Some(device) => match mem::replace(device, Device::Inactive) {
                 Device::Inactive => {
                     eprintln!("Inactive GPU {:?}", key);
                     return Err(ImageUploadError::InactiveGpu);
-                },
+                }
                 Device::Active(gpu) => gpu,
             },
         };
@@ -304,7 +304,7 @@ impl Pool {
             None => {
                 eprintln!("No aligned descriptor {:?}", image.descriptor);
                 return Err(ImageUploadError::BadDescriptor);
-            },
+            }
         };
 
         // Create a data buffer, i.e. can't be mapped for read/write directly but can be used for
@@ -669,7 +669,7 @@ impl PoolImageMut<'_> {
         match self.devices.get(tgpu) {
             None | Some(Device::Inactive) => {
                 panic!("Failed unguarded replace, expected GPU device");
-            },
+            }
             Some(Device::Active(gpu)) => {
                 replace = gpu.device.create_texture(&wgpu::TextureDescriptor {
                     label: None,

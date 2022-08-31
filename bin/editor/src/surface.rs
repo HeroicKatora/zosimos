@@ -322,7 +322,7 @@ impl Surface {
         let old_descriptor = surface.descriptor().clone();
         surface.declare(Descriptor {
             color: old_descriptor.color,
-            .. Descriptor::with_texel(old_descriptor.texel, phys.width, phys.height).unwrap()
+            ..Descriptor::with_texel(old_descriptor.texel, phys.width, phys.height).unwrap()
         });
 
         // Could also be done in `get_or_insert_normalizing_exe` by storing the relevant input

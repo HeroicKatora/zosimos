@@ -1059,7 +1059,9 @@ impl Host {
 
                     let command = encoder.finish();
                     gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
-                    self.descriptors.precomputed.insert(write_event, Precomputed);
+                    self.descriptors
+                        .precomputed
+                        .insert(write_event, Precomputed);
 
                     return Ok(());
                 } else if let ImageData::GpuBuffer {
@@ -1083,7 +1085,9 @@ impl Host {
 
                     let command = encoder.finish();
                     gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
-                    self.descriptors.precomputed.insert(write_event, Precomputed);
+                    self.descriptors
+                        .precomputed
+                        .insert(write_event, Precomputed);
 
                     return Ok(());
                 }

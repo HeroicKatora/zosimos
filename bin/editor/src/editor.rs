@@ -68,10 +68,7 @@ impl Editor {
         Ok(())
     }
 
-    pub fn drawn_error(
-        &mut self,
-        err: wgpu::SurfaceError,
-    ) -> Result<(), RedrawError> {
+    pub fn drawn_error(&mut self, err: wgpu::SurfaceError) -> Result<(), RedrawError> {
         Ok(match err {
             wgpu::SurfaceError::Lost => {
                 return Err(RedrawError::Lost);

@@ -114,11 +114,11 @@ impl Window {
                 Some(ModalEvent::RedrawRequested) => {
                     ed.event(ModalEvent::RedrawRequested, &mut modal);
                     match ed.redraw_request(&mut surface) {
-                        Ok(()) => {},
+                        Ok(()) => {}
                         Err(RedrawError::Lost) => {
                             recreate(&mut surface);
                             ed.lost(&mut surface)
-                        },
+                        }
                         Err(RedrawError::Outdated) => {
                             recreate(&mut surface);
                             ed.outdated(&mut surface);

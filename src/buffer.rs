@@ -115,10 +115,9 @@ impl Descriptor {
     }
 
     pub(crate) fn to_aligned(&self) -> Option<ByteLayout> {
-        let bytes_per_row = (self.layout.texel_stride as u32)
-            .checked_mul(self.layout.width)?;
-        let bytes_per_row = (bytes_per_row / 256 + u32::from(bytes_per_row % 256 != 0))
-            .checked_mul(256)?;
+        let bytes_per_row = (self.layout.texel_stride as u32).checked_mul(self.layout.width)?;
+        let bytes_per_row =
+            (bytes_per_row / 256 + u32::from(bytes_per_row % 256 != 0)).checked_mul(256)?;
         Some(ByteLayout {
             texel_stride: self.texel.bits.bytes(),
             width: self.layout.width,
