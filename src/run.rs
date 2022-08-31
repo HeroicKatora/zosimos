@@ -244,6 +244,7 @@ struct DevicePolled<'exe, T: WithGpu> {
 pub struct SyncPoint<'exe> {
     future: Option<DevicePolled<'exe, &'exe core::cell::RefCell<Gpu>>>,
     marker: core::marker::PhantomData<&'exe mut Execution>,
+    #[cfg(not(target_arch = "wasm32"))]
     host_start: std::time::Instant,
     debug_mark: Option<String>,
 }
@@ -600,7 +601,10 @@ impl Execution {
     /// Otherwise, have to make an extra copy call in the pool.
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
         let instruction_pointer = self.host.machine.instruction_pointer;
+
+        #[cfg(not(target_arch = "wasm32"))]
         let host_start = std::time::Instant::now();
+
         let debug_mark = self
             .host
             .machine
@@ -632,6 +636,7 @@ impl Execution {
                 gpu: &self.gpu,
             }),
             marker: core::marker::PhantomData,
+            #[cfg(not(target_arch = "wasm32"))]
             host_start,
             debug_mark,
         })

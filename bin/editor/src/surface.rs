@@ -52,7 +52,7 @@ struct NormalizingExe {
 
 impl Surface {
     pub fn new(window: &Window) -> Self {
-        const ANY: wgpu::Backends = wgpu::Backends::VULKAN;
+        const ANY: wgpu::Backends = wgpu::Backends::all();
 
         let instance = wgpu::Instance::new(ANY);
         let inner = window.create_surface(&instance);
@@ -72,14 +72,17 @@ impl Surface {
         let (width, height) = window.inner_size();
         let (color, texel);
         let config = SurfaceConfiguration {
+            //  FIXME: COPY_DST is not universal. Should fix `run.rs` so that RENDER_ATTACHMENT suffices.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
             format: match inner.get_supported_formats(&adapter).get(0) {
                 None => {
+                    log::warn!("No supported surface formats …");
                     color = Color::SRGB;
                     texel = Texel::new_u8(SampleParts::RgbA);
-                    wgpu::TextureFormat::Rgba8UnormSrgb
+                    wgpu::TextureFormat::Rgba8Unorm
                 }
                 Some(wgpu::TextureFormat::Rgba8Unorm) => {
+                    log::warn!("Using format {:?}", wgpu::TextureFormat::Rgba8Unorm);
                     color = match Color::SRGB {
                         Color::Rgb {
                             luminance,
@@ -92,18 +95,22 @@ impl Surface {
                             whitepoint,
                             transfer: Transfer::Linear,
                         },
-                        _ => unreachable!(),
+                        _ => unreachable!("That's not the right color"),
                     };
 
                     texel = Texel::new_u8(SampleParts::RgbA);
-                    wgpu::TextureFormat::Rgba8UnormSrgb
+                    wgpu::TextureFormat::Rgba8Unorm
                 }
                 Some(wgpu::TextureFormat::Rgba8UnormSrgb) => {
+                    log::warn!("Using format {:?}", wgpu::TextureFormat::Rgba8UnormSrgb);
+
                     color = Color::SRGB;
                     texel = Texel::new_u8(SampleParts::RgbA);
                     wgpu::TextureFormat::Rgba8UnormSrgb
                 }
                 Some(wgpu::TextureFormat::Bgra8UnormSrgb) | _ => {
+                    log::warn!("Using format {:?}", wgpu::TextureFormat::Bgra8UnormSrgb);
+
                     color = Color::SRGB;
                     texel = Texel::new_u8(SampleParts::BgrA);
                     wgpu::TextureFormat::Bgra8UnormSrgb
@@ -111,7 +118,7 @@ impl Surface {
             },
             width,
             height,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: wgpu::PresentMode::AutoVsync,
         };
 
         let descriptor = Descriptor {
@@ -140,7 +147,7 @@ impl Surface {
         let surface = pool.declare(that.descriptor());
         that.entry.key = Some(surface.key());
         that.pool = pool;
-        that.reconfigure_surface();
+        that.reconfigure_surface().unwrap();
 
         that
     }
@@ -207,6 +214,7 @@ impl Surface {
             }
         };
 
+        #[cfg(not(target_arch = "wasm32"))]
         let start = std::time::Instant::now();
 
         let present_desc = self.pool.entry(present).unwrap().descriptor();
@@ -233,8 +241,11 @@ impl Surface {
             .from_pool(&mut self.pool)
             .expect("Valid pool for our own executable");
 
+        #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         log::warn!("Time setup {:?}", end.saturating_duration_since(start));
+        #[cfg(not(target_arch = "wasm32"))]
         let start = end;
 
         // Bind the input.
@@ -251,8 +262,11 @@ impl Surface {
             .launch(run)
             .expect("Valid binding to start our executable");
 
+        #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         log::warn!("Time launch {:?}", end.saturating_duration_since(start));
+        #[cfg(not(target_arch = "wasm32"))]
         let start = end;
 
         // Ensure our cache does not grow infinitely.
@@ -266,8 +280,11 @@ impl Surface {
                 .expect("Valid binding to block on our execution");
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         log::warn!("Time run {:?}", end.saturating_duration_since(start));
+        #[cfg(not(target_arch = "wasm32"))]
         let start = end;
 
         log::warn!("{:?}", running.resources_used());
@@ -288,8 +305,11 @@ impl Surface {
             .unwrap()
             .replace_texture_unguarded(&mut surface_tex.texture, gpu);
 
+        #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         log::warn!("Time finish {:?}", end.saturating_duration_since(start));
+        #[cfg(not(target_arch = "wasm32"))]
         let start = end;
     }
 

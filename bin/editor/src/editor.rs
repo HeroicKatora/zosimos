@@ -1,7 +1,7 @@
 //! The editor state itself, sans causal snapshot system.
 use crate::compute::Compute;
 use crate::surface::Surface;
-use crate::winit::{ModalContext, ModalEditor, ModalEvent, RedrawError, Window};
+use crate::winit::{ModalContext, ModalEditor, ModalEvent, RedrawError};
 
 #[derive(Default)]
 pub struct Editor {
@@ -15,6 +15,12 @@ impl ModalEditor for Editor {
 
     fn event(&mut self, ev: ModalEvent, _: &mut ModalContext) {
         log::info!("{:?}", ev);
+
+        match ev {
+            ModalEvent::ExitPressed => self.close_requested = true,
+            ModalEvent::MainEventsCleared => {},
+            ModalEvent::RedrawRequested => {},
+        }
     }
 
     fn redraw_request(&mut self, surface: &mut Surface) -> Result<(), RedrawError> {
@@ -47,20 +53,31 @@ impl ModalEditor for Editor {
 
 impl Editor {
     pub fn draw_to_surface(&mut self, surface: &mut Surface) -> Result<(), wgpu::SurfaceError> {
+        #[cfg(not(target_arch = "wasm32"))]
         let start = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         let full_start = start;
+
         let mut texture = surface.get_current_texture()?;
+
+        #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         log::warn!("Time get texture{:?}", end.saturating_duration_since(start));
+        #[cfg(not(target_arch = "wasm32"))]
         let start = end;
+
         surface.present_to_texture(&mut texture);
         let end = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         log::warn!(
             "Time rendering total {:?}",
             end.saturating_duration_since(start)
         );
         texture.present();
+        #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         log::warn!(
             "Time present total {:?}",
             end.saturating_duration_since(full_start)

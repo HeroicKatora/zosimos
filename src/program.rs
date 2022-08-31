@@ -703,7 +703,7 @@ impl Program {
         options: &wgpu::RequestAdapterOptions,
     ) -> Result<wgpu::Adapter, MismatchError> {
         let request = instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: wgpu::PowerPreference::LowPower,
             ..*options
         });
 
@@ -757,24 +757,34 @@ impl Program {
             | wgpu::TextureUsages::STORAGE_BINDING
             | wgpu::TextureUsages::RENDER_ATTACHMENT;
 
+        log::info!("Searching for fitting adapter");
+        let mut adapters_search = 0;
         while let Some(adapter) = from.next() {
+            log::info!("Considering {:?}", adapter.get_info());
+            adapters_search += 1;
             // FIXME: check limits.
             // FIXME: collect required texture formats from `self.textures`
             let basic_format =
                 adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8UnormSrgb);
             if !basic_format.allowed_usages.contains(ALL_TEXTURE_USAGE) {
                 // eprintln!("No rgba8 support {:?}", basic_format.allowed_usages);
+                log::info!("Missing basic format {:?}", basic_format);
                 continue;
             }
 
             let storage_format = adapter.get_texture_format_features(wgpu::TextureFormat::R32Uint);
             if !storage_format.allowed_usages.contains(STAGE_TEXTURE_USAGE) {
                 // eprintln!("No r32uint storage support {:?}", basic_format.allowed_usages);
+                log::info!("Missing basic format {:?}", storage_format);
                 continue;
             }
 
             from.for_each(drop);
             return Ok(adapter);
+        }
+
+        if adapters_search == 0 {
+            log::warn!("No adapters considered!");
         }
 
         Err(MismatchError {})
@@ -793,7 +803,10 @@ impl Program {
             } else {
                 wgpu::Features::SPIRV_SHADER_PASSTHROUGH
             },
-            limits: wgpu::Limits::default(),
+            // Well, technically... We need the texture format.
+            // But should be able to workaround most other restrictions.
+            // FIXME: make the use of this configurable.
+            limits: wgpu::Limits::downlevel_defaults(),
         }
     }
 

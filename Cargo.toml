@@ -17,6 +17,9 @@ default-features = false
 [dependencies.image-canvas]
 version = "0.4.2"
 
+[dependencies.log]
+version = "0.4"
+
 [dependencies.palette]
 version = "0.5.0"
 default-features = false
