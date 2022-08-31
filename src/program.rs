@@ -167,6 +167,12 @@ pub(crate) struct Buffer(pub(crate) usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Texture(pub(crate) usize);
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct Instruction(pub(crate) usize);
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct Event(pub(crate) usize);
+
 /// A map of features which we may use during encoding.
 #[derive(Clone, Debug)]
 pub struct Capabilities {
@@ -273,6 +279,10 @@ pub(crate) enum Low {
         target_buffer: DeviceBuffer,
         target_layout: ByteLayout,
         copy_dst_buffer: DeviceBuffer,
+        // FIXME: maybe this should be issued as a separate instruction with only the host-relevant
+        // parameters, then mark both the `WriteImageToBuffer` and `CopyBufferToBuffer` with the
+        // event.
+        write_event: Event,
     },
     WriteImageToTexture {
         source_image: Texture,
@@ -830,6 +840,7 @@ impl Program {
                 texture_by_op: encoder.texture_by_op,
                 shader_by_op: encoder.shader_by_op,
                 pipeline_by_op: encoder.pipeline_by_op,
+                skip_by_op: encoder.skip_by_op,
             }),
             binary_data: encoder.binary_data,
             descriptors: run::Descriptors::default(),
@@ -1051,7 +1062,16 @@ impl Launcher<'_> {
         let io_map = encoder.io_map();
 
         let init = run::InitialState {
+            // TODO: shared with lower_to. Find a better way to reap the `encoder` for its
+            // resources and descriptors.
             instructions: encoder.instructions.into(),
+            info: Arc::new(run::ProgramInfo {
+                buffer_by_op: encoder.buffer_by_op,
+                texture_by_op: encoder.texture_by_op,
+                shader_by_op: encoder.shader_by_op,
+                pipeline_by_op: encoder.pipeline_by_op,
+                skip_by_op: encoder.skip_by_op,
+            }),
             device,
             queue,
             buffers,

@@ -11,11 +11,12 @@ use crate::pool::Pool;
 use crate::program::{
     BindGroupDescriptor, BindGroupLayoutDescriptor, BindingResource, Buffer, BufferDescriptor,
     BufferDescriptorInit, BufferInitContent, BufferUsage, Capabilities, ColorAttachmentDescriptor,
-    DeviceBuffer, DeviceTexture, FragmentState, Function, ImageBufferAssignment, ImageBufferPlan,
-    ImageDescriptor, ImagePoolPlan, LaunchError, Low, PipelineLayoutDescriptor, PipelineLayoutKey,
-    PrimitiveState, RenderPassDescriptor, RenderPipelineDescriptor, RenderPipelineKey,
-    SamplerDescriptor, ShaderDescriptor, ShaderDescriptorKey, StagingDescriptor, Texture,
-    TextureDescriptor, TextureUsage, TextureViewDescriptor, VertexState,
+    DeviceBuffer, DeviceTexture, Event, FragmentState, Function, ImageBufferAssignment,
+    ImageBufferPlan, ImageDescriptor, ImagePoolPlan, Instruction, LaunchError, Low,
+    PipelineLayoutDescriptor, PipelineLayoutKey, PrimitiveState, RenderPassDescriptor,
+    RenderPipelineDescriptor, RenderPipelineKey, SamplerDescriptor, ShaderDescriptor,
+    ShaderDescriptorKey, StagingDescriptor, Texture, TextureDescriptor, TextureUsage,
+    TextureViewDescriptor, VertexState,
 };
 use crate::util::ExtendOne;
 use crate::{run, shaders};
@@ -41,6 +42,7 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     shaders: usize,
     textures: usize,
     texture_views: usize,
+    events: usize,
 
     // Additional validation properties.
     is_in_command_encoder: bool,
@@ -115,6 +117,8 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     pub(crate) shader_by_idx: HashMap<usize, ShaderDescriptorKey>,
     /// Annotates which low op allocates a pipeline that may be reused.
     pub(crate) pipeline_by_op: HashMap<usize, RenderPipelineKey>,
+    /// Annotate which op to skip by which event.
+    pub(crate) skip_by_op: HashMap<Instruction, Event>,
 }
 
 /// The GPU buffers associated with a register.
@@ -279,7 +283,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// This ensures we can keep track of the expected state change, and validate the correct order
     /// of commands. More specific sequencing commands will expect correct order or assume it
     /// internally.
-    pub(crate) fn push(&mut self, low: Low) -> Result<(), LaunchError> {
+    pub(crate) fn push(&mut self, low: Low) -> Result<Instruction, LaunchError> {
         match low {
             Low::BindGroupLayout(_) => self.bind_group_layouts += 1,
             Low::BindGroup(_) => self.bind_groups += 1,
@@ -382,9 +386,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Low::StackFrame(_) | Low::StackPop => {}
         }
 
+        let instruction = Instruction(self.instruction_pointer);
         self.instruction_pointer += 1;
         self.instructions.extend_one(low);
-        Ok(())
+        Ok(instruction)
     }
 
     fn make_texture_descriptor(
@@ -567,27 +572,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let staging_format = staged.to_staging_texture();
         let descriptor = &self.buffer_plan.texture[reg_texture.0];
 
-        let bytes_per_row = (descriptor.layout.texel_stride as u32)
-            .checked_mul(texture_format.size.0.get())
-            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-        let bytes_per_row = (bytes_per_row / 256 + u32::from(bytes_per_row % 256 != 0))
-            .checked_mul(256)
+        let byte_layout = descriptor
+            .to_aligned()
             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
         let buffer_layout = CanvasLayout::with_row_layout(&RowLayoutDescription {
             texel: descriptor.texel.clone(),
             width: texture_format.size.0.get(),
             height: texture_format.size.1.get(),
-            row_stride: bytes_per_row.into(),
+            row_stride: byte_layout.row_stride,
         })
         .expect("valid layout");
-
-        let byte_layout = ByteLayout {
-            texel_stride: descriptor.texel.bits.bytes(),
-            width: texture_format.size.0.get(),
-            height: texture_format.size.1.get(),
-            row_stride: bytes_per_row.into(),
-        };
 
         let (buffer, map_write, map_read) = {
             let buffer = self.buffers;
@@ -736,6 +731,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     pub(crate) fn copy_input_to_buffer(&mut self, idx: Register) -> Result<(), LaunchError> {
         let regmap = self.allocate_register(idx)?.clone();
         let source_image = self.ingest_image_data(idx)?;
+        let write_event = self.make_event();
         self.input_map.insert(idx, source_image);
 
         let descriptor = &self.buffer_plan.texture[regmap.reg_texture.0];
@@ -749,14 +745,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         // FIXME: should we validate size here as well for better errors?
         // Potentially all errors are internal so it might not matter.
-        self.push(Low::WriteImageToBuffer {
+        let inst = self.push(Low::WriteImageToBuffer {
             copy_dst_buffer: regmap.buffer,
             source_image,
             size,
             offset: (0, 0),
             target_buffer,
             target_layout: regmap.byte_layout,
+            write_event,
         })?;
+
+        self.skip_by_op.insert(inst, write_event);
 
         // FIXME: we're using wgpu internal's scheduling for writing the data to the gpu buffer but
         // this is a separate allocation. We'd instead like to use `regmap.map_write` and do our
@@ -767,11 +766,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // CopyBufferToBuffer instead to the runtime?
         if let Some(map_write) = regmap.map_write {
             self.push(Low::BeginCommands)?;
-            self.push(Low::CopyBufferToBuffer {
+            let inst = self.push(Low::CopyBufferToBuffer {
                 source_buffer: map_write,
                 size: sizeu64,
                 target_buffer: regmap.buffer,
             })?;
+            self.skip_by_op.insert(inst, write_event);
             self.push(Low::EndCommands)?;
             // TODO: maybe also don't run it immediately?
             self.push(Low::RunTopCommand)?;
@@ -979,7 +979,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             size,
             offset: (0, 0),
             target_image,
-        })
+        })?;
+
+        Ok(())
     }
 
     /// FIXME: we might want to make this a detail of encoder.
@@ -1222,6 +1224,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             *layouts += 1;
             descriptor_id
         }
+    }
+
+    fn make_event(&mut self) -> Event {
+        let id = self.events;
+        self.events += 1;
+        Event(id)
     }
 
     fn shader(&mut self, desc: ShaderDescriptor) -> Result<usize, LaunchError> {

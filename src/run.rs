@@ -2,9 +2,11 @@ use core::{future::Future, iter::once, marker::Unpin, num::NonZeroU32, pin::Pin}
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::buffer::{ByteLayout, Descriptor};
+use crate::buffer::{BufferLayout, ByteLayout, Descriptor};
 use crate::command::Register;
-use crate::pool::{BufferKey, GpuKey, ImageData, Pool, PoolImage, PoolKey, ShaderKey, TextureKey};
+use crate::pool::{
+    BufferKey, GpuKey, ImageData, PipelineKey, Pool, PoolImage, PoolKey, ShaderKey, TextureKey,
+};
 use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
 use crate::util::Ping;
 
@@ -43,6 +45,9 @@ pub(crate) struct ProgramInfo {
     pub(crate) buffer_by_op: HashMap<usize, program::BufferDescriptor>,
     pub(crate) shader_by_op: HashMap<usize, program::ShaderDescriptorKey>,
     pub(crate) pipeline_by_op: HashMap<usize, program::RenderPipelineKey>,
+    /// When event `val` is already achieved, op `key` becomes irrelevant.
+    /// TODO: some instruction results supply multiple events.
+    pub(crate) skip_by_op: HashMap<program::Instruction, program::Event>,
 }
 
 /// Configures devices and input/output buffers for an executable.
@@ -75,6 +80,8 @@ pub struct Environment<'pool> {
 pub struct Execution {
     /// The gpu processor handles.
     pub(crate) gpu: core::cell::RefCell<Gpu>,
+    /// The key of the gpu if it was extracted from a pool.
+    pub(crate) gpu_key: Option<GpuKey>,
     /// All the host state of execution.
     pub(crate) host: Host,
     /// All cached data (from one or more pools).
@@ -88,6 +95,7 @@ pub(crate) struct Host {
     pub(crate) buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
     pub(crate) io_map: Arc<IoMap>,
+    pub(crate) info: Arc<ProgramInfo>,
     pub(crate) debug_stack: Vec<Frame>,
     pub(crate) usage: ResourcesUsed,
 }
@@ -97,6 +105,7 @@ pub(crate) struct Cache {
     preallocated_textures: HashMap<usize, wgpu::Texture>,
     preallocated_buffers: HashMap<usize, wgpu::Buffer>,
     precompiled_shader: HashMap<usize, wgpu::ShaderModule>,
+    precompiled_pipelines: HashMap<usize, wgpu::RenderPipeline>,
 }
 
 #[derive(Debug, Default)]
@@ -107,6 +116,8 @@ pub struct ResourcesUsed {
     texture_reused: u64,
     shaders_compiled: u64,
     shaders_reused: u64,
+    pipelines_compiled: u64,
+    pipelines_reused: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +129,7 @@ pub(crate) struct Frame {
 
 pub(crate) struct InitialState {
     pub(crate) instructions: Arc<[Low]>,
+    pub(crate) info: Arc<ProgramInfo>,
     pub(crate) device: Device,
     pub(crate) queue: Queue,
     pub(crate) buffers: Vec<Image>,
@@ -166,12 +178,27 @@ pub(crate) struct Descriptors {
     /// Post-information: descriptors with which textures were created.
     /// These textures may be reused.
     shader_descriptors: HashMap<usize, program::ShaderDescriptorKey>,
+    /// Post-information: descriptors of shaders and parameters part of a pipeline.
+    /// These may be reused as compiling modules is expensive on the driver.
+    pipeline_descriptors: HashMap<usize, program::RenderPipelineKey>,
+    /// Instructions, whose intended effect was made unobservable by the environment.
+    ///
+    /// Consider a `ReadBuffer`. When the target is a `texture` then it is not necessary to perform
+    /// the buffer-to-buffer copy into the host-mappable read buffer. This instruction is,
+    /// nevertheless, part of the instruction stream. The reverse is also true but required, not
+    /// merely an optimization. A WriteImageToBuffer from a GPU texture will initialize the target
+    /// buffer and we must consequently skip the buffer-to-buffer from the mappable write buffer.
+    precomputed: HashMap<program::Event, Precomputed>,
 }
 
 pub(crate) struct Gpu {
     pub(crate) device: Device,
     pub(crate) queue: Queue,
 }
+
+/// Information about the source of computation for skipped instructions.
+#[derive(Default)]
+struct Precomputed;
 
 /// Total memory recovered from previous buffers.
 #[derive(Debug, Default)]
@@ -186,6 +213,7 @@ pub struct RetiredBufferStats {
     texture_keys: Vec<TextureKey>,
     buffer_keys: Vec<BufferKey>,
     shader_keys: Vec<ShaderKey>,
+    pipeline_keys: Vec<PipelineKey>,
 }
 
 trait WithGpu {
@@ -228,6 +256,7 @@ pub struct Retire<'pool> {
     uncorrected_gpu_textures: Vec<TextureKey>,
     uncorrected_gpu_buffers: Vec<BufferKey>,
     uncorrected_shaders: Vec<ShaderKey>,
+    uncorrected_pipelines: Vec<PipelineKey>,
 }
 
 pub(crate) struct Machine {
@@ -314,6 +343,7 @@ impl Executable {
         self.check_satisfiable(&mut env)?;
         Ok(Execution {
             gpu: env.gpu.into(),
+            gpu_key: env.gpu_key,
             host: Host {
                 machine: Machine::new(Arc::clone(&self.instructions)),
                 descriptors: Descriptors::default(),
@@ -321,6 +351,7 @@ impl Executable {
                 buffers: env.buffers,
                 binary_data: self.binary_data.clone(),
                 io_map: self.io_map.clone(),
+                info: self.info.clone(),
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
             },
@@ -333,6 +364,7 @@ impl Executable {
         self.check_satisfiable(&mut env)?;
         Ok(Execution {
             gpu: env.gpu.into(),
+            gpu_key: env.gpu_key,
             host: Host {
                 machine: Machine::new(Arc::clone(&self.instructions)),
                 descriptors: self.descriptors,
@@ -340,6 +372,7 @@ impl Executable {
                 buffers: env.buffers,
                 binary_data: self.binary_data,
                 io_map: self.io_map.clone(),
+                info: self.info.clone(),
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
             },
@@ -443,9 +476,8 @@ impl Environment<'_> {
         }
 
         match pool_img.data() {
-            ImageData::Host(_) | ImageData::GpuTexture { .. } => {}
+            ImageData::Host(_) | ImageData::GpuTexture { .. } | ImageData::GpuBuffer { .. } => {}
             _ => {
-                eprintln!("Bad binding: {:?}", reg);
                 return Err(StartError::InternalCommandError(line!()));
             }
         }
@@ -480,7 +512,7 @@ impl Environment<'_> {
         }
 
         match pool_img.data() {
-            ImageData::Host(_) | ImageData::GpuTexture { .. } => {}
+            ImageData::Host(_) | ImageData::GpuTexture { .. } | ImageData::GpuBuffer { .. } => {}
             _ => {
                 eprintln!("Bad binding: {:?}", reg);
                 return Err(StartError::InternalCommandError(line!()));
@@ -524,6 +556,12 @@ impl Environment<'_> {
             }
         }
 
+        for (&inst, desc) in &self.info.pipeline_by_op {
+            if let Some(pipeline) = pool_cache.extract_pipeline(desc) {
+                self.cache.precompiled_pipelines.insert(inst, pipeline);
+            }
+        }
+
         stats
     }
 }
@@ -537,6 +575,7 @@ impl Execution {
                 queue: init.queue,
             }
             .into(),
+            gpu_key: None,
             host: Host {
                 machine: Machine::new(init.instructions),
                 descriptors: Descriptors::default(),
@@ -544,6 +583,7 @@ impl Execution {
                 command_encoder: None,
                 binary_data: init.binary_data,
                 io_map: Arc::new(init.io_map),
+                info: init.info,
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
             },
@@ -570,6 +610,7 @@ impl Execution {
 
         let Execution {
             ref gpu,
+            gpu_key: _,
             host,
             cache,
         } = self;
@@ -619,6 +660,7 @@ impl Execution {
             uncorrected_gpu_textures: vec![],
             uncorrected_gpu_buffers: vec![],
             uncorrected_shaders: vec![],
+            uncorrected_pipelines: vec![],
         }
     }
 
@@ -654,6 +696,14 @@ impl Host {
         };
 
         let inst = self.machine.instruction_pointer;
+
+        if let Some(event) = self.info.skip_by_op.get(&program::Instruction(inst)) {
+            if self.descriptors.precomputed.contains_key(event) {
+                let _ = self.machine.next_instruction()?;
+                return Ok(());
+            }
+        }
+
         match self.machine.next_instruction()? {
             Low::BindGroupLayout(desc) => {
                 let mut entry_buffer = vec![];
@@ -839,14 +889,31 @@ impl Host {
                 Ok(())
             }
             Low::RenderPipeline(desc) => {
-                let mut vertex_buffers = vec![];
-                let mut fragments = vec![];
+                let pipeline = if let Some(pipeline) = cache.precompiled_pipelines.remove(&inst) {
+                    self.usage.pipelines_reused += 1;
+                    pipeline
+                } else {
+                    self.usage.pipelines_compiled += 1;
 
-                let pipeline =
+                    let mut vertex_buffers = vec![];
+                    let mut fragments = vec![];
+
+                    let pipeline =
+                        self.descriptors
+                            .pipeline(desc, &mut vertex_buffers, &mut fragments)?;
+                    gpu.with_gpu(|gpu| gpu.device.create_render_pipeline(&pipeline))
+                };
+
+                let pipeline_idx = self.descriptors.render_pipelines.len();
+                // Pipelines are not cacheable (at least we don't assume so) from their descriptor
+                // alone which may refer to some arbitrary module instances and state that are not
+                // easily summarized. So, only cache this if the encoder generated a key for it.
+                if let Some(desc) = self.info.pipeline_by_op.get(&inst) {
                     self.descriptors
-                        .pipeline(desc, &mut vertex_buffers, &mut fragments)?;
+                        .pipeline_descriptors
+                        .insert(pipeline_idx, desc.clone());
+                }
 
-                let pipeline = gpu.with_gpu(|gpu| gpu.device.create_render_pipeline(&pipeline));
                 self.descriptors.render_pipelines.push(pipeline);
                 Ok(())
             }
@@ -918,6 +985,7 @@ impl Host {
                 target_buffer,
                 ref target_layout,
                 copy_dst_buffer,
+                write_event,
             } => {
                 if offset != (0, 0) {
                     return Err(StepError::InvalidInstruction(line!()));
@@ -960,7 +1028,6 @@ impl Host {
                 let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
                 let image = &mut self.buffers[source_image.0].data;
-                let buffer = &self.descriptors.buffers[target_buffer.0];
 
                 if let ImageData::GpuTexture {
                     texture,
@@ -992,6 +1059,35 @@ impl Host {
 
                     let command = encoder.finish();
                     gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                    self.descriptors
+                        .precomputed
+                        .insert(write_event, Precomputed);
+
+                    return Ok(());
+                } else if let ImageData::GpuBuffer {
+                    buffer: src_buffer,
+                    // FIXME: validate layout? What for?
+                    layout: _,
+                    gpu: _,
+                } = image
+                {
+                    let descriptor = wgpu::CommandEncoderDescriptor { label: None };
+                    let mut encoder =
+                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+
+                    encoder.copy_buffer_to_buffer(
+                        &*src_buffer,
+                        0,
+                        &self.descriptors.buffers[copy_dst_buffer.0],
+                        0,
+                        layout.u64_len(),
+                    );
+
+                    let command = encoder.finish();
+                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                    self.descriptors
+                        .precomputed
+                        .insert(write_event, Precomputed);
 
                     return Ok(());
                 }
@@ -1000,6 +1096,8 @@ impl Host {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
+                // The buffer we copy to is specifically for uploading this argument.
+                let buffer = &self.descriptors.buffers[target_buffer.0];
                 let slice = buffer.slice(..);
                 let (ping, waker) = Ping::new(Box::new(|| wgpu::BufferAsyncError));
                 slice.map_async(wgpu::MapMode::Write, |res| waker.complete(res.is_ok()));
@@ -1015,23 +1113,7 @@ impl Host {
                 // We've checked that this image can be seen as host bytes.
                 let source: &[u8] = image.as_bytes().unwrap();
                 let target: &mut [u8] = &mut data[..];
-
-                // TODO: defensive programming, don't assume cast works. Proof?
-                let target_pitch = bytes_per_row as usize;
-                // TODO(perf): should this use our internal descriptor?
-                let source_pitch = image.layout().as_row_layout().row_stride as usize;
-
-                for x in 0..height {
-                    let source_line = x as usize * source_pitch;
-                    debug_assert!(source.get(source_line..).is_some());
-                    debug_assert!(source[source_line..].len() >= source_pitch);
-                    let source_row = &source[source_line..][..source_pitch];
-                    let target_line = x as usize * target_pitch;
-                    debug_assert!(target.get(target_line..).is_some());
-                    debug_assert!(target[target_line..].len() >= target_pitch);
-                    let target_row = &mut target[target_line..][..target_pitch];
-                    target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
-                }
+                copy_host_to_buffer(source, target, image.layout(), *target_layout);
 
                 drop(data);
                 buffer.unmap();
@@ -1755,6 +1837,19 @@ impl Retire<'_> {
             self.uncorrected_shaders.push(key);
         }
 
+        let tidx = 0..descriptors.render_pipelines.len();
+        let pipelines = descriptors.render_pipelines.drain(..).zip(tidx);
+        for (pipeline, idx) in pipelines {
+            let descriptor = match descriptors.pipeline_descriptors.get(&idx) {
+                None => continue,
+                Some(descriptor) => descriptor,
+            };
+
+            let key = self.pool.insert_cacheable_pipeline(descriptor, pipeline);
+            stats.pipeline_keys.push(key);
+            self.uncorrected_pipelines.push(key);
+        }
+
         stats
     }
 
@@ -1780,19 +1875,26 @@ impl Retire<'_> {
         let _ = self.retire_buffers();
 
         let gpu = self.execution.gpu.into_inner();
-        let gpu_key = self.pool.reinsert_device(gpu);
+        if let Some(gpu_key) = self.execution.gpu_key {
+            self.pool.reinsert_device(gpu_key, gpu);
 
-        // Fixup the gpu reference for all inserted gpu buffers.
-        for pool_key in self.uncorrected_gpu_textures.into_iter() {
-            self.pool.reassign_texture_gpu_unguarded(pool_key, gpu_key);
-        }
+            // Fixup the gpu reference for all inserted gpu buffers.
+            for pool_key in self.uncorrected_gpu_textures.into_iter() {
+                self.pool.reassign_texture_gpu_unguarded(pool_key, gpu_key);
+            }
 
-        for pool_key in self.uncorrected_gpu_buffers.into_iter() {
-            self.pool.reassign_buffer_gpu_unguarded(pool_key, gpu_key);
-        }
+            for pool_key in self.uncorrected_gpu_buffers.into_iter() {
+                self.pool.reassign_buffer_gpu_unguarded(pool_key, gpu_key);
+            }
 
-        for shader_key in self.uncorrected_shaders.into_iter() {
-            self.pool.reassign_shader_gpu_unguarded(shader_key, gpu_key);
+            for shader_key in self.uncorrected_shaders.into_iter() {
+                self.pool.reassign_shader_gpu_unguarded(shader_key, gpu_key);
+            }
+
+            for pipeline_key in self.uncorrected_pipelines.into_iter() {
+                self.pool
+                    .reassign_pipeline_gpu_unguarded(pipeline_key, gpu_key);
+            }
         }
     }
 
@@ -1817,6 +1919,7 @@ impl SyncPoint<'_> {
             Some(polled) => {
                 let DevicePolled { future, gpu } = polled;
                 block_on(future, Some(gpu))?;
+                /*
                 let _took_time =
                     std::time::Instant::now().saturating_duration_since(self.host_start);
                 eprint!("{:?}", _took_time);
@@ -1824,7 +1927,7 @@ impl SyncPoint<'_> {
                     eprintln!("{}", dbg)
                 } else {
                     eprintln!()
-                };
+                };*/
                 Ok(())
             }
         }
@@ -1894,5 +1997,34 @@ where
         spin_block(DevicePolled { future, device })
     } else {
         spin_block(future)
+    }
+}
+
+pub(crate) fn copy_host_to_buffer(
+    source: &[u8],
+    target: &mut [u8],
+    source_layout: &BufferLayout,
+    target_layout: ByteLayout,
+) {
+    let width = target_layout.width;
+    let height = target_layout.height;
+
+    // TODO: defensive programming, don't assume cast works. Proof?
+    let target_pitch = target_layout.row_stride as usize;
+    let bytes_per_texel = target_layout.texel_stride;
+    let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
+    // TODO(perf): should this use our internal descriptor?
+    let source_pitch = source_layout.as_row_layout().row_stride as usize;
+
+    for x in 0..height {
+        let source_line = x as usize * source_pitch;
+        debug_assert!(source.get(source_line..).is_some());
+        debug_assert!(source[source_line..].len() >= source_pitch);
+        let source_row = &source[source_line..][..source_pitch];
+        let target_line = x as usize * target_pitch;
+        debug_assert!(target.get(target_line..).is_some());
+        debug_assert!(target[target_line..].len() >= target_pitch);
+        let target_row = &mut target[target_line..][..target_pitch];
+        target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
     }
 }
