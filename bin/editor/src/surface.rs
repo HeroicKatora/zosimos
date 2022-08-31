@@ -62,6 +62,8 @@ impl Surface {
         )
         .expect("to get an adapter");
 
+        eprintln!("Rendering on {:?}", adapter.get_info());
+
         let (width, height) = window.inner_size();
         let (color, texel);
         let config = SurfaceConfiguration {
@@ -159,11 +161,11 @@ impl Surface {
         if let Some(key) = self.entry.presentable {
             let mut entry = self.pool.entry(key).unwrap();
             entry.set_srgb(&image);
-            self.pool.upload(key, gpu);
+            self.pool.upload(key, gpu).unwrap();
         } else {
             let key = self.pool.insert_srgb(image).key();
             self.entry.presentable = Some(key);
-            self.pool.upload(key, gpu);
+            self.pool.upload(key, gpu).unwrap();
         }
     }
 

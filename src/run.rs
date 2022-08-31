@@ -45,6 +45,9 @@ pub(crate) struct ProgramInfo {
     pub(crate) buffer_by_op: HashMap<usize, program::BufferDescriptor>,
     pub(crate) shader_by_op: HashMap<usize, program::ShaderDescriptorKey>,
     pub(crate) pipeline_by_op: HashMap<usize, program::RenderPipelineKey>,
+    /// When event `val` is already achieved, op `key` becomes irrelevant.
+    /// TODO: some instruction results supply multiple events.
+    pub(crate) skip_by_op: HashMap<program::Instruction, program::Event>,
 }
 
 /// Configures devices and input/output buffers for an executable.
@@ -178,12 +181,24 @@ pub(crate) struct Descriptors {
     /// Post-information: descriptors of shaders and parameters part of a pipeline.
     /// These may be reused as compiling modules is expensive on the driver.
     pipeline_descriptors: HashMap<usize, program::RenderPipelineKey>,
+    /// Instructions, whose intended effect was made unobservable by the environment.
+    ///
+    /// Consider a `ReadBuffer`. When the target is a `texture` then it is not necessary to perform
+    /// the buffer-to-buffer copy into the host-mappable read buffer. This instruction is,
+    /// nevertheless, part of the instruction stream. The reverse is also true but required, not
+    /// merely an optimization. A WriteImageToBuffer from a GPU texture will initialize the target
+    /// buffer and we must consequently skip the buffer-to-buffer from the mappable write buffer.
+    precomputed: HashMap<program::Event, Precomputed>,
 }
 
 pub(crate) struct Gpu {
     pub(crate) device: Device,
     pub(crate) queue: Queue,
 }
+
+/// Information about the source of computation for skipped instructions.
+#[derive(Default)]
+struct Precomputed;
 
 /// Total memory recovered from previous buffers.
 #[derive(Debug, Default)]
@@ -681,6 +696,14 @@ impl Host {
         };
 
         let inst = self.machine.instruction_pointer;
+
+        if let Some(event) = self.info.skip_by_op.get(&program::Instruction(inst)) {
+            if self.descriptors.precomputed.contains_key(event) {
+                let _ = self.machine.next_instruction()?;
+                return Ok(());
+            }
+        }
+
         match self.machine.next_instruction()? {
             Low::BindGroupLayout(desc) => {
                 let mut entry_buffer = vec![];
@@ -962,6 +985,7 @@ impl Host {
                 target_buffer,
                 ref target_layout,
                 copy_dst_buffer,
+                write_event,
             } => {
                 if offset != (0, 0) {
                     return Err(StepError::InvalidInstruction(line!()));
@@ -1035,6 +1059,7 @@ impl Host {
 
                     let command = encoder.finish();
                     gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                    self.descriptors.precomputed.insert(write_event, Precomputed);
 
                     return Ok(());
                 } else if let ImageData::GpuBuffer {
@@ -1049,7 +1074,7 @@ impl Host {
                         gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
 
                     encoder.copy_buffer_to_buffer(
-                        src_buffer,
+                        &*src_buffer,
                         0,
                         &self.descriptors.buffers[copy_dst_buffer.0],
                         0,
@@ -1058,11 +1083,10 @@ impl Host {
 
                     let command = encoder.finish();
                     gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                    self.descriptors.precomputed.insert(write_event, Precomputed);
 
                     return Ok(());
                 }
-
-                eprintln!("{:?}", &image);
 
                 if image.as_bytes().is_none() {
                     return Err(StepError::InvalidInstruction(line!()));

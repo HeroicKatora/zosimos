@@ -141,6 +141,21 @@ impl PoolKey {
     }
 }
 
+#[derive(Debug)]
+pub enum ImageUploadError {
+    /// The key didn't refer to an image.
+    BadImage,
+    /// When the entry is a `LateBound`, pure descriptor.
+    NoData,
+    /// The target GPU was not found.
+    BadGpu,
+    /// Impossible to generate a GPU descriptor for the image. Only if the memory for a GPU texture
+    /// is too large to accommodate a properly aligned row representation of the texel matrix.
+    BadDescriptor,
+    /// The target GPU currently in-use.
+    InactiveGpu,
+}
+
 impl Pool {
     /// Create an empty pool.
     pub fn new() -> Self {
@@ -251,16 +266,17 @@ impl Pool {
     /// Note that this creates a completely new command encoder, and synchronizes with the internal
     /// queue of the device which isn't extremely efficient. For larger moves, prefer different
     /// methods of moving.
-    pub fn upload(&mut self, img: PoolKey, GpuKey(key): GpuKey) -> bool {
+    pub fn upload(&mut self, img: PoolKey, GpuKey(key): GpuKey) -> Result<(), ImageUploadError> {
         let image = match self.items.get_mut(img.0) {
-            None => return false,
+            None => return Err(ImageUploadError::BadImage),
             Some(image) => image,
         };
 
+        eprintln!("Original data to upload: {:?}", image.data);
         match image.data {
-            ImageData::GpuTexture { gpu, .. } if gpu == key => return true,
-            ImageData::GpuBuffer { gpu, .. } if gpu == key => return true,
-            ImageData::LateBound(_) => return false,
+            ImageData::GpuTexture { gpu, .. } if gpu == key => return Ok(()),
+            ImageData::GpuBuffer { gpu, .. } if gpu == key => return Ok(()),
+            ImageData::LateBound(_) => return Err(ImageUploadError::NoData),
             _ => {}
         }
 
@@ -270,16 +286,25 @@ impl Pool {
         // stateful pool for all tools utilized here. In particular don't recompile and encode the
         // commands that don't change (almost everything until lowering).
         let gpu = match self.devices.get_mut(key) {
-            None => return false,
+            None => {
+                eprintln!("No GPU {:?}", key);
+                return Err(ImageUploadError::BadGpu);
+            },
             Some(device) => match mem::replace(device, Device::Inactive) {
-                Device::Inactive => return false,
+                Device::Inactive => {
+                    eprintln!("Inactive GPU {:?}", key);
+                    return Err(ImageUploadError::InactiveGpu);
+                },
                 Device::Active(gpu) => gpu,
             },
         };
 
         let aligned = match image.descriptor.to_aligned() {
             Some(aligned) => aligned,
-            None => return false,
+            None => {
+                eprintln!("No aligned descriptor {:?}", image.descriptor);
+                return Err(ImageUploadError::BadDescriptor);
+            },
         };
 
         // Create a data buffer, i.e. can't be mapped for read/write directly but can be used for
@@ -293,12 +318,11 @@ impl Pool {
 
         match &image.data {
             ImageData::GpuTexture { texture: _, .. } => {
-                // FIXME: would be more performant to keep data in the texture (staged).
-                // How could we end up here anyways.
-                todo!("Copy texture to buffer");
+                eprintln!("No-op GPU texture");
                 buffer.unmap();
             }
             ImageData::GpuBuffer { buffer, .. } => {
+                eprintln!("No-op GPU buffer ");
                 buffer.unmap();
             }
             ImageData::Host(canvas) => {
@@ -328,7 +352,7 @@ impl Pool {
         let device = self.devices.get_mut(key).unwrap();
         let _ = mem::replace(device, Device::Active(gpu));
 
-        true
+        Ok(())
     }
 
     pub(crate) fn insert_cacheable_texture(
@@ -520,17 +544,6 @@ impl ImageData {
         let buffer = ImageBuffer::with_layout(self.layout());
         mem::replace(self, ImageData::Host(buffer))
     }
-
-    pub(crate) fn gpu_texture(&mut self) -> Option<wgpu::Texture> {
-        let late = ImageData::LateBound(self.layout().clone());
-        match mem::replace(self, late) {
-            ImageData::GpuTexture { texture, .. } => Some(texture),
-            other => {
-                *self = other;
-                None
-            }
-        }
-    }
 }
 
 impl PoolImage<'_> {
@@ -649,11 +662,14 @@ impl PoolImageMut<'_> {
         {
             mem::swap(ttexture, texture);
             *gpu = tgpu;
+            return;
         }
 
         let mut replace;
         match self.devices.get(tgpu) {
-            None | Some(Device::Inactive) => return,
+            None | Some(Device::Inactive) => {
+                panic!("Failed unguarded replace, expected GPU device");
+            },
             Some(Device::Active(gpu)) => {
                 replace = gpu.device.create_texture(&wgpu::TextureDescriptor {
                     label: None,
