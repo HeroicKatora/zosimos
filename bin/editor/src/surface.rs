@@ -1,11 +1,11 @@
-use crate::winit::Window;
+use crate::winit::{Window, WindowSurface, WindowedSurface};
 
 use stealth_paint::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
 use stealth_paint::command;
 use stealth_paint::pool::{GpuKey, Pool, PoolKey};
 use stealth_paint::program::{Capabilities, Program};
 use stealth_paint::run::Executable;
-use wgpu::{Adapter, Instance, Surface as WgpuSurface, SurfaceConfiguration};
+use wgpu::{Adapter, Instance, SurfaceConfiguration};
 
 pub struct Surface {
     /// The adapter for accessing devices.
@@ -15,13 +15,18 @@ pub struct Surface {
     /// The driver instance used for drawing.
     instance: Instance,
     /// The surface drawing into the window.
-    inner: WgpuSurface,
+    inner: WindowSurface,
     /// Our private resource pool of the surface.
     pool: Pool,
     /// The pool entry.
     entry: PoolEntry,
     /// The runtime state from stealth paint.
     runtimes: Runtimes,
+}
+
+#[derive(Debug)]
+pub enum PresentationError {
+    GpuDeviceLost,
 }
 
 /// The pool entry of our surface declarator.
@@ -135,7 +140,7 @@ impl Surface {
         let surface = pool.declare(that.descriptor());
         that.entry.key = Some(surface.key());
         that.pool = pool;
-        that.lost();
+        that.reconfigure_surface();
 
         that
     }
@@ -292,17 +297,55 @@ impl Surface {
         self.entry.descriptor.clone()
     }
 
-    pub fn lost(&mut self) {
+    pub fn lost(&mut self) -> Result<(), PresentationError> {
+        self.reconfigure_surface()
+    }
+
+    pub fn outdated(&mut self) -> Result<(), PresentationError> {
+        self.reconfigure_surface()
+    }
+
+    fn reconfigure_surface(&mut self) -> Result<(), PresentationError> {
+        let surface = match self.entry.key {
+            Some(key) => key,
+            None => {
+                log::warn!("No surface to paint to.");
+                return Err(PresentationError::GpuDeviceLost);
+            }
+        };
+
+        let phys = self.inner.window().inner_size();
+        self.config.width = phys.width;
+        self.config.height = phys.height;
+
+        let mut surface = self.pool.entry(surface).unwrap();
+        let old_descriptor = surface.descriptor().clone();
+        surface.declare(Descriptor {
+            color: old_descriptor.color,
+            .. Descriptor::with_texel(old_descriptor.texel, phys.width, phys.height).unwrap()
+        });
+
+        // Could also be done in `get_or_insert_normalizing_exe` by storing the relevant input
+        // parameters or by assigning version increments to each configuration.
+        // FIXME: this would help reuse partial state.
+        self.runtimes.normalizing = None;
+
         let dev = match self.pool.iter_devices().next() {
             Some(dev) => dev,
             None => {
                 eprintln!("Lost device for screen rendering");
-                return;
+                return Err(PresentationError::GpuDeviceLost);
             }
         };
 
-        self.inner.configure(dev, &self.config);
+        self.inner.surface().configure(dev, &self.config);
+
+        Ok(())
     }
+}
+
+impl WindowedSurface for Surface {
+    fn recreate(&mut self) {}
 }
 
 impl Runtimes {
@@ -324,7 +367,6 @@ impl Runtimes {
             .color_convert(resized, surface.color.clone(), surface.texel.clone())
             .ok()?;
         let (out_reg, _desc) = cmd.output(converted).ok()?;
-        eprintln!("{:?}", _desc);
 
         let program = cmd.compile().ok()?;
         let exe = program.lower_to(caps).ok()?;

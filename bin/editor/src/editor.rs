@@ -1,7 +1,7 @@
 //! The editor state itself, sans causal snapshot system.
 use crate::compute::Compute;
 use crate::surface::Surface;
-use crate::winit::{ModalContext, ModalEditor, ModalEvent};
+use crate::winit::{ModalContext, ModalEditor, ModalEvent, RedrawError, Window};
 
 #[derive(Default)]
 pub struct Editor {
@@ -17,17 +17,31 @@ impl ModalEditor for Editor {
         log::info!("{:?}", ev);
     }
 
-    fn redraw_request(&mut self, surface: &mut Surface) {
-        if let Err(err) = self.draw_to_surface(surface) {
-            self.drawn_error(err, surface);
+    fn redraw_request(&mut self, surface: &mut Surface) -> Result<(), RedrawError> {
+        if let Err(e) = self.draw_to_surface(surface) {
+            self.drawn_error(e)?;
         }
 
         self.num_frames += 1;
-        self.close_requested |= self.num_frames >= 500;
+        Ok(())
     }
 
     fn exit(&self) -> bool {
         self.close_requested
+    }
+
+    fn lost(&mut self, surface: &mut Self::Surface) {
+        if let Err(e) = surface.lost() {
+            log::error!("Lost window , failed to reinitialized: {:?}", e);
+            self.close_requested = true;
+        }
+    }
+
+    fn outdated(&mut self, surface: &mut Self::Surface) {
+        if let Err(e) = surface.outdated() {
+            log::error!("Outdated window surface, failed to reinitialized: {:?}", e);
+            self.close_requested = true;
+        }
     }
 }
 
@@ -54,11 +68,22 @@ impl Editor {
         Ok(())
     }
 
-    pub fn drawn_error(&mut self, err: wgpu::SurfaceError, surface: &mut Surface) {
-        match err {
-            wgpu::SurfaceError::Lost => surface.lost(),
-            wgpu::SurfaceError::OutOfMemory => self.close_requested = true,
+    pub fn drawn_error(
+        &mut self,
+        err: wgpu::SurfaceError,
+    ) -> Result<(), RedrawError> {
+        Ok(match err {
+            wgpu::SurfaceError::Lost => {
+                return Err(RedrawError::Lost);
+            }
+            wgpu::SurfaceError::OutOfMemory => {
+                log::warn!("Out-of-Memory, closing now");
+                self.close_requested = true
+            }
+            wgpu::SurfaceError::Outdated => {
+                return Err(RedrawError::Outdated);
+            }
             e => log::warn!("{:?}", e),
-        }
+        })
     }
 }
