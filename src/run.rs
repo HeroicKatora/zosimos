@@ -704,6 +704,10 @@ impl Host {
 
         if let Some(event) = self.info.skip_by_op.get(&program::Instruction(inst)) {
             if self.descriptors.precomputed.contains_key(event) {
+                // FIXME: Incorrect in general. We need to simulate the creation of whatever
+                // resource it was meant to create / grab this resource from the environment.
+                // Otherwise, the index-tracking of other resources gets messed up as the encoder
+                // relies on this being essentially a stack machine.
                 let _ = self.machine.next_instruction()?;
                 return Ok(());
             }
@@ -824,6 +828,9 @@ impl Host {
                     lod_max_clamp: 0.0,
                     compare: None,
                     anisotropy_clamp: None,
+                    // FIXME(webGL2): on webGL2 a non-None *panics*.
+                    // This is due to wgpu_hal-gles using sampler_parameter_f32_slice which panics
+                    // in its implementation in glow's webGL1/2.
                     border_color: desc.border_color,
                 };
                 let sampler = gpu.with_gpu(|gpu| gpu.device.create_sampler(&desc));

@@ -73,7 +73,7 @@ impl Surface {
         let (color, texel);
         let config = SurfaceConfiguration {
             //  FIXME: COPY_DST is not universal. Should fix `run.rs` so that RENDER_ATTACHMENT suffices.
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: match inner.get_supported_formats(&adapter).get(0) {
                 None => {
                     log::warn!("No supported surface formats …");

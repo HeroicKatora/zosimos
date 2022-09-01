@@ -806,7 +806,7 @@ impl Program {
             // Well, technically... We need the texture format.
             // But should be able to workaround most other restrictions.
             // FIXME: make the use of this configurable.
-            limits: wgpu::Limits::downlevel_defaults(),
+            limits: wgpu::Limits::downlevel_webgl2_defaults(),
         }
     }
 

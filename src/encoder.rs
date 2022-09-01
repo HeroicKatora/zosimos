@@ -1378,7 +1378,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let sampler = self.make_sampler(SamplerDescriptor {
             address_mode: wgpu::AddressMode::default(),
-            border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+            border_color: None,
             resize_filter: wgpu::FilterMode::Nearest,
         });
 
@@ -1432,7 +1432,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             // FIXME: unnecessary duplication.
             let sampler = self.make_sampler(SamplerDescriptor {
                 address_mode: wgpu::AddressMode::default(),
-                border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+                border_color: None,
                 resize_filter: wgpu::FilterMode::Nearest,
             });
 
@@ -1457,7 +1457,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             let sampler = self.make_sampler(SamplerDescriptor {
                 address_mode: wgpu::AddressMode::default(),
-                border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+                border_color: None,
                 resize_filter: wgpu::FilterMode::Nearest,
             });
 
