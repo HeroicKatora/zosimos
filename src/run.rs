@@ -870,7 +870,7 @@ impl Host {
                             U::COPY_SRC | U::COPY_DST | U::TEXTURE_BINDING | U::RENDER_ATTACHMENT
                         }
                         program::TextureUsage::Staging => {
-                            U::COPY_SRC | U::COPY_DST | U::STORAGE_BINDING | U::TEXTURE_BINDING
+                            U::COPY_SRC | U::COPY_DST | U::TEXTURE_BINDING | U::RENDER_ATTACHMENT 
                         }
                         program::TextureUsage::Transient => {
                             U::TEXTURE_BINDING | U::RENDER_ATTACHMENT

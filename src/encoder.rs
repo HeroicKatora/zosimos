@@ -679,14 +679,13 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             let device = {
                 let texture = self.textures;
-                // eprintln!("Storage Texture {:?} {:?}", texture, &staging);
                 self.push(Low::Texture(staging.clone()))?;
                 DeviceTexture(texture)
             };
 
             let fallback = {
                 let texture = self.textures;
-                // eprintln!("Fallback Texture {:?} {:?}", texture, &staging);
+                // eprintln!("Fallback Texture {:?} {:?}", device, &staging);
                 self.push(Low::Texture(TextureDescriptor {
                     usage: TextureUsage::Transient,
                     size: staging.size,
@@ -861,7 +860,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// May be a no-op, see reverse operation.
     pub(crate) fn copy_texture_to_staging(&mut self, idx: Texture) -> Result<(), LaunchError> {
         if let Some(staging) = self.staging_map.get(&idx) {
-            let texture = staging.temporary_attachment_buffer_for_encoding_remove_if_possible;
+            let texture = staging.device;
 
             // eprintln!("{} {:?}", idx.0, staging);
             // Try to use the cached version of this pipeline.
@@ -889,7 +888,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 ops: wgpu::Operations {
                     // TODO: we could let choose a replacement color..
                     load: wgpu::LoadOp::Clear(wgpu::Color::RED),
-                    store: false,
+                    store: true,
                 },
             };
 
@@ -1120,24 +1119,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 });
             }
 
-            for (num, kind) in StageKind::ALL.iter().enumerate() {
-                let i = num as u32 + 16;
-                if i != binding {
-                    continue;
-                }
-
-                entries.push(wgpu::BindGroupLayoutEntry {
-                    binding: i,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: kind.texture_format(),
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                });
-            }
-
             if encode {
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: 32,
@@ -1355,7 +1336,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 fragment_module: fragment,
                 // Careful of `RenderPipelineKey` if changed.
                 targets: vec![wgpu::ColorTargetState {
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                     format,
                 }],
@@ -1427,6 +1408,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // The non-staging texture which we bind to the sampler.
         view: Option<Texture>,
     ) -> Result<usize, LaunchError> {
+        // FIXME: not always an attachment.
         let texture = self
             .staging_map
             .get(&texture)
@@ -1441,7 +1423,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         // For encoding we have two extra bindings, sampler and in_texture.
         if let Some(view) = view {
-            sparse = vec![(binding, BindingResource::TextureView(image_id))];
+            if binding  < 16 {
+                sparse = vec![(binding, BindingResource::TextureView(image_id))];
+            } else {
+                sparse = vec![];
+            }
 
             // FIXME: unnecessary duplication.
             let sampler = self.make_sampler(SamplerDescriptor {
@@ -1463,7 +1449,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             sparse.push((32, BindingResource::TextureView(view_id)));
             sparse.push((33, BindingResource::Sampler(sampler)));
         } else {
-            sparse = vec![(binding, BindingResource::TextureView(image_id))];
+            if binding  < 16 {
+                sparse = vec![(binding, BindingResource::TextureView(image_id))];
+            } else {
+                sparse = vec![];
+            }
 
             let sampler = self.make_sampler(SamplerDescriptor {
                 address_mode: wgpu::AddressMode::default(),
@@ -1782,7 +1772,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
                     pipeline_target: PipelineTarget::PreComputedGroup {
-                        target_format: parameter.linear_format(),
+                        target_format: if let Some(stage) = parameter.stage_kind() {
+                            stage.texture_format()
+                        } else {
+                            parameter.linear_format()
+                        }
                     },
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
