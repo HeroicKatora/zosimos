@@ -2,7 +2,7 @@ use crate::winit::{Window, WindowSurface, WindowedSurface};
 
 use stealth_paint::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
 use stealth_paint::command;
-use stealth_paint::pool::{GpuKey, Pool, PoolKey};
+use stealth_paint::pool::{GpuKey, Pool, PoolImageMut, PoolKey};
 use stealth_paint::program::{Capabilities, Program};
 use stealth_paint::run::Executable;
 use wgpu::{Adapter, Instance, SurfaceConfiguration};
@@ -225,16 +225,15 @@ impl Surface {
 
         let normalize = self
             .runtimes
-            .get_or_insert_normalizing_exe(present_desc, surface_desc, capabilities)
+            .get_or_insert_normalizing_exe(
+                present_desc,
+                surface_desc,
+                capabilities,
+            )
             .expect("Should be able to build resize");
 
         let in_reg = normalize.in_reg;
         let out_reg = normalize.out_reg;
-
-        self.pool
-            .entry(surface)
-            .unwrap()
-            .replace_texture_unguarded(&mut surface_tex.texture, gpu);
 
         let mut run = normalize
             .exe
@@ -300,10 +299,7 @@ impl Surface {
         log::warn!("{:?}", retire.retire_buffers());
         retire.finish();
 
-        self.pool
-            .entry(surface)
-            .unwrap()
-            .replace_texture_unguarded(&mut surface_tex.texture, gpu);
+        let surface_tex = self.pool.entry(surface).unwrap().as_texture().unwrap();
 
         #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
@@ -371,8 +367,11 @@ impl WindowedSurface for Surface {
 impl Runtimes {
     pub(crate) fn get_or_insert_normalizing_exe(
         &mut self,
+        // The descriptor of the to-render output.
         input: Descriptor,
+        // The surface descriptor.
         surface: Descriptor,
+        // Capabilities to use for conversion.
         caps: Capabilities,
     ) -> Option<&mut NormalizingExe> {
         if self.normalizing.is_some() {

@@ -6,7 +6,7 @@ use crate::buffer::{BufferLayout, ByteLayout, ChannelPosition, Descriptor, Texel
 use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
-    CompileError, Frame, Function, ImageBufferAssignment, ImageBufferPlan, Program, QuadTarget,
+    CompileError, Frame, Function, ImageBufferAssignment, ImageBufferPlan, ImageDescriptor, Program, QuadTarget,
     Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
@@ -56,6 +56,12 @@ enum Op {
     /// WIP: and is_cpu_type(desc)
     /// for the eventuality of gpu-only buffer layouts.
     Output { src: Register },
+    /// target(src)
+    /// where is_linear_type(src)
+    ///
+    /// for the eventuality of gpu-only buffer layouts.
+    /// FIXME: already contain proof of is_linear_type?
+    Render { src: Register },
     /// i := op()
     /// where type(i) = desc
     Construct { desc: Descriptor, op: ConstructOp },
@@ -115,6 +121,12 @@ pub(crate) enum High {
     Input(Register, Descriptor),
     /// Designate the ith textures as output n, according to the position in sequence of outputs.
     Output {
+        /// The source register/texture/buffers.
+        src: Register,
+        /// The target texture.
+        dst: Register,
+    },
+    Render {
         /// The source register/texture/buffers.
         src: Register,
         /// The target texture.
@@ -1152,6 +1164,24 @@ impl CommandBuffer {
         Ok((register, outformat))
     }
 
+    /// Declare a render target.
+    ///
+    /// Render targets MUST later be bound from the pool during launch, similar to outputs.
+    /// However, they are not assumed to be readable afterwards and will never be a copy target.
+    ///
+    /// The target register must be renderable, i.e. a color with a native texture representation.
+    pub fn render(&mut self, src: Register) -> Result<(Register, Descriptor), CommandError> {
+        let outformat = self.describe_reg(src)?.clone();
+
+        if ImageDescriptor::new(&outformat).is_err() {
+            return Err(CommandError::TYPE_ERR);
+        }
+
+        // Ignore this, it doesn't really produce a register.
+        let register = self.push(Op::Render { src });
+        Ok((register, outformat))
+    }
+
     pub fn compile(&self) -> Result<Program, CompileError> {
         let steps = self.ops.len();
 
@@ -1171,6 +1201,10 @@ impl CommandBuffer {
                     ..
                 } => {}
                 &Op::Output { src: Register(src) } => {
+                    last_use[src] = last_use[src].max(idx);
+                    first_use[src] = first_use[src].min(idx);
+                }
+                &Op::Render { src: Register(src) } => {
                     last_use[src] = last_use[src].max(idx);
                     first_use[src] = first_use[src].min(idx);
                 }
@@ -1213,6 +1247,8 @@ impl CommandBuffer {
             let descriptor = self
                 .describe_reg(if let Op::Output { src } = op {
                     *src
+                } else if let Op::Render { src } = op {
+                    *src
                 } else {
                     Register(idx)
                 })
@@ -1232,6 +1268,12 @@ impl CommandBuffer {
                 }
                 &Op::Output { src } => {
                     high_ops.push(High::Output {
+                        src,
+                        dst: Register(idx),
+                    });
+                }
+                &Op::Render { src } => {
+                    high_ops.push(High::Render {
                         src,
                         dst: Register(idx),
                     });
@@ -1510,7 +1552,7 @@ impl CommandBuffer {
     /// Get the descriptor for a register.
     fn describe_reg(&self, Register(reg): Register) -> Result<&Descriptor, CommandError> {
         match self.ops.get(reg) {
-            None | Some(Op::Output { .. }) => Err(CommandError::BAD_REGISTER),
+            None | Some(Op::Output { .. }) | Some(Op::Render{ .. }) => Err(CommandError::BAD_REGISTER),
             Some(Op::Input { desc })
             | Some(Op::Construct { desc, .. })
             | Some(Op::Unary { desc, .. })

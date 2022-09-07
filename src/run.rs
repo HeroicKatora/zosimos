@@ -857,6 +857,32 @@ impl Host {
                 self.descriptors.texture_views.push(view);
                 Ok(())
             }
+            Low::RenderView(source_image) => {
+                let texture = match &mut self.buffers[source_image.0].data {
+                    ImageData::GpuTexture {
+                        texture,
+                        // FIXME: validate layout? What for?
+                        layout: _,
+                        gpu: _,
+                    } => texture,
+                    _ => return Err(StepError::InvalidInstruction(line!())),
+                };
+
+                let desc = wgpu::TextureViewDescriptor {
+                    label: None,
+                    format: None,
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    aspect: wgpu::TextureAspect::All,
+                    base_mip_level: 0,
+                    mip_level_count: None,
+                    base_array_layer: 0,
+                    array_layer_count: None,
+                };
+
+                let view = texture.create_view(&desc);
+                self.descriptors.texture_views.push(view);
+                Ok(())
+            }
             Low::Texture(desc) => {
                 use wgpu::TextureUsages as U;
                 let wgpu_desc = wgpu::TextureDescriptor {
@@ -877,7 +903,7 @@ impl Host {
                             U::COPY_SRC | U::COPY_DST | U::TEXTURE_BINDING | U::RENDER_ATTACHMENT
                         }
                         program::TextureUsage::Staging => {
-                            U::COPY_SRC | U::COPY_DST | U::TEXTURE_BINDING | U::RENDER_ATTACHMENT 
+                            U::COPY_SRC | U::COPY_DST | U::TEXTURE_BINDING | U::RENDER_ATTACHMENT
                         }
                         program::TextureUsage::Transient => {
                             U::TEXTURE_BINDING | U::RENDER_ATTACHMENT
@@ -1285,6 +1311,28 @@ impl Host {
                     gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
 
                     return Ok(());
+                } else if let ImageData::GpuBuffer {
+                    buffer,
+                    layout,
+                    gpu: _,
+                } = image
+                {
+                    let descriptor = wgpu::CommandEncoderDescriptor { label: None };
+                    let mut encoder =
+                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+
+                    encoder.copy_buffer_to_buffer(
+                        &self.descriptors.buffers[copy_src_buffer.0],
+                        0,
+                        buffer,
+                        0,
+                        layout.u64_len(),
+                    );
+
+                    let command = encoder.finish();
+                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+
+                    return Ok(());
                 }
 
                 if image.as_bytes().is_none() {
@@ -1549,6 +1597,7 @@ impl Descriptors {
     ) -> Result<wgpu::FragmentState<'_>, StepError> {
         buf.clear();
         buf.extend(desc.targets.iter().cloned().map(Some));
+        eprintln!("{:?}", buf);
         Ok(wgpu::FragmentState {
             module: self
                 .shaders

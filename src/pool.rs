@@ -7,8 +7,8 @@ use wgpu::{Buffer, Texture};
 
 use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer};
 use crate::program::{
-    BufferDescriptor, BufferUsage, Capabilities, RenderPipelineKey, ShaderDescriptorKey,
-    TextureDescriptor,
+    BufferDescriptor, BufferUsage, Capabilities, ImageDescriptor, RenderPipelineKey,
+    ShaderDescriptorKey, TextureDescriptor,
 };
 use crate::run::{block_on, copy_host_to_buffer, Gpu};
 
@@ -124,6 +124,10 @@ pub(crate) enum ImageData {
     /// The data lives in a texture buffer on the device.
     /// This buffer should be associated to one of the GPU devices.
     GpuTexture {
+        // FIXME: not all textures are equal. Rather, we need to know the usage of a texture which
+        // determines the code by which we can make use of it. For instance, a texture without
+        // COPY_SRC and TEXTURE_BINDING is impossible to read out; or a texture with exclusively
+        // RENDER_ATTACHMENT can be rendered to but not copied to for initialization.
         texture: Texture,
         layout: BufferLayout,
         gpu: DefaultKey,
@@ -615,6 +619,16 @@ impl PoolImageMut<'_> {
         self.image.data.as_bytes_mut()
     }
 
+    /// View the buffer as a wgpu texture.
+    ///
+    /// This return `Some` if the image is a gpu allocated texture and `None` otherwise.
+    pub fn as_texture(&self) -> Option<&wgpu::Texture> {
+        match &self.image.data {
+            ImageData::GpuTexture { texture, .. } => Some(texture),
+            _ => None,
+        }
+    }
+
     /// Configure the color of this image, not changing any data.
     pub fn set_color(&mut self, color: Color) {
         // FIXME: re-add assert?
@@ -639,6 +653,47 @@ impl PoolImageMut<'_> {
         let descriptor = Descriptor::with_srgb_image(image);
         self.image.descriptor = descriptor;
         self.image.data = ImageData::Host(buffer);
+    }
+
+    /// Create a texture suitable for the image descriptor.
+    pub fn set_texture(
+        &mut self,
+        GpuKey(key): GpuKey,
+        image: &Descriptor,
+    ) -> Result<(), ImageUploadError> {
+        let gpu = match self.devices.get(key).ok_or(ImageUploadError::BadGpu)? {
+            Device::Active(gpu) => gpu,
+            Device::Inactive => return Err(ImageUploadError::InactiveGpu),
+        };
+
+        let descriptor = ImageDescriptor::new(image).map_err(|_| ImageUploadError::BadDescriptor)?;
+
+        if descriptor.staging.is_some() {
+            return Err(ImageUploadError::BadDescriptor);
+        }
+
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: descriptor.size.0.get(),
+                height: descriptor.size.1.get(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: descriptor.format,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+        });
+
+        self.image.descriptor = image.clone();
+        self.image.data = ImageData::GpuTexture {
+            texture,
+            layout: image.to_canvas(),
+            gpu: key,
+        };
+
+        Ok(())
     }
 
     /// Insert the texture instead of the current image.
