@@ -155,6 +155,8 @@ pub struct IoMap {
     pub(crate) inputs: HashMap<Register, usize>,
     /// Map output registers to their index in `buffers`.
     pub(crate) outputs: HashMap<Register, usize>,
+    /// Map output registers to their index in `buffers`.
+    pub(crate) renders: HashMap<Register, usize>,
 }
 
 #[derive(Default)]
@@ -447,6 +449,17 @@ impl Executable {
             }
         }
 
+        for &render in self.io_map.renders.values() {
+            if let Some(key) = env.buffers[render].key {
+                let mut pool_img = env.pool.entry(key).unwrap();
+                let buffer = &mut env.buffers[render];
+                pool_img.swap(&mut buffer.data);
+            } else {
+                todo!();
+            }
+        }
+
+
         Ok(())
     }
 }
@@ -489,6 +502,7 @@ impl Environment<'_> {
     }
 
     pub fn bind_output(&mut self, reg: Register, key: PoolKey) -> Result<(), StartError> {
+        // FIXME: duplication with `bind`.
         let &idx = self
             .io_map
             .outputs
@@ -514,6 +528,44 @@ impl Environment<'_> {
 
         match pool_img.data() {
             ImageData::Host(_) | ImageData::GpuTexture { .. } | ImageData::GpuBuffer { .. } => {}
+            _ => {
+                eprintln!("Bad binding: {:?}", reg);
+                return Err(StartError::InternalCommandError(line!()));
+            }
+        }
+
+        image.key = Some(pool_img.key());
+
+        Ok(())
+    }
+
+    pub fn bind_render(&mut self, reg: Register, key: PoolKey) -> Result<(), StartError> {
+        // FIXME: duplication with `bind_output`.
+        let &idx = self
+            .io_map
+            .renders
+            .get(&reg)
+            .ok_or_else(|| StartError::InternalCommandError(line!()))?;
+
+        let pool_img = self
+            .pool
+            .entry(key)
+            .ok_or_else(|| StartError::InternalCommandError(line!()))?;
+
+        let image = &mut self.buffers[idx];
+        let descriptor = pool_img.descriptor();
+
+        // FIXME: we're ignoring color semantics here. Okay?
+        if descriptor.layout != image.descriptor.layout {
+            return Err(StartError::InternalCommandError(line!()));
+        }
+
+        if descriptor.texel != image.descriptor.texel {
+            return Err(StartError::InternalCommandError(line!()));
+        }
+
+        match pool_img.data() {
+            ImageData::GpuTexture { .. } => {}
             _ => {
                 eprintln!("Bad binding: {:?}", reg);
                 return Err(StartError::InternalCommandError(line!()));
@@ -1811,6 +1863,39 @@ impl Retire<'_> {
             .host
             .io_map
             .outputs
+            .get(&reg)
+            .copied()
+            .ok_or(RetireError {
+                inner: RetireErrorKind::NoSuchOutput,
+            })?;
+
+        let image = &mut self.execution.host.buffers[index];
+        let descriptor = image.data.layout().clone();
+
+        let mut pool_image;
+        let pool = &mut self.pool;
+        match image.key.filter(|key| pool.entry(*key).is_some()) {
+            Some(key) => pool_image = self.pool.entry(key).unwrap(),
+            None => {
+                let descriptor = Descriptor::from(&descriptor);
+                pool_image = self.pool.declare(descriptor);
+            }
+        };
+
+        pool_image.swap(&mut image.data);
+
+        Ok(pool_image.into())
+    }
+
+    /// Move the render target corresponding to `reg` into the pool.
+    ///
+    /// Return the image as viewed inside the pool.
+    pub fn render(&mut self, reg: Register) -> Result<PoolImage<'_>, RetireError> {
+        let index = self
+            .execution
+            .host
+            .io_map
+            .renders
             .get(&reg)
             .copied()
             .ok_or(RetireError {

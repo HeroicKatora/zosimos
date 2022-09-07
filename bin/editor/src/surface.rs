@@ -2,8 +2,8 @@ use crate::winit::{Window, WindowSurface, WindowedSurface};
 
 use stealth_paint::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
 use stealth_paint::command;
-use stealth_paint::pool::{GpuKey, Pool, PoolImageMut, PoolKey};
-use stealth_paint::program::{Capabilities, Program};
+use stealth_paint::pool::{GpuKey, Pool, PoolKey};
+use stealth_paint::program::{Capabilities, Program, CompileError, LaunchError};
 use stealth_paint::run::Executable;
 use wgpu::{Adapter, Instance, SurfaceConfiguration};
 
@@ -27,6 +27,11 @@ pub struct Surface {
 #[derive(Debug)]
 pub enum PresentationError {
     GpuDeviceLost,
+}
+
+#[derive(Debug)]
+struct NormalizingError {
+    fail: String,
 }
 
 /// The pool entry of our surface declarator.
@@ -225,15 +230,16 @@ impl Surface {
 
         let normalize = self
             .runtimes
-            .get_or_insert_normalizing_exe(
-                present_desc,
-                surface_desc,
-                capabilities,
-            )
+            .get_or_insert_normalizing_exe(present_desc, surface_desc, capabilities)
             .expect("Should be able to build resize");
 
         let in_reg = normalize.in_reg;
         let out_reg = normalize.out_reg;
+
+        self.pool
+            .entry(surface)
+            .unwrap()
+            .replace_texture_unguarded(&mut surface_tex.texture, gpu);
 
         let mut run = normalize
             .exe
@@ -251,7 +257,7 @@ impl Surface {
         run.bind(in_reg, present)
             .expect("Valid binding for our executable input");
         // Bind the output.
-        run.bind_output(out_reg, surface)
+        run.bind_render(out_reg, surface)
             .expect("Valid binding for our executable output");
         log::warn!("Sub- optimality: {:?}", surface_tex.suboptimal);
         log::warn!("{:?}", run.recover_buffers());
@@ -292,14 +298,17 @@ impl Surface {
             .input(in_reg)
             .expect("Valid to retire input of our executable");
         retire
-            .output(out_reg)
+            .render(out_reg)
             .expect("Valid to retire outputof our executable");
 
         retire.prune();
         log::warn!("{:?}", retire.retire_buffers());
         retire.finish();
 
-        let surface_tex = self.pool.entry(surface).unwrap().as_texture().unwrap();
+        self.pool
+            .entry(surface)
+            .unwrap()
+            .replace_texture_unguarded(&mut surface_tex.texture, gpu);
 
         #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
@@ -354,6 +363,7 @@ impl Surface {
             }
         };
 
+        log::info!("Reconfigured surface {:?}", &self.config);
         self.inner.surface().configure(dev, &self.config);
 
         Ok(())
@@ -373,27 +383,50 @@ impl Runtimes {
         surface: Descriptor,
         // Capabilities to use for conversion.
         caps: Capabilities,
-    ) -> Option<&mut NormalizingExe> {
+    ) -> Result<&mut NormalizingExe, NormalizingError> {
         if self.normalizing.is_some() {
             // FIXME: Polonius NLL.
-            return self.normalizing.as_mut();
+            return Ok(self.normalizing.as_mut().unwrap());
         }
 
         let mut cmd = command::CommandBuffer::default();
-        let in_reg = cmd.input(input).ok()?;
-        let resized = cmd.resize(in_reg, surface.size()).ok()?;
+        let in_reg = cmd.input(input)?;
+        let resized = cmd.resize(in_reg, surface.size())?;
         let converted = cmd
-            .color_convert(resized, surface.color.clone(), surface.texel.clone())
-            .ok()?;
-        let (out_reg, _desc) = cmd.output(converted).ok()?;
+            .color_convert(resized, surface.color.clone(), surface.texel.clone())?;
+        let (out_reg, _desc) = cmd.render(converted)?;
 
-        let program = cmd.compile().ok()?;
-        let exe = program.lower_to(caps).ok()?;
+        let program = cmd.compile()?;
+        let exe = program.lower_to(caps)?;
 
-        Some(self.normalizing.get_or_insert(NormalizingExe {
+        Ok(self.normalizing.get_or_insert(NormalizingExe {
             exe,
             in_reg,
             out_reg,
         }))
+    }
+}
+
+impl From<CompileError> for NormalizingError {
+    #[track_caller]
+    fn from(err: CompileError) -> Self {
+        let location = core::panic::Location::caller();
+        NormalizingError { fail: format!("At {:?}: {:?}", location, err) }
+    }
+}
+
+impl From<command::CommandError> for NormalizingError {
+    #[track_caller]
+    fn from(err: command::CommandError) -> Self {
+        let location = core::panic::Location::caller();
+        NormalizingError { fail: format!("At {:?}: {:?}", location, err) }
+    }
+}
+
+impl From<LaunchError> for NormalizingError {
+    #[track_caller]
+    fn from(err: LaunchError) -> Self {
+        let location = core::panic::Location::caller();
+        NormalizingError { fail: format!("At {:?}: {:?}", location, err) }
     }
 }

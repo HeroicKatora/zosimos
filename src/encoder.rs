@@ -851,12 +851,46 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let target_image = self.ingest_image_data(dst)?;
         self.render_map.insert(dst, target_image);
 
-        let pipeline = self.prepare_render(
-            &Function::PaintFullScreen {
-                shader: shaders::FragmentShader::PaintOnTop(shaders::PaintOnTopKind::Copy),
-            },
-            target_image,
-        )?;
+        // FIXME: have the caller provide this directly?
+        let dst_format = {
+            let ImageBufferAssignment {
+                buffer: _,
+                texture: reg_texture,
+            } = self.buffer_plan.get(dst)?;
+            let descriptor = &self.buffer_plan.texture[reg_texture.0];
+            let descriptor = ImageDescriptor::new(descriptor)?;
+            descriptor.format
+        };
+
+        self.operands.push(regmap.reg_texture);
+        let pipeline = {
+            let shader = shaders::FragmentShader::PaintOnTop(shaders::PaintOnTopKind::Copy);
+
+            let vertex = self.vertex_shader(
+                Some(shaders::VertexShader::Noop),
+                shader_include_to_spirv(shaders::VERT_NOOP))?;
+
+            let shader = shader.shader();
+            let key = shader.key();
+            let spirv = shader.spirv_source();
+
+            let fragment = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
+            let fragment_bind_data = shader.binary_data(&mut self.binary_data)
+                .map(|data| BufferBind::Planned { data })
+                .unwrap_or(BufferBind::None);
+
+            let arguments = shader.num_args();
+            self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
+                pipeline_target: PipelineTarget::PreComputedGroup { target_format: dst_format },
+                vertex_bind_data: BufferBind::Set {
+                    data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
+                },
+                fragment_texture: TextureBind::Textures(arguments as usize),
+                fragment_bind_data,
+                vertex: ShaderBind::ShaderMain(vertex),
+                fragment: ShaderBind::ShaderMain(fragment),
+            })?
+        };
 
         let texture_view = self.render_view(dst)?;
         let attachment = ColorAttachmentDescriptor {
@@ -1717,6 +1751,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         for (&register, texture) in &self.output_map {
             io_map.outputs.insert(register, texture.0);
+        }
+
+        for (&register, texture) in &self.render_map {
+            io_map.renders.insert(register, texture.0);
         }
 
         io_map

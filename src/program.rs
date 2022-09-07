@@ -552,6 +552,17 @@ impl ImageDescriptor {
                 Texel {
                     block: Block::Pixel,
                     bits: SampleBits::UInt8x4,
+                    parts: SampleParts::BgrA,
+                },
+                Color::Rgb {
+                    transfer: Transfer::Srgb,
+                    ..
+                },
+            ) => wgpu::TextureFormat::Bgra8UnormSrgb,
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits: SampleBits::UInt8x4,
                     parts: SampleParts::RgbA,
                 },
                 Color::Rgb {
@@ -559,6 +570,17 @@ impl ImageDescriptor {
                     ..
                 },
             ) => wgpu::TextureFormat::Rgba8Unorm,
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits: SampleBits::UInt8x4,
+                    parts: SampleParts::BgrA,
+                },
+                Color::Rgb {
+                    transfer: Transfer::Linear,
+                    ..
+                },
+            ) => wgpu::TextureFormat::Bgra8Unorm,
             (
                 Texel {
                     block: Block::Pixel,

@@ -1173,6 +1173,9 @@ impl CommandBuffer {
     pub fn render(&mut self, src: Register) -> Result<(Register, Descriptor), CommandError> {
         let outformat = self.describe_reg(src)?.clone();
 
+        // FIXME: this is too conservative! We need to ensure that our internal assumption about
+        // the texture descriptor is compatible with available wgpu formats (and yields the same
+        // result).
         if ImageDescriptor::new(&outformat).is_err() {
             return Err(CommandError::TYPE_ERR);
         }

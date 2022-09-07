@@ -68,6 +68,7 @@ impl Editor {
         let start = end;
 
         surface.present_to_texture(&mut texture);
+        #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
         #[cfg(not(target_arch = "wasm32"))]
         log::warn!(
