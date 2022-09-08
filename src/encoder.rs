@@ -862,6 +862,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             descriptor.format
         };
 
+        self.copy_staging_to_texture(regmap.reg_texture)?;
         self.operands.push(regmap.reg_texture);
         let pipeline = {
             let shader = shaders::FragmentShader::PaintOnTop(shaders::PaintOnTopKind::Copy);

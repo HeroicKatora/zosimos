@@ -399,6 +399,8 @@ impl Runtimes {
         let program = cmd.compile()?;
         let exe = program.lower_to(caps)?;
 
+        log::info!("{}", exe.dot());
+
         Ok(self.normalizing.get_or_insert(NormalizingExe {
             exe,
             in_reg,

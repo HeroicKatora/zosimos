@@ -342,7 +342,534 @@ impl Executable {
         })
     }
 
+    /// Produce a `dot` describing the pipeline.
+    pub fn dot(&self) -> String {
+        use core::fmt::Write;
+        let mut cons = String::new();
+        let mut queue_graph = String::new();
+
+        let mut bind_group_layouts = 0;
+        let mut bind_groups = 0;
+        let mut buffers = 0;
+        let mut buffer_states = HashMap::new();
+        let mut pipeline_layouts = 0;
+        let mut samplers = 0;
+        let mut shaders = 0;
+        let mut textures = 0;
+        let mut texture_states = HashMap::new();
+        let mut texture_views = 0;
+        let mut texture_view_map = HashMap::<usize, DeviceTexture>::new();
+        let mut render_pipelines = 0;
+
+        let mut commands = 0;
+        let mut command_stack = vec![0usize; 0];
+        let mut queue = 0;
+        let mut render_passes = 0;
+
+        for instr in &self.instructions[..] {
+            match instr {
+                Low::BindGroupLayout(layout) => {
+                    /*
+                    let _ = write!(
+                        &mut cons,
+                        " bind_group_layout_{0} [label=\"Bind Group Layout {0}\"];",
+                        bind_group_layouts
+                    );
+                    bind_group_layouts += 1;
+                    */
+                }
+                Low::BindGroup(group) => {
+                    let idx = bind_groups;
+                    let _ = write!(
+                        &mut cons,
+                        " bind_group_{0} [label=\"Bind Group {0}\"];",
+                        idx
+                    );
+
+                    /*
+                    let _ = write!(
+                        &mut cons,
+                        " bind_group_layout_{} -> bind_group_{};",
+                        group.layout_idx, idx
+                    );
+                    */
+                    for entry in &group.entries {
+                        match entry {
+                            program::BindingResource::Buffer { buffer_idx, .. } => {
+                                let _ = write!(
+                                    &mut cons,
+                                    " buffer_{} -> bind_group_{};",
+                                    buffer_idx, idx
+                                );
+                                let st = buffer_states[buffer_idx];
+                                let _ = write!(
+                                    &mut cons,
+                                    " buffer_{}_{} -> bind_group_{};",
+                                    buffer_idx, st, idx
+                                );
+                            }
+                            program::BindingResource::Sampler(sampler) => {
+                                let _ = write!(
+                                    &mut cons,
+                                    " sampler_{} -> bind_group_{};",
+                                    sampler, idx
+                                );
+                            }
+                            program::BindingResource::TextureView(view) => {
+                                let _ = write!(
+                                    &mut cons,
+                                    " texture_view_{} -> bind_group_{};",
+                                    view, idx
+                                );
+
+                                if let Some(tex) = texture_view_map.get(&view) {
+                                    let st = texture_states[&tex.0];
+                                    let _ = write!(
+                                        &mut cons,
+                                        " texture_{}_{} -> bind_group_{};",
+                                        tex.0, st, idx
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    for entry in &group.sparse {
+                        match entry.1 {
+                            program::BindingResource::Buffer { buffer_idx, .. } => {
+                                let _ = write!(
+                                    &mut cons,
+                                    " buffer_{} -> bind_group_{};",
+                                    buffer_idx, idx
+                                );
+                                let st = buffer_states[&buffer_idx];
+                                let _ = write!(
+                                    &mut cons,
+                                    " buffer_{}_{} -> bind_group_{};",
+                                    buffer_idx, st, idx
+                                );
+                            }
+                            program::BindingResource::Sampler(sampler) => {
+                                let _ = write!(
+                                    &mut cons,
+                                    " sampler_{} -> bind_group_{};",
+                                    sampler, idx
+                                );
+                            }
+                            program::BindingResource::TextureView(view) => {
+                                let _ = write!(
+                                    &mut cons,
+                                    " texture_view_{} -> bind_group_{};",
+                                    view, idx
+                                );
+
+                                if let Some(tex) = texture_view_map.get(&view) {
+                                    let st = texture_states[&tex.0];
+                                    let _ = write!(
+                                        &mut cons,
+                                        " texture_{}_{} -> bind_group_{};",
+                                        tex.0, st, idx
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    bind_groups += 1;
+                }
+                Low::Buffer(_) => {
+                    buffer_states.insert(buffers, 0);
+                    buffers += 1;
+                }
+                Low::BufferInit(_) => {
+                    let _ = write!(
+                        &mut cons,
+                        " buffer_{0} [label=\"Buffer {0} (init)\"];",
+                        buffers
+                    );
+                    buffer_states.insert(buffers, 0);
+                    buffers += 1;
+                }
+                Low::PipelineLayout(layout) => {
+                    let _ = write!(
+                        &mut cons,
+                        " pipeline_layout_{0} [label=\"Pipeline Layout {0}\"];",
+                        pipeline_layouts
+                    );
+                    /*
+                    for bg in &layout.bind_group_layouts {
+                        let _ = write!(
+                            &mut cons,
+                            " bind_group_layout_{} -> pipeline_layout_{};",
+                            bg, pipeline_layouts
+                        );
+                    }
+                    */
+                    pipeline_layouts += 1;
+                }
+                Low::Sampler(_) => {
+                    let _ = write!(&mut cons, " sampler_{0} [label=\"Sampler {0}\"];", samplers);
+                    samplers += 1;
+                }
+                Low::Shader(shader) => {
+                    let _ = write!(
+                        &mut cons,
+                        " shader_{0} [label=\"Shader {0}: {1:?}\"];",
+                        shaders, shader.key
+                    );
+                    shaders += 1;
+                }
+                Low::Texture(_) => {
+                    texture_states.insert(textures, 0);
+                    textures += 1;
+                }
+                Low::TextureView(view) => {
+                    let _ = write!(
+                        &mut cons,
+                        " texture_view_{0} [label=\"Texture View {0}\"];",
+                        texture_views
+                    );
+                    let _ = write!(
+                        &mut cons,
+                        " texture_{} -> texture_view_{};",
+                        view.texture.0, texture_views
+                    );
+                    texture_view_map.insert(texture_views, view.texture);
+                    texture_views += 1;
+                }
+                Low::RenderView(register) => {
+                    let _ = write!(
+                        &mut cons,
+                        " texture_view_{0} [label=\"Render View {0}\"];",
+                        texture_views
+                    );
+                    let _ = write!(
+                        &mut cons,
+                        " input_{} -> texture_view_{};",
+                        register.0, texture_views
+                    );
+                    texture_views += 1;
+                }
+                Low::RenderPipeline(pipeline) => {
+                    let idx = render_pipelines;
+                    let _ = write!(
+                        &mut cons,
+                        " render_pipeline_{0} [label=\"Render Pipeline {0}\"];",
+                        idx
+                    );
+                    let _ = write!(
+                        &mut cons,
+                        " pipeline_layout_{} -> render_pipeline_{};",
+                        pipeline.layout, idx
+                    );
+                    let _ = write!(
+                        &mut cons,
+                        " shader_{} -> render_pipeline_{} [label=\"Fragment Shader\"];",
+                        pipeline.fragment.fragment_module, idx
+                    );
+                    let _ = write!(
+                        &mut cons,
+                        " shader_{} -> render_pipeline_{} [label=\"Vertex Shader\"];",
+                        pipeline.vertex.vertex_module, idx
+                    );
+                    render_pipelines += 1;
+                }
+
+                Low::BeginCommands => {
+                    let _ = write!(
+                        &mut cons,
+                        " command_buffer_{0} [label=\"Command Buffer {0}\"];",
+                        commands
+                    );
+                }
+                Low::BeginRenderPass(pass) => {
+                    let idx = render_passes;
+                    let _ = write!(
+                        &mut cons,
+                        " render_pass_{0} [label=\"Render Pass {0}\"];",
+                        idx
+                    );
+                    let _ = write!(
+                        &mut cons,
+                        " render_pass_{} -> command_buffer_{};",
+                        idx, commands
+                    );
+                    for attach in &pass.color_attachments {
+                        let _ = write!(
+                            &mut cons,
+                            " render_pass_{} -> texture_view_{};",
+                            idx, attach.texture_view
+                        );
+                        if let Some(tex) = texture_view_map.get(&attach.texture_view) {
+                            *texture_states.get_mut(&tex.0).unwrap() += 1;
+                            let st = texture_states[&tex.0];
+                            let _ = write!(
+                                &mut cons,
+                                " render_pass_{} -> texture_{}_{};",
+                                idx, tex.0, st,
+                            );
+                        }
+                    }
+                }
+                Low::EndCommands => {
+                    command_stack.push(commands);
+                    commands += 1;
+                }
+                Low::EndRenderPass => {
+                    render_passes += 1;
+                }
+                Low::SetPipeline(pipeline) => {
+                    let _ = write!(
+                        &mut cons,
+                        " render_pipeline_{} -> render_pass_{};",
+                        pipeline, render_passes
+                    );
+                }
+                Low::SetBindGroup { group, .. } => {
+                    let _ = write!(
+                        &mut cons,
+                        " bind_group_{} -> render_pass_{};",
+                        group, render_passes
+                    );
+                }
+                Low::SetVertexBuffer { buffer, .. } => {
+                    let _ = write!(
+                        &mut cons,
+                        " buffer_{}_{} -> render_pass_{};",
+                        buffer, buffer_states[buffer], render_passes
+                    );
+                }
+                Low::DrawOnce { vertices } => {}
+                Low::DrawIndexedZero { vertices } => {}
+                Low::SetPushConstants {
+                    stages,
+                    offset,
+                    data,
+                } => {}
+
+                Low::RunTopCommand => {
+                    let idx = queue;
+                    let command = command_stack.pop().unwrap();
+                    let _ = write!(&mut cons, " queue_{};", idx);
+                    let _ = write!(&mut cons, " command_buffer_{} -> queue_{};", command, idx);
+                    let _ = write!(&mut queue_graph, " queue_{} -> queue_{};", idx, idx + 1);
+                    queue += 1;
+                }
+                Low::RunTopToBot(count) => {
+                    for command in 0..*count {
+                        let idx = queue;
+                        let command = command_stack.pop().unwrap();
+                        let _ = write!(&mut cons, " queue_{};", idx);
+                        let _ = write!(&mut cons, " command_buffer_{} -> queue_{};", command, idx);
+                        let _ = write!(&mut queue_graph, " queue_{} -> queue_{};", idx, idx + 1);
+                        queue += 1;
+                    }
+                }
+                Low::RunBotToTop(count) => {
+                    let start = command_stack.len() - count;
+                    for command in command_stack.drain(start..) {
+                        let idx = queue;
+                        let _ = write!(&mut cons, " queue_{};", idx);
+                        let _ = write!(&mut cons, " command_buffer_{} -> queue_{};", command, idx);
+                        let _ = write!(&mut queue_graph, " queue_{} -> queue_{};", idx, idx + 1);
+                        queue += 1;
+                    }
+                }
+
+                Low::WriteImageToBuffer {
+                    source_image,
+                    offset,
+                    size,
+                    target_buffer,
+                    target_layout,
+                    copy_dst_buffer,
+                    write_event,
+                } => {
+                    let idx = queue;
+                    let _ = write!(&mut cons, " queue_{};", idx);
+                    let _ = write!(&mut cons, " register_{} -> queue_{};", source_image.0, idx);
+                    *buffer_states.get_mut(&target_buffer.0).unwrap() += 1;
+                    let st = buffer_states[&target_buffer.0];
+                    let _ = write!(
+                        &mut cons,
+                        " queue_{} -> buffer_{}_{};",
+                        idx, target_buffer.0, st
+                    );
+                    *buffer_states.get_mut(&copy_dst_buffer.0).unwrap() += 1;
+                    let st = buffer_states[&copy_dst_buffer.0];
+                    let _ = write!(
+                        &mut cons,
+                        " queue_{} -> buffer_{}_{};",
+                        idx, copy_dst_buffer.0, st
+                    );
+                    let _ = write!(&mut queue_graph, " queue_{} -> queue_{};", idx, idx + 1);
+                    queue += 1;
+                }
+                Low::CopyBufferToTexture {
+                    source_buffer,
+                    source_layout,
+                    offset,
+                    size,
+                    target_texture,
+                } => {
+                    let idx = queue;
+                    let _ = write!(&mut cons, " queue_{};", idx);
+                    let st = buffer_states[&source_buffer.0];
+                    let _ = write!(
+                        &mut cons,
+                        " buffer_{}_{} -> queue_{};",
+                        source_buffer.0, st, idx
+                    );
+                    *texture_states.get_mut(&target_texture.0).unwrap() += 1;
+                    let st = texture_states[&target_texture.0];
+                    let _ = write!(
+                        &mut cons,
+                        " queue_{} -> texture_{}_{};",
+                        idx, target_texture.0, st
+                    );
+                    let _ = write!(&mut queue_graph, " queue_{} -> queue_{};", idx, idx + 1);
+                    queue += 1;
+                }
+                Low::CopyTextureToBuffer {
+                    source_texture,
+                    offset,
+                    size,
+                    target_buffer,
+                    target_layout,
+                } => {
+                    let idx = queue;
+                    let _ = write!(&mut cons, " queue_{};", idx);
+                    let st = texture_states[&source_texture.0];
+                    let _ = write!(
+                        &mut cons,
+                        " texture_{}_{} -> queue_{};",
+                        source_texture.0, st, idx
+                    );
+                    *buffer_states.get_mut(&target_buffer.0).unwrap() += 1;
+                    let st = buffer_states[&target_buffer.0];
+                    let _ = write!(
+                        &mut cons,
+                        " queue_{} -> buffer_{}_{};",
+                        idx, target_buffer.0, st
+                    );
+                    let _ = write!(&mut queue_graph, " queue_{} -> queue_{};", idx, idx + 1);
+                    queue += 1;
+                }
+                Low::CopyBufferToBuffer {
+                    source_buffer,
+                    size,
+                    target_buffer,
+                } => {
+                    let idx = queue;
+                    let _ = write!(&mut cons, " queue_{};", idx);
+                    let st = buffer_states[&source_buffer.0];
+                    let _ = write!(
+                        &mut cons,
+                        " buffer_{}_{} -> queue_{};",
+                        source_buffer.0, st, idx
+                    );
+                    *buffer_states.get_mut(&target_buffer.0).unwrap() += 1;
+                    let st = buffer_states[&target_buffer.0];
+                    let _ = write!(
+                        &mut cons,
+                        " queue_{} -> buffer_{}_{};",
+                        idx, target_buffer.0, st
+                    );
+                    let _ = write!(&mut queue_graph, " queue_{} -> queue_{};", idx, idx + 1);
+                    queue += 1;
+                }
+                Low::ReadBuffer {
+                    source_buffer,
+                    source_layout,
+                    offset,
+                    size,
+                    target_image,
+                    copy_src_buffer,
+                } => {
+                    let idx = queue;
+                    let _ = write!(&mut cons, " queue_{};", idx);
+                    let st = buffer_states[&source_buffer.0];
+                    let _ = write!(
+                        &mut cons,
+                        " buffer_{}_{} -> queue_{};",
+                        source_buffer.0, st, idx
+                    );
+                    let st = buffer_states[&copy_src_buffer.0];
+                    let _ = write!(
+                        &mut cons,
+                        " buffer_{}_{} -> queue_{};",
+                        copy_src_buffer.0, st, idx
+                    );
+                    let _ = write!(&mut cons, " queue_{} -> register_{};", idx, target_image.0);
+                    let _ = write!(&mut queue_graph, " queue_{} -> queue_{};", idx, idx + 1);
+                    queue += 1;
+                }
+
+                Low::StackFrame(_) => {}
+                Low::StackPop => {}
+
+                _ => {}
+            }
+        }
+
+        let texture_graphs = texture_states
+            .into_iter()
+            .map(|(id, count)| {
+                let mut inner = String::new();
+                let _ = write!(&mut cons, " texture_{0} [label=\"Texture {0}\"];", id);
+                let _ = write!(&mut inner, " texture_{} -> texture_{}_0;", id, id);
+                for i in 0..=count {
+                    let _ = write!(&mut inner, " texture_{}_{};", id, i);
+                }
+                for i in (0..=count).skip(1) {
+                    let _ = write!(
+                        &mut inner,
+                        " texture_{}_{} -> texture_{}_{};",
+                        id,
+                        i - 1,
+                        id,
+                        i
+                    );
+                }
+
+                format!("subgraph clusterTexture{} {{ {} }}", id, inner)
+            })
+            .collect::<String>();
+
+        let buffer_graphs = buffer_states
+            .into_iter()
+            .map(|(id, count)| {
+                let mut inner = String::new();
+                let _ = write!(&mut cons, " buffer_{0} [label=\"Buffer {0}\"];", id);
+                let _ = write!(&mut inner, " buffer_{} -> buffer_{}_0;", id, id);
+                for i in 0..=count {
+                    let _ = write!(&mut inner, " buffer_{}_{};", id, i);
+                }
+                for i in (0..=count).skip(1) {
+                    let _ = write!(
+                        &mut inner,
+                        " buffer_{}_{} -> buffer_{}_{};",
+                        id,
+                        i - 1,
+                        id,
+                        i
+                    );
+                }
+
+                format!("subgraph clusterBuffer{} {{ {} }}", id, inner)
+            })
+            .collect::<String>();
+
+        let queue_graph = format!("subgraph clusterA {{ {} }}", queue_graph);
+
+        format!(
+            "digraph exe {{ {} {} {} {} }} ",
+            cons, queue_graph, texture_graphs, buffer_graphs
+        )
+    }
+
     pub fn launch(&self, mut env: Environment) -> Result<Execution, StartError> {
+        log::info!("Instructions {:#?}", self.instructions);
         self.check_satisfiable(&mut env)?;
         Ok(Execution {
             gpu: env.gpu.into(),
@@ -458,7 +985,6 @@ impl Executable {
                 todo!();
             }
         }
-
 
         Ok(())
     }

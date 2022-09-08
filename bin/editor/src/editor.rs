@@ -75,7 +75,10 @@ impl Editor {
             "Time rendering total {:?}",
             end.saturating_duration_since(start)
         );
+
+        log::info!("Presenting texture");
         texture.present();
+
         #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
         #[cfg(not(target_arch = "wasm32"))]
@@ -83,6 +86,7 @@ impl Editor {
             "Time present total {:?}",
             end.saturating_duration_since(full_start)
         );
+
         Ok(())
     }
 
