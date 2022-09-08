@@ -6,8 +6,8 @@ use crate::buffer::{BufferLayout, ByteLayout, ChannelPosition, Descriptor, Texel
 use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
-    CompileError, Frame, Function, ImageBufferAssignment, ImageBufferPlan, ImageDescriptor, Program, QuadTarget,
-    Texture,
+    CompileError, Frame, Function, ImageBufferAssignment, ImageBufferPlan, ImageDescriptor,
+    Program, QuadTarget, Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
@@ -1555,7 +1555,9 @@ impl CommandBuffer {
     /// Get the descriptor for a register.
     fn describe_reg(&self, Register(reg): Register) -> Result<&Descriptor, CommandError> {
         match self.ops.get(reg) {
-            None | Some(Op::Output { .. }) | Some(Op::Render{ .. }) => Err(CommandError::BAD_REGISTER),
+            None | Some(Op::Output { .. }) | Some(Op::Render { .. }) => {
+                Err(CommandError::BAD_REGISTER)
+            }
             Some(Op::Input { desc })
             | Some(Op::Construct { desc, .. })
             | Some(Op::Unary { desc, .. })

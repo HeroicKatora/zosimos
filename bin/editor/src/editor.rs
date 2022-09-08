@@ -18,8 +18,8 @@ impl ModalEditor for Editor {
 
         match ev {
             ModalEvent::ExitPressed => self.close_requested = true,
-            ModalEvent::MainEventsCleared => {},
-            ModalEvent::RedrawRequested => {},
+            ModalEvent::MainEventsCleared => {}
+            ModalEvent::RedrawRequested => {}
         }
     }
 

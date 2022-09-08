@@ -869,20 +869,24 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             let vertex = self.vertex_shader(
                 Some(shaders::VertexShader::Noop),
-                shader_include_to_spirv(shaders::VERT_NOOP))?;
+                shader_include_to_spirv(shaders::VERT_NOOP),
+            )?;
 
             let shader = shader.shader();
             let key = shader.key();
             let spirv = shader.spirv_source();
 
             let fragment = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
-            let fragment_bind_data = shader.binary_data(&mut self.binary_data)
+            let fragment_bind_data = shader
+                .binary_data(&mut self.binary_data)
                 .map(|data| BufferBind::Planned { data })
                 .unwrap_or(BufferBind::None);
 
             let arguments = shader.num_args();
-            self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
-                pipeline_target: PipelineTarget::PreComputedGroup { target_format: dst_format },
+            self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor {
+                pipeline_target: PipelineTarget::PreComputedGroup {
+                    target_format: dst_format,
+                },
                 vertex_bind_data: BufferBind::Set {
                     data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
                 },

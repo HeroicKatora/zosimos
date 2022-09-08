@@ -3,7 +3,7 @@ use crate::winit::{Window, WindowSurface, WindowedSurface};
 use stealth_paint::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
 use stealth_paint::command;
 use stealth_paint::pool::{GpuKey, Pool, PoolKey};
-use stealth_paint::program::{Capabilities, Program, CompileError, LaunchError};
+use stealth_paint::program::{Capabilities, CompileError, LaunchError, Program};
 use stealth_paint::run::Executable;
 use wgpu::{Adapter, Instance, SurfaceConfiguration};
 
@@ -392,8 +392,7 @@ impl Runtimes {
         let mut cmd = command::CommandBuffer::default();
         let in_reg = cmd.input(input)?;
         let resized = cmd.resize(in_reg, surface.size())?;
-        let converted = cmd
-            .color_convert(resized, surface.color.clone(), surface.texel.clone())?;
+        let converted = cmd.color_convert(resized, surface.color.clone(), surface.texel.clone())?;
         let (out_reg, _desc) = cmd.render(converted)?;
 
         let program = cmd.compile()?;
@@ -413,7 +412,9 @@ impl From<CompileError> for NormalizingError {
     #[track_caller]
     fn from(err: CompileError) -> Self {
         let location = core::panic::Location::caller();
-        NormalizingError { fail: format!("At {:?}: {:?}", location, err) }
+        NormalizingError {
+            fail: format!("At {:?}: {:?}", location, err),
+        }
     }
 }
 
@@ -421,7 +422,9 @@ impl From<command::CommandError> for NormalizingError {
     #[track_caller]
     fn from(err: command::CommandError) -> Self {
         let location = core::panic::Location::caller();
-        NormalizingError { fail: format!("At {:?}: {:?}", location, err) }
+        NormalizingError {
+            fail: format!("At {:?}: {:?}", location, err),
+        }
     }
 }
 
@@ -429,6 +432,8 @@ impl From<LaunchError> for NormalizingError {
     #[track_caller]
     fn from(err: LaunchError) -> Self {
         let location = core::panic::Location::caller();
-        NormalizingError { fail: format!("At {:?}: {:?}", location, err) }
+        NormalizingError {
+            fail: format!("At {:?}: {:?}", location, err),
+        }
     }
 }

@@ -4,7 +4,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::buffer::{ByteLayout,  Block, Color, SampleBits, SampleParts, Texel, Transfer, Descriptor};
+use crate::buffer::{
+    Block, ByteLayout, Color, Descriptor, SampleBits, SampleParts, Texel, Transfer,
+};
 use crate::color_matrix::RowMatrix;
 use crate::command::{High, Rectangle, Register, Target};
 use crate::encoder::{Encoder, RegisterMap};
@@ -975,8 +977,7 @@ impl Program {
             // But should be able to workaround most other restrictions.
             // FIXME: make the use of this configurable.
             limits: wgpu::Limits::downlevel_webgl2_defaults(),
-
-                /*
+            /*
             wgpu::Limits {
                 // We can't afform downlevel_webgl2_defaults due to using buffer textures et.al.
                 // But we don't *need* compute at all.

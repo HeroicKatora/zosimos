@@ -1,6 +1,6 @@
+use crate::{compute, editor, surface, winit::Window};
 use wasm_bindgen::prelude::*;
 use web_sys;
-use crate::{compute, editor, surface, winit::Window};
 
 #[wasm_bindgen(start)]
 pub async fn run() {
@@ -13,12 +13,17 @@ pub async fn run() {
     let compute = compute::Compute::new(&surface);
 
     surface.set_image(&{
-        let img = include_bytes!(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/input/background.png")
-        );
+        let img = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/input/background.png"
+        ));
 
         let img = std::io::Cursor::new(img);
-        image::io::Reader::new(img).with_guessed_format().unwrap().decode().unwrap()
+        image::io::Reader::new(img)
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap()
     });
 
     winit.run_on_main(editor, compute, surface)

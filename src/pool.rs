@@ -666,7 +666,8 @@ impl PoolImageMut<'_> {
             Device::Inactive => return Err(ImageUploadError::InactiveGpu),
         };
 
-        let descriptor = ImageDescriptor::new(image).map_err(|_| ImageUploadError::BadDescriptor)?;
+        let descriptor =
+            ImageDescriptor::new(image).map_err(|_| ImageUploadError::BadDescriptor)?;
 
         if descriptor.staging.is_some() {
             return Err(ImageUploadError::BadDescriptor);

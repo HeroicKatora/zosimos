@@ -74,7 +74,7 @@ impl Window {
         };
 
         Window { event_loop, inner }
-    } 
+    }
 
     pub fn create_surface(&self, instance: &wgpu::Instance) -> WindowSurface {
         let window = self.inner.window.clone();
@@ -149,32 +149,59 @@ impl Window {
         Some(match ev {
             Event::MainEventsCleared => ModalEvent::MainEventsCleared,
             Event::RedrawRequested(wid) if window.id() == wid => ModalEvent::RedrawRequested,
-            Event::WindowEvent { window_id, event } if window.id() == window_id => {
-                match event {
-                    WindowEvent::CloseRequested => ModalEvent::ExitPressed,
-                    _ => return None,
-                    WindowEvent::Resized(_) => todo!(),
-                    WindowEvent::Moved(_) => todo!(),
-                    WindowEvent::Destroyed => todo!(),
-                    WindowEvent::DroppedFile(_) => todo!(),
-                    WindowEvent::HoveredFile(_) => todo!(),
-                    WindowEvent::HoveredFileCancelled => todo!(),
-                    WindowEvent::ReceivedCharacter(_) => todo!(),
-                    WindowEvent::Focused(_) => todo!(),
-                    WindowEvent::KeyboardInput { device_id, input, is_synthetic } => todo!(),
-                    WindowEvent::ModifiersChanged(_) => todo!(),
-                    WindowEvent::CursorMoved { device_id, position, modifiers } => todo!(),
-                    WindowEvent::CursorEntered { device_id } => todo!(),
-                    WindowEvent::CursorLeft { device_id } => todo!(),
-                    WindowEvent::MouseWheel { device_id, delta, phase, modifiers } => todo!(),
-                    WindowEvent::MouseInput { device_id, state, button, modifiers } => todo!(),
-                    WindowEvent::TouchpadPressure { device_id, pressure, stage } => todo!(),
-                    WindowEvent::AxisMotion { device_id, axis, value } => todo!(),
-                    WindowEvent::Touch(_) => todo!(),
-                    WindowEvent::ScaleFactorChanged { scale_factor, new_inner_size } => todo!(),
-                    WindowEvent::ThemeChanged(_) => todo!(),
-                }
-            }
+            Event::WindowEvent { window_id, event } if window.id() == window_id => match event {
+                WindowEvent::CloseRequested => ModalEvent::ExitPressed,
+                _ => return None,
+                WindowEvent::Resized(_) => todo!(),
+                WindowEvent::Moved(_) => todo!(),
+                WindowEvent::Destroyed => todo!(),
+                WindowEvent::DroppedFile(_) => todo!(),
+                WindowEvent::HoveredFile(_) => todo!(),
+                WindowEvent::HoveredFileCancelled => todo!(),
+                WindowEvent::ReceivedCharacter(_) => todo!(),
+                WindowEvent::Focused(_) => todo!(),
+                WindowEvent::KeyboardInput {
+                    device_id,
+                    input,
+                    is_synthetic,
+                } => todo!(),
+                WindowEvent::ModifiersChanged(_) => todo!(),
+                WindowEvent::CursorMoved {
+                    device_id,
+                    position,
+                    modifiers,
+                } => todo!(),
+                WindowEvent::CursorEntered { device_id } => todo!(),
+                WindowEvent::CursorLeft { device_id } => todo!(),
+                WindowEvent::MouseWheel {
+                    device_id,
+                    delta,
+                    phase,
+                    modifiers,
+                } => todo!(),
+                WindowEvent::MouseInput {
+                    device_id,
+                    state,
+                    button,
+                    modifiers,
+                } => todo!(),
+                WindowEvent::TouchpadPressure {
+                    device_id,
+                    pressure,
+                    stage,
+                } => todo!(),
+                WindowEvent::AxisMotion {
+                    device_id,
+                    axis,
+                    value,
+                } => todo!(),
+                WindowEvent::Touch(_) => todo!(),
+                WindowEvent::ScaleFactorChanged {
+                    scale_factor,
+                    new_inner_size,
+                } => todo!(),
+                WindowEvent::ThemeChanged(_) => todo!(),
+            },
             _ => return None,
         })
     }
