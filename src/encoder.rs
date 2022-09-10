@@ -1,11 +1,9 @@
 //! Produce a stream of `Low` instructions that can be executed on a particular device.
-use core::num::{NonZeroU32, NonZeroU64};
+use core::num::NonZeroU64;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use crate::buffer::{
-    Block, BufferLayout, ByteLayout, Color, SampleBits, SampleParts, Texel, Transfer,
-};
+use crate::buffer::{BufferLayout, ByteLayout};
 use crate::command::Register;
 use crate::pool::Pool;
 use crate::program::{
@@ -62,6 +60,8 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     input_map: HashMap<Register, Texture>,
     /// Declare where we intend to write our outputs.
     output_map: HashMap<Register, Texture>,
+    /// Declare where we intend to render our outputs.
+    render_map: HashMap<Register, Texture>,
     /// The Bind Group layer Descriptor used in fragment shader, set=1.
     /// This is keyed by the number of descriptors for that layout.
     paint_group_layout: HashMap<usize, usize>,
@@ -309,7 +309,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     .insert(self.instruction_pointer, desc.clone());
                 self.textures += 1
             }
-            Low::TextureView(_) => self.texture_views += 1,
+            Low::TextureView(_) | Low::RenderView(_) => self.texture_views += 1,
             Low::RenderPipeline(_) => self.render_pipelines += 1,
             Low::BeginCommands => {
                 if self.is_in_command_encoder {
@@ -397,148 +397,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         texture: Texture,
     ) -> Result<ImageDescriptor, LaunchError> {
         let descriptor = &self.buffer_plan.texture[texture.0];
-
-        fn validate_size(layout: &ByteLayout) -> Option<(NonZeroU32, NonZeroU32)> {
-            Some((
-                NonZeroU32::new(layout.width)?,
-                NonZeroU32::new(layout.height)?,
-            ))
-        }
-
-        let size = validate_size(&descriptor.layout)
-            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-        let mut staging = None;
-
-        let format = match (&descriptor.texel, &descriptor.color) {
-            (
-                Texel {
-                    block: Block::Pixel,
-                    bits: SampleBits::UInt8x4,
-                    parts: SampleParts::RgbA,
-                },
-                Color::Rgb {
-                    transfer: Transfer::Srgb,
-                    ..
-                },
-            ) => wgpu::TextureFormat::Rgba8UnormSrgb,
-            (
-                Texel {
-                    block: Block::Pixel,
-                    bits: SampleBits::UInt8x4,
-                    parts: SampleParts::RgbA,
-                },
-                Color::Rgb {
-                    transfer: Transfer::Linear,
-                    ..
-                },
-            ) => wgpu::TextureFormat::Rgba8Unorm,
-            (
-                Texel {
-                    block: Block::Pixel,
-                    bits,
-                    parts,
-                },
-                Color::Rgb { transfer, .. },
-            )
-            | (
-                Texel {
-                    block: Block::Pixel,
-                    bits,
-                    parts,
-                },
-                Color::Scalars { transfer, .. },
-            ) => {
-                let parameter = shaders::stage::XyzParameter {
-                    transfer: shaders::stage::Transfer::Rgb(*transfer),
-                    bits: *bits,
-                    parts: *parts,
-                };
-
-                let result = parameter.linear_format();
-                let stage_kind = parameter
-                    .stage_kind()
-                    // Unsupported format.
-                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-
-                staging = Some(StagingDescriptor {
-                    stage_kind,
-                    parameter,
-                });
-
-                result
-            }
-            (
-                Texel {
-                    block: Block::Pixel,
-                    bits,
-                    parts: parts @ (SampleParts::LchA | SampleParts::LabA),
-                },
-                Color::Oklab,
-            ) => {
-                let parameter = shaders::stage::XyzParameter {
-                    transfer: match *parts {
-                        SampleParts::LchA => shaders::stage::Transfer::LabLch,
-                        SampleParts::LabA => shaders::stage::Transfer::Rgb(Transfer::Linear),
-                        _ => return Err(LaunchError::InternalCommandError(line!())),
-                    },
-                    parts: SampleParts::LchA,
-                    bits: *bits,
-                };
-
-                // FIXME: duplicate code.
-                let result = parameter.linear_format();
-                let stage_kind = parameter
-                    .stage_kind()
-                    // Unsupported format.
-                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-
-                staging = Some(StagingDescriptor {
-                    stage_kind,
-                    parameter,
-                });
-
-                result
-            }
-            // FIXME: very, very duplicate code.
-            (
-                Texel {
-                    block: Block::Pixel,
-                    bits,
-                    parts: parts @ (SampleParts::LchA | SampleParts::LabA),
-                },
-                Color::SrLab2 { .. },
-            ) => {
-                let parameter = shaders::stage::XyzParameter {
-                    transfer: match *parts {
-                        SampleParts::LchA => shaders::stage::Transfer::LabLch,
-                        SampleParts::LabA => shaders::stage::Transfer::Rgb(Transfer::Linear),
-                        _ => return Err(LaunchError::InternalCommandError(line!())),
-                    },
-                    parts: SampleParts::LchA,
-                    bits: *bits,
-                };
-
-                let result = parameter.linear_format();
-                let stage_kind = parameter
-                    .stage_kind()
-                    // Unsupported format.
-                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-
-                staging = Some(StagingDescriptor {
-                    stage_kind,
-                    parameter,
-                });
-
-                result
-            }
-            _ => return Err(LaunchError::InternalCommandError(line!())),
-        };
-
-        Ok(ImageDescriptor {
-            format,
-            staging,
-            size,
-        })
+        ImageDescriptor::new(descriptor)
     }
 
     pub(crate) fn push_operand(&mut self, texture: Texture) -> Result<(), LaunchError> {
@@ -679,14 +538,13 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
             let device = {
                 let texture = self.textures;
-                // eprintln!("Storage Texture {:?} {:?}", texture, &staging);
                 self.push(Low::Texture(staging.clone()))?;
                 DeviceTexture(texture)
             };
 
             let fallback = {
                 let texture = self.textures;
-                // eprintln!("Fallback Texture {:?} {:?}", texture, &staging);
+                // eprintln!("Fallback Texture {:?} {:?}", device, &staging);
                 self.push(Low::Texture(TextureDescriptor {
                     usage: TextureUsage::Transient,
                     size: staging.size,
@@ -861,7 +719,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// May be a no-op, see reverse operation.
     pub(crate) fn copy_texture_to_staging(&mut self, idx: Texture) -> Result<(), LaunchError> {
         if let Some(staging) = self.staging_map.get(&idx) {
-            let texture = staging.temporary_attachment_buffer_for_encoding_remove_if_possible;
+            let texture = staging.device;
 
             // eprintln!("{} {:?}", idx.0, staging);
             // Try to use the cached version of this pipeline.
@@ -889,7 +747,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 ops: wgpu::Operations {
                     // TODO: we could let choose a replacement color..
                     load: wgpu::LoadOp::Clear(wgpu::Color::RED),
-                    store: false,
+                    store: true,
                 },
             };
 
@@ -984,9 +842,85 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(())
     }
 
-    /// FIXME: we might want to make this a detail of encoder.
-    /// Since this would make it easier to change the details of `Low::TextureView`—adding
-    /// additional parameter such format conversion, aspect, mip mapping, w/e.
+    pub(crate) fn render_staging_to_output(
+        &mut self,
+        idx: Register,
+        dst: Register,
+    ) -> Result<(), LaunchError> {
+        let regmap = self.allocate_register(idx)?.clone();
+        let target_image = self.ingest_image_data(dst)?;
+        self.render_map.insert(dst, target_image);
+
+        // FIXME: have the caller provide this directly?
+        let dst_format = {
+            let ImageBufferAssignment {
+                buffer: _,
+                texture: reg_texture,
+            } = self.buffer_plan.get(dst)?;
+            let descriptor = &self.buffer_plan.texture[reg_texture.0];
+            let descriptor = ImageDescriptor::new(descriptor)?;
+            descriptor.format
+        };
+
+        self.copy_staging_to_texture(regmap.reg_texture)?;
+        self.operands.push(regmap.reg_texture);
+        let pipeline = {
+            let shader = shaders::FragmentShader::PaintOnTop(shaders::PaintOnTopKind::Copy);
+
+            let vertex = self.vertex_shader(
+                Some(shaders::VertexShader::Noop),
+                shader_include_to_spirv(shaders::VERT_NOOP),
+            )?;
+
+            let shader = shader.shader();
+            let key = shader.key();
+            let spirv = shader.spirv_source();
+
+            let fragment = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
+            let fragment_bind_data = shader
+                .binary_data(&mut self.binary_data)
+                .map(|data| BufferBind::Planned { data })
+                .unwrap_or(BufferBind::None);
+
+            let arguments = shader.num_args();
+            self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor {
+                pipeline_target: PipelineTarget::PreComputedGroup {
+                    target_format: dst_format,
+                },
+                vertex_bind_data: BufferBind::Set {
+                    data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
+                },
+                fragment_texture: TextureBind::Textures(arguments as usize),
+                fragment_bind_data,
+                vertex: ShaderBind::ShaderMain(vertex),
+                fragment: ShaderBind::ShaderMain(fragment),
+            })?
+        };
+
+        let texture_view = self.render_view(dst)?;
+        let attachment = ColorAttachmentDescriptor {
+            texture_view,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
+                store: true,
+            },
+        };
+
+        self.push(Low::BeginCommands)?;
+        self.push(Low::BeginRenderPass(RenderPassDescriptor {
+            color_attachments: vec![attachment],
+            depth_stencil: None,
+        }))?;
+        self.render(pipeline)?;
+        self.push(Low::EndRenderPass)?;
+        self.push(Low::EndCommands)?;
+
+        self.push(Low::RunTopCommand)?;
+
+        Ok(())
+    }
+
+    /// Instruct to make target view of a texture.
     pub(crate) fn texture_view(&mut self, dst: Texture) -> Result<usize, LaunchError> {
         let texture = self
             .texture_map
@@ -1001,6 +935,13 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.push(Low::TextureView(descriptor))?;
         // eprintln!("Texture {:?} (Device {:?}) in View {:?}", dst, texture, id);
 
+        Ok(id)
+    }
+
+    /// Instruct to make a target view of a renderable output.
+    pub(crate) fn render_view(&mut self, dst: Register) -> Result<usize, LaunchError> {
+        let id = self.texture_views;
+        self.push(Low::RenderView(dst))?;
         Ok(id)
     }
 
@@ -1115,24 +1056,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                         sample_type: wgpu::TextureSampleType::Uint,
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
-                    },
-                    count: None,
-                });
-            }
-
-            for (num, kind) in StageKind::ALL.iter().enumerate() {
-                let i = num as u32 + 16;
-                if i != binding {
-                    continue;
-                }
-
-                entries.push(wgpu::BindGroupLayoutEntry {
-                    binding: i,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: kind.texture_format(),
-                        view_dimension: wgpu::TextureViewDimension::D2,
                     },
                     count: None,
                 });
@@ -1355,7 +1278,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 fragment_module: fragment,
                 // Careful of `RenderPipelineKey` if changed.
                 targets: vec![wgpu::ColorTargetState {
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                     format,
                 }],
@@ -1397,7 +1320,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let sampler = self.make_sampler(SamplerDescriptor {
             address_mode: wgpu::AddressMode::default(),
-            border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+            border_color: None,
             resize_filter: wgpu::FilterMode::Nearest,
         });
 
@@ -1427,6 +1350,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // The non-staging texture which we bind to the sampler.
         view: Option<Texture>,
     ) -> Result<usize, LaunchError> {
+        // FIXME: not always an attachment.
         let texture = self
             .staging_map
             .get(&texture)
@@ -1441,12 +1365,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         // For encoding we have two extra bindings, sampler and in_texture.
         if let Some(view) = view {
-            sparse = vec![(binding, BindingResource::TextureView(image_id))];
+            if binding < 16 {
+                sparse = vec![(binding, BindingResource::TextureView(image_id))];
+            } else {
+                sparse = vec![];
+            }
 
             // FIXME: unnecessary duplication.
             let sampler = self.make_sampler(SamplerDescriptor {
                 address_mode: wgpu::AddressMode::default(),
-                border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+                border_color: None,
                 resize_filter: wgpu::FilterMode::Nearest,
             });
 
@@ -1463,11 +1391,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             sparse.push((32, BindingResource::TextureView(view_id)));
             sparse.push((33, BindingResource::Sampler(sampler)));
         } else {
-            sparse = vec![(binding, BindingResource::TextureView(image_id))];
+            if binding < 16 {
+                sparse = vec![(binding, BindingResource::TextureView(image_id))];
+            } else {
+                sparse = vec![];
+            }
 
             let sampler = self.make_sampler(SamplerDescriptor {
                 address_mode: wgpu::AddressMode::default(),
-                border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
+                border_color: None,
                 resize_filter: wgpu::FilterMode::Nearest,
             });
 
@@ -1653,7 +1585,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let fragment = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
 
                 let buffer: [[f32; 2]; 8];
-                // FIXME: there seems to be two floats padding after each vec2.
                 let min_u = (selection.x as f32) / (tex_width.get() as f32);
                 let max_u = (selection.max_x as f32) / (tex_width.get() as f32);
                 let min_v = (selection.y as f32) / (tex_height.get() as f32);
@@ -1782,7 +1713,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
                     pipeline_target: PipelineTarget::PreComputedGroup {
-                        target_format: parameter.linear_format(),
+                        target_format: if let Some(stage) = parameter.stage_kind() {
+                            stage.texture_format()
+                        } else {
+                            parameter.linear_format()
+                        }
                     },
                     vertex_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&Self::FULL_VERTEX_BUFFER[..]),
@@ -1821,6 +1756,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         for (&register, texture) in &self.output_map {
             io_map.outputs.insert(register, texture.0);
+        }
+
+        for (&register, texture) in &self.render_map {
+            io_map.renders.insert(register, texture.0);
         }
 
         io_map

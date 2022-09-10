@@ -4,7 +4,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::buffer::{ByteLayout, Descriptor};
+use crate::buffer::{
+    Block, ByteLayout, Color, Descriptor, SampleBits, SampleParts, Texel, Transfer,
+};
 use crate::color_matrix::RowMatrix;
 use crate::command::{High, Rectangle, Register, Target};
 use crate::encoder::{Encoder, RegisterMap};
@@ -220,9 +222,11 @@ pub(crate) enum Low {
     Shader(ShaderDescriptor),
     /// Create (and store) a new texture .
     Texture(TextureDescriptor),
-    /// Create (and store) a view on a texture .
+    /// Create (and store) a view on a texture.
     /// Due to internal restrictions this isn't really helpful.
     TextureView(TextureViewDescriptor),
+    /// Create (and store) a view on a render output.
+    RenderView(Register),
     /// Create (and store) a render pipeline with specified parameters.
     RenderPipeline(RenderPipelineDescriptor),
 
@@ -522,6 +526,172 @@ pub(crate) struct StagingDescriptor {
 }
 
 impl ImageDescriptor {
+    pub(crate) fn new(descriptor: &Descriptor) -> Result<Self, LaunchError> {
+        fn validate_size(layout: &ByteLayout) -> Option<(NonZeroU32, NonZeroU32)> {
+            Some((
+                NonZeroU32::new(layout.width)?,
+                NonZeroU32::new(layout.height)?,
+            ))
+        }
+
+        let size = validate_size(&descriptor.layout)
+            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+        let mut staging = None;
+
+        let format = match (&descriptor.texel, &descriptor.color) {
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits: SampleBits::UInt8x4,
+                    parts: SampleParts::RgbA,
+                },
+                Color::Rgb {
+                    transfer: Transfer::Srgb,
+                    ..
+                },
+            ) => wgpu::TextureFormat::Rgba8UnormSrgb,
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits: SampleBits::UInt8x4,
+                    parts: SampleParts::BgrA,
+                },
+                Color::Rgb {
+                    transfer: Transfer::Srgb,
+                    ..
+                },
+            ) => wgpu::TextureFormat::Bgra8UnormSrgb,
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits: SampleBits::UInt8x4,
+                    parts: SampleParts::RgbA,
+                },
+                Color::Rgb {
+                    transfer: Transfer::Linear,
+                    ..
+                },
+            ) => wgpu::TextureFormat::Rgba8Unorm,
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits: SampleBits::UInt8x4,
+                    parts: SampleParts::BgrA,
+                },
+                Color::Rgb {
+                    transfer: Transfer::Linear,
+                    ..
+                },
+            ) => wgpu::TextureFormat::Bgra8Unorm,
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits,
+                    parts,
+                },
+                Color::Rgb { transfer, .. },
+            )
+            | (
+                Texel {
+                    block: Block::Pixel,
+                    bits,
+                    parts,
+                },
+                Color::Scalars { transfer, .. },
+            ) => {
+                let parameter = shaders::stage::XyzParameter {
+                    transfer: shaders::stage::Transfer::Rgb(*transfer),
+                    bits: *bits,
+                    parts: *parts,
+                };
+
+                let result = parameter.linear_format();
+                let stage_kind = parameter
+                    .stage_kind()
+                    // Unsupported format.
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                staging = Some(StagingDescriptor {
+                    stage_kind,
+                    parameter,
+                });
+
+                result
+            }
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits,
+                    parts: parts @ (SampleParts::LchA | SampleParts::LabA),
+                },
+                Color::Oklab,
+            ) => {
+                let parameter = shaders::stage::XyzParameter {
+                    transfer: match *parts {
+                        SampleParts::LchA => shaders::stage::Transfer::LabLch,
+                        SampleParts::LabA => shaders::stage::Transfer::Rgb(Transfer::Linear),
+                        _ => return Err(LaunchError::InternalCommandError(line!())),
+                    },
+                    parts: SampleParts::LchA,
+                    bits: *bits,
+                };
+
+                // FIXME: duplicate code.
+                let result = parameter.linear_format();
+                let stage_kind = parameter
+                    .stage_kind()
+                    // Unsupported format.
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                staging = Some(StagingDescriptor {
+                    stage_kind,
+                    parameter,
+                });
+
+                result
+            }
+            // FIXME: very, very duplicate code.
+            (
+                Texel {
+                    block: Block::Pixel,
+                    bits,
+                    parts: parts @ (SampleParts::LchA | SampleParts::LabA),
+                },
+                Color::SrLab2 { .. },
+            ) => {
+                let parameter = shaders::stage::XyzParameter {
+                    transfer: match *parts {
+                        SampleParts::LchA => shaders::stage::Transfer::LabLch,
+                        SampleParts::LabA => shaders::stage::Transfer::Rgb(Transfer::Linear),
+                        _ => return Err(LaunchError::InternalCommandError(line!())),
+                    },
+                    parts: SampleParts::LchA,
+                    bits: *bits,
+                };
+
+                let result = parameter.linear_format();
+                let stage_kind = parameter
+                    .stage_kind()
+                    // Unsupported format.
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                staging = Some(StagingDescriptor {
+                    stage_kind,
+                    parameter,
+                });
+
+                result
+            }
+            _ => return Err(LaunchError::InternalCommandError(line!())),
+        };
+
+        Ok(ImageDescriptor {
+            format,
+            staging,
+            size,
+        })
+    }
+
     pub(crate) fn to_texture(&self) -> TextureDescriptor {
         TextureDescriptor {
             size: self.size,
@@ -703,7 +873,7 @@ impl Program {
         options: &wgpu::RequestAdapterOptions,
     ) -> Result<wgpu::Adapter, MismatchError> {
         let request = instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: wgpu::PowerPreference::LowPower,
             ..*options
         });
 
@@ -757,24 +927,34 @@ impl Program {
             | wgpu::TextureUsages::STORAGE_BINDING
             | wgpu::TextureUsages::RENDER_ATTACHMENT;
 
+        log::info!("Searching for fitting adapter");
+        let mut adapters_search = 0;
         while let Some(adapter) = from.next() {
+            log::info!("Considering {:?}", adapter.get_info());
+            adapters_search += 1;
             // FIXME: check limits.
             // FIXME: collect required texture formats from `self.textures`
             let basic_format =
                 adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8UnormSrgb);
             if !basic_format.allowed_usages.contains(ALL_TEXTURE_USAGE) {
                 // eprintln!("No rgba8 support {:?}", basic_format.allowed_usages);
+                log::info!("Missing basic format {:?}", basic_format);
                 continue;
             }
 
             let storage_format = adapter.get_texture_format_features(wgpu::TextureFormat::R32Uint);
             if !storage_format.allowed_usages.contains(STAGE_TEXTURE_USAGE) {
                 // eprintln!("No r32uint storage support {:?}", basic_format.allowed_usages);
+                log::info!("Missing basic format {:?}", storage_format);
                 continue;
             }
 
             from.for_each(drop);
             return Ok(adapter);
+        }
+
+        if adapters_search == 0 {
+            log::warn!("No adapters considered!");
         }
 
         Err(MismatchError {})
@@ -793,7 +973,26 @@ impl Program {
             } else {
                 wgpu::Features::SPIRV_SHADER_PASSTHROUGH
             },
-            limits: wgpu::Limits::default(),
+            // Well, technically... We need the texture format.
+            // But should be able to workaround most other restrictions.
+            // FIXME: make the use of this configurable.
+            limits: wgpu::Limits::downlevel_webgl2_defaults(),
+            /*
+            wgpu::Limits {
+                // We can't afform downlevel_webgl2_defaults due to using buffer textures et.al.
+                // But we don't *need* compute at all.
+                //
+                max_storage_buffer_binding_size: 0,
+                max_storage_textures_per_shader_stage: 0,
+                // No compute workload required.
+                max_compute_workgroup_storage_size: 0,
+                max_compute_invocations_per_workgroup: 0,
+                max_compute_workgroup_size_x: 0,
+                max_compute_workgroup_size_y: 0,
+                max_compute_workgroup_size_z: 0,
+                max_compute_workgroups_per_dimension: 0,
+                .. wgpu::Limits::downlevel_defaults()
+            }, */
         }
     }
 
@@ -893,6 +1092,10 @@ impl Program {
                     // one actually chosen for this texture.
                     encoder.copy_staging_to_buffer(src)?;
                     encoder.copy_buffer_to_output(src, dst)?;
+                }
+                &High::Render { src, dst } => {
+                    // eprintln!("Render {:?} to {:?}", src, dst);
+                    encoder.render_staging_to_output(src, dst)?;
                 }
                 &High::PushOperand(texture) => {
                     encoder.copy_staging_to_texture(texture)?;

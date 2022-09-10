@@ -3,7 +3,7 @@ use crate::winit::{Window, WindowSurface, WindowedSurface};
 use stealth_paint::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
 use stealth_paint::command;
 use stealth_paint::pool::{GpuKey, Pool, PoolKey};
-use stealth_paint::program::{Capabilities, Program};
+use stealth_paint::program::{Capabilities, CompileError, LaunchError, Program};
 use stealth_paint::run::Executable;
 use wgpu::{Adapter, Instance, SurfaceConfiguration};
 
@@ -29,6 +29,11 @@ pub enum PresentationError {
     GpuDeviceLost,
 }
 
+#[derive(Debug)]
+struct NormalizingError {
+    fail: String,
+}
+
 /// The pool entry of our surface declarator.
 struct PoolEntry {
     gpu: Option<GpuKey>,
@@ -52,7 +57,7 @@ struct NormalizingExe {
 
 impl Surface {
     pub fn new(window: &Window) -> Self {
-        const ANY: wgpu::Backends = wgpu::Backends::VULKAN;
+        const ANY: wgpu::Backends = wgpu::Backends::all();
 
         let instance = wgpu::Instance::new(ANY);
         let inner = window.create_surface(&instance);
@@ -72,14 +77,17 @@ impl Surface {
         let (width, height) = window.inner_size();
         let (color, texel);
         let config = SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
+            //  FIXME: COPY_DST is not universal. Should fix `run.rs` so that RENDER_ATTACHMENT suffices.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: match inner.get_supported_formats(&adapter).get(0) {
                 None => {
+                    log::warn!("No supported surface formats …");
                     color = Color::SRGB;
                     texel = Texel::new_u8(SampleParts::RgbA);
-                    wgpu::TextureFormat::Rgba8UnormSrgb
+                    wgpu::TextureFormat::Rgba8Unorm
                 }
                 Some(wgpu::TextureFormat::Rgba8Unorm) => {
+                    log::warn!("Using format {:?}", wgpu::TextureFormat::Rgba8Unorm);
                     color = match Color::SRGB {
                         Color::Rgb {
                             luminance,
@@ -92,18 +100,22 @@ impl Surface {
                             whitepoint,
                             transfer: Transfer::Linear,
                         },
-                        _ => unreachable!(),
+                        _ => unreachable!("That's not the right color"),
                     };
 
                     texel = Texel::new_u8(SampleParts::RgbA);
-                    wgpu::TextureFormat::Rgba8UnormSrgb
+                    wgpu::TextureFormat::Rgba8Unorm
                 }
                 Some(wgpu::TextureFormat::Rgba8UnormSrgb) => {
+                    log::warn!("Using format {:?}", wgpu::TextureFormat::Rgba8UnormSrgb);
+
                     color = Color::SRGB;
                     texel = Texel::new_u8(SampleParts::RgbA);
                     wgpu::TextureFormat::Rgba8UnormSrgb
                 }
                 Some(wgpu::TextureFormat::Bgra8UnormSrgb) | _ => {
+                    log::warn!("Using format {:?}", wgpu::TextureFormat::Bgra8UnormSrgb);
+
                     color = Color::SRGB;
                     texel = Texel::new_u8(SampleParts::BgrA);
                     wgpu::TextureFormat::Bgra8UnormSrgb
@@ -111,7 +123,7 @@ impl Surface {
             },
             width,
             height,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: wgpu::PresentMode::AutoVsync,
         };
 
         let descriptor = Descriptor {
@@ -140,7 +152,7 @@ impl Surface {
         let surface = pool.declare(that.descriptor());
         that.entry.key = Some(surface.key());
         that.pool = pool;
-        that.reconfigure_surface();
+        that.reconfigure_surface().unwrap();
 
         that
     }
@@ -207,6 +219,7 @@ impl Surface {
             }
         };
 
+        #[cfg(not(target_arch = "wasm32"))]
         let start = std::time::Instant::now();
 
         let present_desc = self.pool.entry(present).unwrap().descriptor();
@@ -233,15 +246,18 @@ impl Surface {
             .from_pool(&mut self.pool)
             .expect("Valid pool for our own executable");
 
+        #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         log::warn!("Time setup {:?}", end.saturating_duration_since(start));
+        #[cfg(not(target_arch = "wasm32"))]
         let start = end;
 
         // Bind the input.
         run.bind(in_reg, present)
             .expect("Valid binding for our executable input");
         // Bind the output.
-        run.bind_output(out_reg, surface)
+        run.bind_render(out_reg, surface)
             .expect("Valid binding for our executable output");
         log::warn!("Sub- optimality: {:?}", surface_tex.suboptimal);
         log::warn!("{:?}", run.recover_buffers());
@@ -251,8 +267,11 @@ impl Surface {
             .launch(run)
             .expect("Valid binding to start our executable");
 
+        #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         log::warn!("Time launch {:?}", end.saturating_duration_since(start));
+        #[cfg(not(target_arch = "wasm32"))]
         let start = end;
 
         // Ensure our cache does not grow infinitely.
@@ -266,8 +285,11 @@ impl Surface {
                 .expect("Valid binding to block on our execution");
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         log::warn!("Time run {:?}", end.saturating_duration_since(start));
+        #[cfg(not(target_arch = "wasm32"))]
         let start = end;
 
         log::warn!("{:?}", running.resources_used());
@@ -276,7 +298,7 @@ impl Surface {
             .input(in_reg)
             .expect("Valid to retire input of our executable");
         retire
-            .output(out_reg)
+            .render(out_reg)
             .expect("Valid to retire outputof our executable");
 
         retire.prune();
@@ -288,8 +310,11 @@ impl Surface {
             .unwrap()
             .replace_texture_unguarded(&mut surface_tex.texture, gpu);
 
+        #[cfg(not(target_arch = "wasm32"))]
         let end = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         log::warn!("Time finish {:?}", end.saturating_duration_since(start));
+        #[cfg(not(target_arch = "wasm32"))]
         let start = end;
     }
 
@@ -338,6 +363,7 @@ impl Surface {
             }
         };
 
+        log::info!("Reconfigured surface {:?}", &self.config);
         self.inner.surface().configure(dev, &self.config);
 
         Ok(())
@@ -351,30 +377,63 @@ impl WindowedSurface for Surface {
 impl Runtimes {
     pub(crate) fn get_or_insert_normalizing_exe(
         &mut self,
+        // The descriptor of the to-render output.
         input: Descriptor,
+        // The surface descriptor.
         surface: Descriptor,
+        // Capabilities to use for conversion.
         caps: Capabilities,
-    ) -> Option<&mut NormalizingExe> {
+    ) -> Result<&mut NormalizingExe, NormalizingError> {
         if self.normalizing.is_some() {
             // FIXME: Polonius NLL.
-            return self.normalizing.as_mut();
+            return Ok(self.normalizing.as_mut().unwrap());
         }
 
         let mut cmd = command::CommandBuffer::default();
-        let in_reg = cmd.input(input).ok()?;
-        let resized = cmd.resize(in_reg, surface.size()).ok()?;
-        let converted = cmd
-            .color_convert(resized, surface.color.clone(), surface.texel.clone())
-            .ok()?;
-        let (out_reg, _desc) = cmd.output(converted).ok()?;
+        let in_reg = cmd.input(input)?;
+        let resized = cmd.resize(in_reg, surface.size())?;
+        let converted = cmd.color_convert(resized, surface.color.clone(), surface.texel.clone())?;
+        let (out_reg, _desc) = cmd.render(converted)?;
 
-        let program = cmd.compile().ok()?;
-        let exe = program.lower_to(caps).ok()?;
+        let program = cmd.compile()?;
+        let exe = program.lower_to(caps)?;
 
-        Some(self.normalizing.get_or_insert(NormalizingExe {
+        log::info!("{}", exe.dot());
+
+        Ok(self.normalizing.get_or_insert(NormalizingExe {
             exe,
             in_reg,
             out_reg,
         }))
+    }
+}
+
+impl From<CompileError> for NormalizingError {
+    #[track_caller]
+    fn from(err: CompileError) -> Self {
+        let location = core::panic::Location::caller();
+        NormalizingError {
+            fail: format!("At {:?}: {:?}", location, err),
+        }
+    }
+}
+
+impl From<command::CommandError> for NormalizingError {
+    #[track_caller]
+    fn from(err: command::CommandError) -> Self {
+        let location = core::panic::Location::caller();
+        NormalizingError {
+            fail: format!("At {:?}: {:?}", location, err),
+        }
+    }
+}
+
+impl From<LaunchError> for NormalizingError {
+    #[track_caller]
+    fn from(err: LaunchError) -> Self {
+        let location = core::panic::Location::caller();
+        NormalizingError {
+            fail: format!("At {:?}: {:?}", location, err),
+        }
     }
 }

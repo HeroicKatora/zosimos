@@ -8,6 +8,12 @@
  * documentation which doesn't mention this detail at all apart from an internal
  * method.
  */
+#if (defined(DECODE_RGBA32UI_AS_MAIN) || defined(DECODE_RGBA16UI_AS_MAIN) || defined(DECODE_R32UI_AS_MAIN) || defined(DECODE_R16UI_AS_MAIN) || defined(DECODE_R8UI_AS_MAIN))
+#define STAGE_DECODE
+#else
+#define STAGE_ENCODE
+#endif
+
 #ifndef DECODE_R8UI_AS_MAIN
 #define DECODE_R8UI_AS_MAIN decode_r8ui
 #endif
@@ -64,7 +70,19 @@
  * with multiple entry points.
  */
 layout (location = 0) in vec2 uv;
+/* Hack on hack: we define two output colors (float output for decode, int for encode)
+ * Each entry point writes to a fictional variable that is either a local or
+ * the true shader output.
+ */
+#ifdef STAGE_DECODE
 layout (location = 0) out vec4 f_color;
+#define decode_color f_color
+#define encode_color fake_local_noop
+#else
+layout (location = 0) out uvec4 f_color;
+#define decode_color fake_local_noop
+#define encode_color f_color
+#endif
 
 /* Not all those bindings will be bound!
  */
@@ -73,14 +91,6 @@ layout (set = 1, binding = 1) uniform utexture2D image_r16ui;
 layout (set = 1, binding = 2) uniform utexture2D image_r32ui;
 layout (set = 1, binding = 3) uniform utexture2D image_rgba16ui;
 layout (set = 1, binding = 4) uniform utexture2D image_rgba32ui;
-
-/* Output images. Same as input but writeonly instead.
- */
-layout (set = 1, binding = 16, r32ui) uniform restrict writeonly uimage2D oimage_r8ui;
-layout (set = 1, binding = 17, r32ui) uniform restrict writeonly uimage2D oimage_r16ui;
-layout (set = 1, binding = 18, r32ui) uniform restrict writeonly uimage2D oimage_r32ui;
-layout (set = 1, binding = 19, rgba16ui) uniform restrict writeonly uimage2D oimage_rgba16ui;
-layout (set = 1, binding = 20, rgba32ui) uniform restrict writeonly uimage2D oimage_rgba32ui;
 
 /** For encoding, this is the input frame buffer.
  */
@@ -435,7 +445,8 @@ void DECODE_R8UI_AS_MAIN() {
   vec4 electrical = parts_normalize(components, get_sample_parts());
   vec4 primaries = parts_untransfer(electrical, get_transfer());
 
-  f_color = primaries;
+  vec4 fake_local_noop = vec4(0);
+  decode_color = primaries;
 }
 
 void ENCODE_R8UI_AS_MAIN() {
@@ -453,7 +464,8 @@ void ENCODE_R8UI_AS_MAIN() {
     num |= (texelNum & 0xff) << (8*i);
   }
 
-  imageStore(oimage_r8ui, ivec2(gl_FragCoord), uvec4(num));
+  uvec4 fake_local_noop = uvec4(0);
+  encode_color = uvec4(num);
 }
 
 void DECODE_R16UI_AS_MAIN() {
@@ -465,7 +477,8 @@ void DECODE_R16UI_AS_MAIN() {
   vec4 electrical = parts_normalize(components, get_sample_parts());
   vec4 primaries = parts_untransfer(electrical, get_transfer());
 
-  f_color = primaries;
+  vec4 fake_local_noop = vec4(0);
+  decode_color = primaries;
 }
 
 void ENCODE_R16UI_AS_MAIN() {
@@ -483,7 +496,8 @@ void ENCODE_R16UI_AS_MAIN() {
     num |= (texelNum & 0xffff) << (16*i);
   }
 
-  imageStore(oimage_r16ui, ivec2(gl_FragCoord), uvec4(num));
+  uvec4 fake_local_noop = uvec4(0);
+  encode_color = uvec4(num);
 }
 
 void DECODE_R32UI_AS_MAIN() {
@@ -494,7 +508,8 @@ void DECODE_R32UI_AS_MAIN() {
   vec4 electrical = parts_normalize(components, get_sample_parts());
   vec4 primaries = parts_untransfer(electrical, get_transfer());
 
-  f_color = primaries;
+  vec4 fake_local_noop = vec4(0);
+  decode_color = primaries;
 }
 
 void ENCODE_R32UI_AS_MAIN() {
@@ -505,7 +520,8 @@ void ENCODE_R32UI_AS_MAIN() {
   vec4 components = parts_denormalize(electrical, get_sample_parts());
 
   uint num = mux_uint(clamp(components, 0.0, 1.0), get_sample_bits());
-  imageStore(oimage_r32ui, ivec2(gl_FragCoord), uvec4(num));
+  uvec4 fake_local_noop = uvec4(0);
+  encode_color = uvec4(num);
 }
 
 // The bit decoding used by 8bit, 16bit, 32bit staging.
