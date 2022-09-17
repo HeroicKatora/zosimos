@@ -4,7 +4,7 @@ use stealth_paint::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
 use stealth_paint::command;
 use stealth_paint::pool::{GpuKey, Pool, PoolKey};
 use stealth_paint::program::{Capabilities, CompileError, LaunchError, Program};
-use stealth_paint::run::Executable;
+use stealth_paint::run::{Executable, StepLimits};
 use wgpu::{Adapter, Instance, SurfaceConfiguration};
 
 pub struct Surface {
@@ -278,8 +278,9 @@ impl Surface {
         self.pool.clear_cache();
 
         while running.is_running() {
+            let limits = StepLimits::new().with_steps(usize::MAX);
             let mut step = running
-                .step()
+                .step_to(limits)
                 .expect("Valid binding to start our executable");
             step.block_on()
                 .expect("Valid binding to block on our execution");

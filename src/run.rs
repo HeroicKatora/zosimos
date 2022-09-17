@@ -120,6 +120,10 @@ pub struct ResourcesUsed {
     pipelines_reused: u64,
 }
 
+pub struct StepLimits {
+    instructions: usize,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Frame {
     // Used through Debug
@@ -1172,12 +1176,18 @@ impl Execution {
 
     /// Check if the machine is still running.
     pub fn is_running(&self) -> bool {
-        self.host.machine.instruction_pointer < self.host.machine.instructions.len()
+        self.host.machine.is_running()
     }
 
-    /// FIXME: a way to pass a `&wgpu::SurfaceTexture` as output?
-    /// Otherwise, have to make an extra copy call in the pool.
+    /// Do a single step of the program.
+    ///
+    /// Realize that this can be expensive due to the extra synchronization.
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
+        self.step_to(StepLimits { instructions: 1 })
+    }
+
+    /// Do a number of limited steps.
+    pub fn step_to(&mut self, limits: StepLimits) -> Result<SyncPoint<'_>, StepError> {
         let instruction_pointer = self.host.machine.instruction_pointer;
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -1196,14 +1206,27 @@ impl Execution {
             host,
             cache,
         } = self;
+
         let async_step = async move {
-            match host.step_inner(cache, gpu).await {
-                Err(mut error) => {
-                    // Add tracing information..
-                    error.instruction_pointer = instruction_pointer;
-                    Err(error)
+            let mut limits = limits;
+
+            loop {
+                match host.step_inner(cache, gpu, &mut limits).await {
+                    Err(mut error) => {
+                        // Add tracing information..
+                        error.instruction_pointer = instruction_pointer;
+                        return Err(error);
+                    }
+                    Ok(()) => {}
                 }
-                other => other,
+
+                if limits.is_exhausted() {
+                    return Ok(());
+                }
+
+                if !host.machine.is_running() {
+                    return Ok(());
+                }
             }
         };
 
@@ -1254,7 +1277,12 @@ impl Execution {
 }
 
 impl Host {
-    async fn step_inner(&mut self, cache: &mut Cache, gpu: impl WithGpu) -> Result<(), StepError> {
+    async fn step_inner(
+        &mut self,
+        cache: &mut Cache,
+        gpu: impl WithGpu,
+        limits: &mut StepLimits,
+    ) -> Result<(), StepError> {
         struct DumpFrame<'stack> {
             stack: Option<&'stack mut Vec<Frame>>,
         }
@@ -1290,6 +1318,8 @@ impl Host {
                 return Ok(());
             }
         }
+
+        limits.instructions = limits.instructions.saturating_sub(1);
 
         match self.machine.next_instruction()? {
             Low::BindGroupLayout(desc) => {
@@ -2227,6 +2257,10 @@ impl Machine {
         }
     }
 
+    fn is_running(&self) -> bool {
+        self.instruction_pointer < self.instructions.len()
+    }
+
     fn next_instruction(&mut self) -> Result<&Low, StepError> {
         let instruction = self
             .instructions
@@ -2578,6 +2612,23 @@ impl Retire<'_> {
     pub fn finish_by_discarding(self) {
         // Yes, we want to drop everything.
         drop(self);
+    }
+}
+
+impl StepLimits {
+    pub fn new() -> Self {
+        StepLimits {
+            instructions: 1,
+        }
+    }
+
+    pub fn with_steps(mut self, instructions: usize) -> Self {
+        self.instructions = instructions;
+        self
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.instructions == 0
     }
 }
 
