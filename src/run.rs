@@ -98,6 +98,13 @@ pub(crate) struct Host {
     pub(crate) info: Arc<ProgramInfo>,
     pub(crate) debug_stack: Vec<Frame>,
     pub(crate) usage: ResourcesUsed,
+
+    /// Submits inserted by the execution.
+    /// FIXME: really, we should not have these. The encoder should somehow plan for the
+    /// eventuality of IO with GPU buffers. In particular we can delay the effect of texturing
+    /// until such scheduling happens as it is GPU synchronous instead of host-synchronous, when we
+    /// need not map a buffer.
+    pub(crate) delayed_submits: usize,
 }
 
 #[derive(Default)]
@@ -888,6 +895,7 @@ impl Executable {
                 info: self.info.clone(),
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
+                delayed_submits: 0,
             },
             cache: env.cache,
         })
@@ -909,6 +917,7 @@ impl Executable {
                 info: self.info.clone(),
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
+                delayed_submits: 0,
             },
             cache: env.cache,
         })
@@ -1169,6 +1178,7 @@ impl Execution {
                 info: init.info,
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
+                delayed_submits: 0,
             },
             cache: Cache::default(),
         }
@@ -1597,7 +1607,7 @@ impl Host {
                     Ok(())
                 }
             },
-            &Low::RunTopCommand => {
+            &Low::RunTopCommand if self.delayed_submits == 0 => {
                 let command = self
                     .descriptors
                     .command_buffers
@@ -1606,22 +1616,39 @@ impl Host {
                 gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
                 Ok(())
             }
+            &Low::RunTopCommand => {
+                let many = 1 + self.delayed_submits;
+                if let Some(top) = self.descriptors.command_buffers.len().checked_sub(many) {
+                    let commands = self.descriptors.command_buffers.drain(top..);
+                    gpu.with_gpu(|gpu| gpu.queue.submit(commands.rev()));
+                    self.delayed_submits = 0;
+                    Ok(())
+                } else {
+                    return Err(StepError::InvalidInstruction(line!()));
+                }
+            }
             &Low::RunTopToBot(many) => {
-                if many > self.descriptors.command_buffers.len() {
+                let many = many + self.delayed_submits;
+                if let Some(top) = self.descriptors.command_buffers.len().checked_sub(many) {
+                    let commands = self.descriptors.command_buffers.drain(top..);
+                    gpu.with_gpu(|gpu| gpu.queue.submit(commands.rev()));
+                    self.delayed_submits = 0;
+                } else {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let commands = self.descriptors.command_buffers.drain(many..);
-                gpu.with_gpu(|gpu| gpu.queue.submit(commands.rev()));
                 Ok(())
             }
             &Low::RunBotToTop(many) => {
-                if many > self.descriptors.command_buffers.len() {
+                let many = many + self.delayed_submits;
+                if let Some(top) = self.descriptors.command_buffers.len().checked_sub(many) {
+                    let commands = self.descriptors.command_buffers.drain(top..);
+                    gpu.with_gpu(|gpu| gpu.queue.submit(commands));
+                    self.delayed_submits = 0;
+                } else {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let commands = self.descriptors.command_buffers.drain(many..);
-                gpu.with_gpu(|gpu| gpu.queue.submit(commands));
                 Ok(())
             }
             &Low::WriteImageToBuffer {
@@ -1704,7 +1731,9 @@ impl Host {
                     );
 
                     let command = encoder.finish();
-                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                    self.descriptors.command_buffers.push(command);
+                    self.delayed_submits += 1;
+
                     self.descriptors
                         .precomputed
                         .insert(write_event, Precomputed);
@@ -1730,7 +1759,9 @@ impl Host {
                     );
 
                     let command = encoder.finish();
-                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                    self.descriptors.command_buffers.push(command);
+                    self.delayed_submits += 1;
+
                     self.descriptors
                         .precomputed
                         .insert(write_event, Precomputed);

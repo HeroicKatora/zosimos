@@ -461,7 +461,7 @@ pub(crate) struct BufferInitContentBuilder<'trgt> {
     start: usize,
 }
 
-#[derive(Debug)]
+// Debug manually implemented for performance and readability.
 pub(crate) struct ShaderDescriptor {
     pub name: &'static str,
     pub source_spirv: Cow<'static, [u32]>,
@@ -1438,5 +1438,15 @@ impl LaunchError {
         LaunchError {
             kind: LaunchErrorKind::FromLine(line),
         }
+    }
+}
+
+impl core::fmt::Debug for ShaderDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShaderDescriptor")
+            .field("name", &self.name)
+            .field("key", &self.key)
+            .field("source_spirv", &"opaque")
+            .finish()
     }
 }
