@@ -395,7 +395,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     fn plan_run_top_command(&mut self) {
-        self.delayed_commands.push(Instruction(self.instruction_pointer));
+        self.delayed_commands
+            .push(Instruction(self.instruction_pointer));
     }
 
     fn plan_gpu_effects_visible(&mut self) -> Result<(), LaunchError> {

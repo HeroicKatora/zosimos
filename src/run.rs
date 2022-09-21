@@ -2626,9 +2626,7 @@ impl Retire<'_> {
 
 impl StepLimits {
     pub fn new() -> Self {
-        StepLimits {
-            instructions: 1,
-        }
+        StepLimits { instructions: 1 }
     }
 
     pub fn with_steps(mut self, instructions: usize) -> Self {
