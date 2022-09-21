@@ -260,7 +260,8 @@ impl Surface {
         run.bind_render(out_reg, surface)
             .expect("Valid binding for our executable output");
         log::warn!("Sub- optimality: {:?}", surface_tex.suboptimal);
-        log::warn!("{:?}", run.recover_buffers());
+        let recovered = run.recover_buffers();
+        log::warn!("{:?}", recovered);
 
         let mut running = normalize
             .exe
@@ -303,7 +304,8 @@ impl Surface {
             .expect("Valid to retire outputof our executable");
 
         retire.prune();
-        log::warn!("{:?}", retire.retire_buffers());
+        let retired = retire.retire_buffers();
+        log::warn!("{:?}", retired);
         retire.finish();
 
         self.pool

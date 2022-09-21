@@ -1610,7 +1610,7 @@ impl Host {
                 let many = 1 + self.delayed_submits;
                 if let Some(top) = self.descriptors.command_buffers.len().checked_sub(many) {
                     let commands = self.descriptors.command_buffers.drain(top..);
-                    gpu.with_gpu(|gpu| gpu.queue.submit(commands.rev()));
+                    gpu.with_gpu(|gpu| gpu.queue.submit(commands));
                     self.delayed_submits = 0;
                     Ok(())
                 } else {
@@ -2214,7 +2214,7 @@ impl Descriptors {
     ) -> Result<wgpu::FragmentState<'_>, StepError> {
         buf.clear();
         buf.extend(desc.targets.iter().cloned().map(Some));
-        eprintln!("{:?}", buf);
+        // eprintln!("{:?}", buf);
         Ok(wgpu::FragmentState {
             module: self
                 .shaders
