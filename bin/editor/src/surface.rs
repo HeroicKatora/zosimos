@@ -4,7 +4,7 @@ use stealth_paint::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
 use stealth_paint::command;
 use stealth_paint::pool::{GpuKey, Pool, PoolKey};
 use stealth_paint::program::{Capabilities, CompileError, LaunchError, Program};
-use stealth_paint::run::Executable;
+use stealth_paint::run::{Executable, StepLimits};
 use wgpu::{Adapter, Instance, SurfaceConfiguration};
 
 pub struct Surface {
@@ -260,7 +260,8 @@ impl Surface {
         run.bind_render(out_reg, surface)
             .expect("Valid binding for our executable output");
         log::warn!("Sub- optimality: {:?}", surface_tex.suboptimal);
-        log::warn!("{:?}", run.recover_buffers());
+        let recovered = run.recover_buffers();
+        log::warn!("{:?}", recovered);
 
         let mut running = normalize
             .exe
@@ -278,8 +279,9 @@ impl Surface {
         self.pool.clear_cache();
 
         while running.is_running() {
+            let limits = StepLimits::new().with_steps(usize::MAX);
             let mut step = running
-                .step()
+                .step_to(limits)
                 .expect("Valid binding to start our executable");
             step.block_on()
                 .expect("Valid binding to block on our execution");
@@ -302,7 +304,8 @@ impl Surface {
             .expect("Valid to retire outputof our executable");
 
         retire.prune();
-        log::warn!("{:?}", retire.retire_buffers());
+        let retired = retire.retire_buffers();
+        log::warn!("{:?}", retired);
         retire.finish();
 
         self.pool

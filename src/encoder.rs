@@ -87,6 +87,8 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     staged_from_pipelines: HashMap<Texture, SimpleRenderPipeline>,
     /// The texture operands collected for the next render preparation.
     operands: Vec<Texture>,
+    /// Command slots that we deferred submission.
+    delayed_commands: Vec<Instruction>,
 
     // Fields regarding the status of registers.
     /// Describes how registers where mapped to buffers.
@@ -364,12 +366,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 self.command_buffers -= 1;
             }
-            Low::RunBotToTop(num) | Low::RunTopToBot(num) => {
-                if num >= self.command_buffers {
+            Low::RunBotToTop(num) => {
+                if let Some(num) = self.command_buffers.checked_sub(num) {
+                    self.command_buffers = num;
+                } else {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
-
-                self.command_buffers -= num;
             }
             // TODO: could validate indices.
             Low::WriteImageToTexture { .. }
@@ -390,6 +392,20 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.instruction_pointer += 1;
         self.instructions.extend_one(low);
         Ok(instruction)
+    }
+
+    fn plan_run_top_command(&mut self) {
+        self.delayed_commands
+            .push(Instruction(self.instruction_pointer));
+    }
+
+    fn plan_gpu_effects_visible(&mut self) -> Result<(), LaunchError> {
+        if !self.delayed_commands.is_empty() {
+            self.push(Low::RunBotToTop(self.delayed_commands.len()))?;
+            self.delayed_commands.clear();
+        }
+
+        Ok(())
     }
 
     fn make_texture_descriptor(
@@ -632,7 +648,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             self.skip_by_op.insert(inst, write_event);
             self.push(Low::EndCommands)?;
             // TODO: maybe also don't run it immediately?
-            self.push(Low::RunTopCommand)?;
+            self.plan_run_top_command();
         }
 
         Ok(())
@@ -667,7 +683,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         self.push(Low::EndCommands)?;
         // TODO: maybe also don't run it immediately?
-        self.push(Low::RunTopCommand)?;
+        self.plan_run_top_command();
 
         Ok(())
     }
@@ -708,8 +724,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             self.render(pipeline)?;
             self.push(Low::EndRenderPass)?;
             self.push(Low::EndCommands)?;
-
-            self.push(Low::RunTopCommand)?;
+            self.plan_run_top_command();
         }
 
         Ok(())
@@ -759,8 +774,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             self.render(pipeline)?;
             self.push(Low::EndRenderPass)?;
             self.push(Low::EndCommands)?;
-
-            self.push(Low::RunTopCommand)?;
+            self.plan_run_top_command();
         }
 
         Ok(())
@@ -791,8 +805,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             target_layout: regmap.byte_layout,
         })?;
         self.push(Low::EndCommands)?;
-        // TODO: maybe also don't run it immediately?
-        self.push(Low::RunTopCommand)?;
+        self.plan_run_top_command();
 
         Ok(())
     }
@@ -822,11 +835,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             })?;
             // eprintln!("buf{:?} -> buf{:?} ({})", regmap.buffer, map_read, sizeu64);
             self.push(Low::EndCommands)?;
-            // TODO: maybe also don't run it immediately?
-            self.push(Low::RunTopCommand)?;
+            self.plan_run_top_command();
         }
         // eprintln!("buf{:?} -> img{:?} ({:?})", source_buffer, target_image, size);
 
+        self.plan_gpu_effects_visible()?;
         // FIXME: if we're reading out to a texture, then we do not need this copy at all.
         // However, this fact is only known at runtime. So, should we defer running the
         // CopyBufferToBuffer instead to the runtime?
@@ -914,8 +927,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.render(pipeline)?;
         self.push(Low::EndRenderPass)?;
         self.push(Low::EndCommands)?;
-
-        self.push(Low::RunTopCommand)?;
+        self.plan_run_top_command();
 
         Ok(())
     }
@@ -1800,6 +1812,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     pub(crate) fn finalize(&mut self) -> Result<(), LaunchError> {
+        self.plan_gpu_effects_visible()?;
+
         if !self.operands.is_empty() {
             // eprintln!("{:?}", self.operands.as_slice());
             return Err(LaunchError::InternalCommandError(line!()));

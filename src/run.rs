@@ -98,6 +98,13 @@ pub(crate) struct Host {
     pub(crate) info: Arc<ProgramInfo>,
     pub(crate) debug_stack: Vec<Frame>,
     pub(crate) usage: ResourcesUsed,
+
+    /// Submits inserted by the execution.
+    /// FIXME: really, we should not have these. The encoder should somehow plan for the
+    /// eventuality of IO with GPU buffers. In particular we can delay the effect of texturing
+    /// until such scheduling happens as it is GPU synchronous instead of host-synchronous, when we
+    /// need not map a buffer.
+    pub(crate) delayed_submits: usize,
 }
 
 #[derive(Default)]
@@ -118,6 +125,10 @@ pub struct ResourcesUsed {
     shaders_reused: u64,
     pipelines_compiled: u64,
     pipelines_reused: u64,
+}
+
+pub struct StepLimits {
+    instructions: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -655,16 +666,6 @@ impl Executable {
                     let _ = write!(&mut queue_graph, " queue_{} -> queue_{};", idx, idx + 1);
                     queue += 1;
                 }
-                Low::RunTopToBot(count) => {
-                    for command in 0..*count {
-                        let idx = queue;
-                        let command = command_stack.pop().unwrap();
-                        let _ = write!(&mut cons, " queue_{};", idx);
-                        let _ = write!(&mut cons, " command_buffer_{} -> queue_{};", command, idx);
-                        let _ = write!(&mut queue_graph, " queue_{} -> queue_{};", idx, idx + 1);
-                        queue += 1;
-                    }
-                }
                 Low::RunBotToTop(count) => {
                     let start = command_stack.len() - count;
                     for command in command_stack.drain(start..) {
@@ -884,6 +885,7 @@ impl Executable {
                 info: self.info.clone(),
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
+                delayed_submits: 0,
             },
             cache: env.cache,
         })
@@ -905,6 +907,7 @@ impl Executable {
                 info: self.info.clone(),
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
+                delayed_submits: 0,
             },
             cache: env.cache,
         })
@@ -1165,6 +1168,7 @@ impl Execution {
                 info: init.info,
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
+                delayed_submits: 0,
             },
             cache: Cache::default(),
         }
@@ -1172,12 +1176,18 @@ impl Execution {
 
     /// Check if the machine is still running.
     pub fn is_running(&self) -> bool {
-        self.host.machine.instruction_pointer < self.host.machine.instructions.len()
+        self.host.machine.is_running()
     }
 
-    /// FIXME: a way to pass a `&wgpu::SurfaceTexture` as output?
-    /// Otherwise, have to make an extra copy call in the pool.
+    /// Do a single step of the program.
+    ///
+    /// Realize that this can be expensive due to the extra synchronization.
     pub fn step(&mut self) -> Result<SyncPoint<'_>, StepError> {
+        self.step_to(StepLimits { instructions: 1 })
+    }
+
+    /// Do a number of limited steps.
+    pub fn step_to(&mut self, limits: StepLimits) -> Result<SyncPoint<'_>, StepError> {
         let instruction_pointer = self.host.machine.instruction_pointer;
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -1196,14 +1206,27 @@ impl Execution {
             host,
             cache,
         } = self;
+
         let async_step = async move {
-            match host.step_inner(cache, gpu).await {
-                Err(mut error) => {
-                    // Add tracing information..
-                    error.instruction_pointer = instruction_pointer;
-                    Err(error)
+            let mut limits = limits;
+
+            loop {
+                match host.step_inner(cache, gpu, &mut limits).await {
+                    Err(mut error) => {
+                        // Add tracing information..
+                        error.instruction_pointer = instruction_pointer;
+                        return Err(error);
+                    }
+                    Ok(()) => {}
                 }
-                other => other,
+
+                if limits.is_exhausted() {
+                    return Ok(());
+                }
+
+                if !host.machine.is_running() {
+                    return Ok(());
+                }
             }
         };
 
@@ -1254,7 +1277,12 @@ impl Execution {
 }
 
 impl Host {
-    async fn step_inner(&mut self, cache: &mut Cache, gpu: impl WithGpu) -> Result<(), StepError> {
+    async fn step_inner(
+        &mut self,
+        cache: &mut Cache,
+        gpu: impl WithGpu,
+        limits: &mut StepLimits,
+    ) -> Result<(), StepError> {
         struct DumpFrame<'stack> {
             stack: Option<&'stack mut Vec<Frame>>,
         }
@@ -1290,6 +1318,8 @@ impl Host {
                 return Ok(());
             }
         }
+
+        limits.instructions = limits.instructions.saturating_sub(1);
 
         match self.machine.next_instruction()? {
             Low::BindGroupLayout(desc) => {
@@ -1567,7 +1597,7 @@ impl Host {
                     Ok(())
                 }
             },
-            &Low::RunTopCommand => {
+            &Low::RunTopCommand if self.delayed_submits == 0 => {
                 let command = self
                     .descriptors
                     .command_buffers
@@ -1576,22 +1606,27 @@ impl Host {
                 gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
                 Ok(())
             }
-            &Low::RunTopToBot(many) => {
-                if many > self.descriptors.command_buffers.len() {
+            &Low::RunTopCommand => {
+                let many = 1 + self.delayed_submits;
+                if let Some(top) = self.descriptors.command_buffers.len().checked_sub(many) {
+                    let commands = self.descriptors.command_buffers.drain(top..);
+                    gpu.with_gpu(|gpu| gpu.queue.submit(commands));
+                    self.delayed_submits = 0;
+                    Ok(())
+                } else {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
-
-                let commands = self.descriptors.command_buffers.drain(many..);
-                gpu.with_gpu(|gpu| gpu.queue.submit(commands.rev()));
-                Ok(())
             }
             &Low::RunBotToTop(many) => {
-                if many > self.descriptors.command_buffers.len() {
+                let many = many + self.delayed_submits;
+                if let Some(top) = self.descriptors.command_buffers.len().checked_sub(many) {
+                    let commands = self.descriptors.command_buffers.drain(top..);
+                    gpu.with_gpu(|gpu| gpu.queue.submit(commands));
+                    self.delayed_submits = 0;
+                } else {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let commands = self.descriptors.command_buffers.drain(many..);
-                gpu.with_gpu(|gpu| gpu.queue.submit(commands));
                 Ok(())
             }
             &Low::WriteImageToBuffer {
@@ -1674,7 +1709,9 @@ impl Host {
                     );
 
                     let command = encoder.finish();
-                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                    self.descriptors.command_buffers.push(command);
+                    self.delayed_submits += 1;
+
                     self.descriptors
                         .precomputed
                         .insert(write_event, Precomputed);
@@ -1700,7 +1737,9 @@ impl Host {
                     );
 
                     let command = encoder.finish();
-                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                    self.descriptors.command_buffers.push(command);
+                    self.delayed_submits += 1;
+
                     self.descriptors
                         .precomputed
                         .insert(write_event, Precomputed);
@@ -2175,7 +2214,7 @@ impl Descriptors {
     ) -> Result<wgpu::FragmentState<'_>, StepError> {
         buf.clear();
         buf.extend(desc.targets.iter().cloned().map(Some));
-        eprintln!("{:?}", buf);
+        // eprintln!("{:?}", buf);
         Ok(wgpu::FragmentState {
             module: self
                 .shaders
@@ -2225,6 +2264,10 @@ impl Machine {
             instructions,
             instruction_pointer: 0,
         }
+    }
+
+    fn is_running(&self) -> bool {
+        self.instruction_pointer < self.instructions.len()
     }
 
     fn next_instruction(&mut self) -> Result<&Low, StepError> {
@@ -2578,6 +2621,21 @@ impl Retire<'_> {
     pub fn finish_by_discarding(self) {
         // Yes, we want to drop everything.
         drop(self);
+    }
+}
+
+impl StepLimits {
+    pub fn new() -> Self {
+        StepLimits { instructions: 1 }
+    }
+
+    pub fn with_steps(mut self, instructions: usize) -> Self {
+        self.instructions = instructions;
+        self
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.instructions == 0
     }
 }
 
