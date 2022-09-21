@@ -366,7 +366,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 self.command_buffers -= 1;
             }
-            Low::RunBotToTop(num) | Low::RunTopToBot(num) => {
+            Low::RunBotToTop(num) => {
                 if let Some(num) = self.command_buffers.checked_sub(num) {
                     self.command_buffers = num;
                 } else {

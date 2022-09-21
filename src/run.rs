@@ -666,16 +666,6 @@ impl Executable {
                     let _ = write!(&mut queue_graph, " queue_{} -> queue_{};", idx, idx + 1);
                     queue += 1;
                 }
-                Low::RunTopToBot(count) => {
-                    for command in 0..*count {
-                        let idx = queue;
-                        let command = command_stack.pop().unwrap();
-                        let _ = write!(&mut cons, " queue_{};", idx);
-                        let _ = write!(&mut cons, " command_buffer_{} -> queue_{};", command, idx);
-                        let _ = write!(&mut queue_graph, " queue_{} -> queue_{};", idx, idx + 1);
-                        queue += 1;
-                    }
-                }
                 Low::RunBotToTop(count) => {
                     let start = command_stack.len() - count;
                     for command in command_stack.drain(start..) {
@@ -1626,18 +1616,6 @@ impl Host {
                 } else {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
-            }
-            &Low::RunTopToBot(many) => {
-                let many = many + self.delayed_submits;
-                if let Some(top) = self.descriptors.command_buffers.len().checked_sub(many) {
-                    let commands = self.descriptors.command_buffers.drain(top..);
-                    gpu.with_gpu(|gpu| gpu.queue.submit(commands.rev()));
-                    self.delayed_submits = 0;
-                } else {
-                    return Err(StepError::InvalidInstruction(line!()));
-                }
-
-                Ok(())
             }
             &Low::RunBotToTop(many) => {
                 let many = many + self.delayed_submits;

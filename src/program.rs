@@ -271,8 +271,6 @@ pub(crate) enum Low {
     /// Run one command buffer previously created.
     RunTopCommand,
     /// Run multiple commands at once.
-    RunTopToBot(usize),
-    /// Run multiple commands at once.
     RunBotToTop(usize),
     /// Read a buffer into host image data.
     /// Will map the buffer then do row-wise writes.
