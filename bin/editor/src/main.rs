@@ -9,7 +9,7 @@ fn main() {
     let winit = winit::build();
     let mut surface = surface::Surface::new(&winit);
     let editor = editor::Editor::default();
-    let compute = compute::Compute::new(&surface);
+    let compute = compute::Compute::new(&mut surface);
 
     surface.set_image(&{
         let img = concat!(
