@@ -22,7 +22,7 @@ pub struct Pool {
     textures: SlotMap<DefaultKey, (TextureDescriptor, GpuKey, wgpu::Texture)>,
     shaders: SlotMap<DefaultKey, (ShaderDescriptorKey, GpuKey, wgpu::ShaderModule)>,
     pipelines: SlotMap<DefaultKey, (RenderPipelineKey, GpuKey, wgpu::RenderPipeline)>,
-    devices: SlotMap<DefaultKey, Device>,
+    devices: SlotMap<DefaultKey, Gpu>,
 }
 
 #[derive(Clone)]
@@ -48,11 +48,6 @@ pub(crate) struct ShaderKey(DefaultKey);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct PipelineKey(DefaultKey);
 
-pub(crate) enum Device {
-    Active(Gpu),
-    Inactive,
-}
-
 pub(crate) struct Image {
     pub(crate) meta: ImageMeta,
     pub(crate) data: ImageData,
@@ -72,7 +67,7 @@ pub struct PoolImageMut<'pool> {
     /// The image inside the pool.
     image: &'pool mut Image,
     /// All other devices.
-    devices: &'pool SlotMap<DefaultKey, Device>,
+    devices: &'pool SlotMap<DefaultKey, Gpu>,
 }
 
 pub struct Iter<'pool> {
@@ -81,7 +76,7 @@ pub struct Iter<'pool> {
 
 pub struct IterMut<'pool> {
     inner: slotmap::basic::IterMut<'pool, DefaultKey, Image>,
-    devices: &'pool SlotMap<DefaultKey, Device>,
+    devices: &'pool SlotMap<DefaultKey, Gpu>,
 }
 
 /// Indexes a pool for extracting unused buffers.
@@ -186,30 +181,34 @@ impl Pool {
         let request = Box::pin(request);
         let (device, queue) = block_on(request, None)?;
         let gpu = Gpu::new(device, queue);
-        let gpu_key = self.devices.insert(Device::Active(gpu));
+        let gpu_key = self.devices.insert(gpu);
         Ok(GpuKey(gpu_key))
     }
 
+    pub fn share_device(
+        &mut self,
+        key: GpuKey,
+        other: &mut Pool,
+    ) -> Option<GpuKey> {
+        let gpu = self.devices.get(key.0)?.clone();
+        let gpu_key = other.devices.insert(gpu);
+        Some(GpuKey(gpu_key))
+    }
+
     pub fn iter_devices(&self) -> impl Iterator<Item = &'_ wgpu::Device> {
-        self.devices.iter().filter_map(|kv| match kv.1 {
-            Device::Active(gpu) => Some(gpu.device()),
-            _ => None,
-        })
+        self.devices.iter().map(|gpu| gpu.1.device())
     }
 
     pub(crate) fn reinsert_device(&mut self, key: GpuKey, gpu: Gpu) {
         if let Some(device) = self.devices.get_mut(key.0) {
-            *device = Device::Active(gpu);
+            *device = gpu;
         }
     }
 
     pub(crate) fn select_device(&mut self, caps: &Capabilities) -> Option<(GpuKey, Gpu)> {
         let key = self.select_device_key(caps)?;
-        let device = self.devices.get_mut(key).unwrap();
-        match mem::replace(device, Device::Inactive) {
-            Device::Active(gpu) => Some((GpuKey(key), gpu)),
-            Device::Inactive => None,
-        }
+        let gpu = self.devices.get_mut(key).unwrap();
+        Some((GpuKey(key), gpu.clone()))
     }
 
     fn select_device_key(&mut self, _: &Capabilities) -> Option<DefaultKey> {
@@ -301,13 +300,7 @@ impl Pool {
                 eprintln!("No GPU {:?}", key);
                 return Err(ImageUploadError::BadGpu);
             }
-            Some(device) => match mem::replace(device, Device::Inactive) {
-                Device::Inactive => {
-                    eprintln!("Inactive GPU {:?}", key);
-                    return Err(ImageUploadError::InactiveGpu);
-                }
-                Device::Active(gpu) => gpu,
-            },
+            Some(device) => device.clone(),
         };
 
         let aligned = match image.descriptor.to_aligned() {
@@ -361,7 +354,7 @@ impl Pool {
         }
 
         let device = self.devices.get_mut(key).unwrap();
-        let _ = mem::replace(device, Device::Active(gpu));
+        let _ = mem::replace(device, gpu);
 
         Ok(())
     }
@@ -668,10 +661,7 @@ impl PoolImageMut<'_> {
         GpuKey(key): GpuKey,
         image: &Descriptor,
     ) -> Result<(), ImageUploadError> {
-        let gpu = match self.devices.get(key).ok_or(ImageUploadError::BadGpu)? {
-            Device::Active(gpu) => gpu,
-            Device::Inactive => return Err(ImageUploadError::InactiveGpu),
-        };
+        let gpu = self.devices.get(key).ok_or(ImageUploadError::BadGpu)?.clone();
 
         let descriptor =
             ImageDescriptor::new(image).map_err(|_| ImageUploadError::BadDescriptor)?;
@@ -730,10 +720,10 @@ impl PoolImageMut<'_> {
 
         let mut replace;
         match self.devices.get(tgpu) {
-            None | Some(Device::Inactive) => {
+            None => {
                 panic!("Failed unguarded replace, expected GPU device");
             }
-            Some(Device::Active(gpu)) => {
+            Some(gpu) => {
                 replace = gpu.device().create_texture(&wgpu::TextureDescriptor {
                     label: None,
                     size: wgpu::Extent3d {

@@ -10,7 +10,7 @@ pub async fn run() {
 
     let mut surface = surface::Surface::new(&winit);
     let editor = editor::Editor::default();
-    let compute = compute::Compute::new(&surface);
+    let compute = compute::Compute::new(&mut surface);
 
     surface.set_image(&{
         let img = include_bytes!(concat!(

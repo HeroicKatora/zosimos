@@ -146,31 +146,34 @@ impl Surface {
             runtimes: Runtimes::default(),
         };
 
-        let mut pool = Pool::new();
-        let gpu = that.configure_pool(&mut pool);
+        let gpu = that.reconfigure_gpu();
         that.entry.gpu = Some(gpu);
-        let surface = pool.declare(that.descriptor());
+        let surface = that.pool.declare(that.descriptor());
         that.entry.key = Some(surface.key());
-        that.pool = pool;
         that.reconfigure_surface().unwrap();
 
         that
     }
 
-    pub fn configure_pool(&self, pool: &mut Pool) -> GpuKey {
+    pub fn configure_pool(&mut self, pool: &mut Pool) -> GpuKey {
         log::info!("Surface reconfiguring pool device");
-        pool.request_device(&self.adapter, Program::minimal_device_descriptor())
-            .expect("to get a device")
+        let internal_key = self.reconfigure_gpu();
+
+        self.pool
+            .share_device(internal_key, pool)
+            .expect("maintained incorrect gpu key")
     }
 
+    /// Change the base device.
     pub(crate) fn reconfigure_gpu(&mut self) -> GpuKey {
         if let Some(gpu) = self.entry.gpu {
             gpu
         } else {
             log::info!("No gpu key, device lost or not initialized?");
-            let mut pool = core::mem::take(&mut self.pool);
-            let gpu = self.configure_pool(&mut pool);
-            self.pool = pool;
+            let gpu = self
+                .pool
+                .request_device(&self.adapter, Program::minimal_device_descriptor())
+                .expect("to get a device");
             gpu
         }
     }
