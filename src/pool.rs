@@ -10,7 +10,7 @@ use crate::program::{
     BufferDescriptor, BufferUsage, Capabilities, ImageDescriptor, RenderPipelineKey,
     ShaderDescriptorKey, TextureDescriptor,
 };
-use crate::run::{block_on, copy_host_to_buffer, Gpu};
+use crate::run::{block_on, copy_host_to_buffer};
 
 /// Holds a number of image buffers, their descriptors and meta data.
 ///
@@ -23,6 +23,11 @@ pub struct Pool {
     shaders: SlotMap<DefaultKey, (ShaderDescriptorKey, GpuKey, wgpu::ShaderModule)>,
     pipelines: SlotMap<DefaultKey, (RenderPipelineKey, GpuKey, wgpu::RenderPipeline)>,
     devices: SlotMap<DefaultKey, Device>,
+}
+
+#[derive(Clone)]
+pub struct Gpu {
+    inner: Arc<(wgpu::Device, wgpu::Queue)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -176,16 +181,18 @@ impl Pool {
         adapter: &wgpu::Adapter,
         device: wgpu::DeviceDescriptor,
     ) -> Result<GpuKey, wgpu::RequestDeviceError> {
+        log::info!("Requesting device: {:?}", device);
         let request = adapter.request_device(&device, None);
         let request = Box::pin(request);
         let (device, queue) = block_on(request, None)?;
-        let gpu_key = self.devices.insert(Device::Active(Gpu { device, queue }));
+        let gpu = Gpu::new(device, queue);
+        let gpu_key = self.devices.insert(Device::Active(gpu));
         Ok(GpuKey(gpu_key))
     }
 
     pub fn iter_devices(&self) -> impl Iterator<Item = &'_ wgpu::Device> {
         self.devices.iter().filter_map(|kv| match kv.1 {
-            Device::Active(gpu) => Some(&gpu.device),
+            Device::Active(gpu) => Some(gpu.device()),
             _ => None,
         })
     }
@@ -313,7 +320,7 @@ impl Pool {
 
         // Create a data buffer, i.e. can't be mapped for read/write directly but can be used for
         // storage, copy_dst, copy_src.
-        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: aligned.row_stride * u64::from(aligned.height),
             usage: BufferUsage::DataBuffer.to_wgpu(),
@@ -673,7 +680,7 @@ impl PoolImageMut<'_> {
             return Err(ImageUploadError::BadDescriptor);
         }
 
-        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
                 width: descriptor.size.0.get(),
@@ -727,7 +734,7 @@ impl PoolImageMut<'_> {
                 panic!("Failed unguarded replace, expected GPU device");
             }
             Some(Device::Active(gpu)) => {
-                replace = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                replace = gpu.device().create_texture(&wgpu::TextureDescriptor {
                     label: None,
                     size: wgpu::Extent3d {
                         width: 1,
@@ -826,6 +833,21 @@ impl PoolImageMut<'_> {
             ImageData::GpuTexture { .. } => false,
             ImageData::LateBound(_) => false,
         }
+    }
+}
+
+impl Gpu {
+    pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        let inner = Arc::new((device, queue));
+        Gpu { inner }
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.inner.0
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.inner.1
     }
 }
 

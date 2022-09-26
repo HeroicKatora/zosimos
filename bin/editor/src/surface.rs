@@ -158,6 +158,7 @@ impl Surface {
     }
 
     pub fn configure_pool(&self, pool: &mut Pool) -> GpuKey {
+        log::info!("Surface reconfiguring pool device");
         pool.request_device(&self.adapter, Program::minimal_device_descriptor())
             .expect("to get a device")
     }
@@ -166,6 +167,7 @@ impl Surface {
         if let Some(gpu) = self.entry.gpu {
             gpu
         } else {
+            log::info!("No gpu key, device lost or not initialized?");
             let mut pool = core::mem::take(&mut self.pool);
             let gpu = self.configure_pool(&mut pool);
             self.pool = pool;
@@ -174,6 +176,7 @@ impl Surface {
     }
 
     pub fn set_image(&mut self, image: &image::DynamicImage) {
+        log::info!("Uploading DynamicImage {:?} to GPU buffer", image.color());
         let gpu = self.reconfigure_gpu();
         if let Some(key) = self.entry.presentable {
             let mut entry = self.pool.entry(key).unwrap();
