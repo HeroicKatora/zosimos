@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::buffer::{BufferLayout, ByteLayout, Descriptor};
 use crate::command::Register;
 use crate::pool::{
-    BufferKey, GpuKey, ImageData, PipelineKey, Pool, PoolImage, PoolKey, ShaderKey, TextureKey,
+    BufferKey, Gpu, GpuKey, ImageData, PipelineKey, Pool, PoolImage, PoolKey, ShaderKey, TextureKey,
 };
 use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
 use crate::util::Ping;
@@ -79,7 +79,7 @@ pub struct Environment<'pool> {
 /// A running `Executable`.
 pub struct Execution {
     /// The gpu processor handles.
-    pub(crate) gpu: core::cell::RefCell<Gpu>,
+    pub(crate) gpu: Gpu,
     /// The key of the gpu if it was extracted from a pool.
     pub(crate) gpu_key: Option<GpuKey>,
     /// All the host state of execution.
@@ -204,11 +204,6 @@ pub(crate) struct Descriptors {
     precomputed: HashMap<program::Event, Precomputed>,
 }
 
-pub(crate) struct Gpu {
-    pub(crate) device: Device,
-    pub(crate) queue: Queue,
-}
-
 /// Information about the source of computation for skipped instructions.
 #[derive(Default)]
 struct Precomputed;
@@ -230,20 +225,18 @@ pub struct RetiredBufferStats {
 }
 
 trait WithGpu {
-    fn with_gpu<T>(&self, once: impl FnOnce(&mut Gpu) -> T) -> T;
+    fn with_gpu<T>(&self, once: impl FnOnce(&Gpu) -> T) -> T;
 }
 
-impl WithGpu for core::cell::RefCell<Gpu> {
-    fn with_gpu<T>(&self, once: impl FnOnce(&mut Gpu) -> T) -> T {
-        let mut borrow = self.borrow_mut();
-        once(&mut *borrow)
+impl WithGpu for Gpu {
+    fn with_gpu<T>(&self, once: impl FnOnce(&Gpu) -> T) -> T {
+        once(self)
     }
 }
 
-impl WithGpu for &'_ core::cell::RefCell<Gpu> {
-    fn with_gpu<T>(&self, once: impl FnOnce(&mut Gpu) -> T) -> T {
-        let mut borrow = self.borrow_mut();
-        once(&mut *borrow)
+impl WithGpu for &'_ Gpu {
+    fn with_gpu<T>(&self, once: impl FnOnce(&Gpu) -> T) -> T {
+        once(&**self)
     }
 }
 
@@ -255,7 +248,7 @@ struct DevicePolled<'exe, T: WithGpu> {
 }
 
 pub struct SyncPoint<'exe> {
-    future: Option<DevicePolled<'exe, &'exe core::cell::RefCell<Gpu>>>,
+    future: Option<DevicePolled<'exe, Gpu>>,
     marker: core::marker::PhantomData<&'exe mut Execution>,
     #[cfg(not(target_arch = "wasm32"))]
     host_start: std::time::Instant,
@@ -386,8 +379,8 @@ impl Executable {
                         " bind_group_layout_{0} [label=\"Bind Group Layout {0}\"];",
                         bind_group_layouts
                     );
-                    bind_group_layouts += 1;
                     */
+                    bind_group_layouts += 1;
                 }
                 Low::BindGroup(group) => {
                     let idx = bind_groups;
@@ -1152,11 +1145,7 @@ impl Execution {
     pub(crate) fn new(init: InitialState) -> Self {
         init.device.start_capture();
         Execution {
-            gpu: Gpu {
-                device: init.device,
-                queue: init.queue,
-            }
-            .into(),
+            gpu: Gpu::new(init.device, init.queue).into(),
             gpu_key: None,
             host: Host {
                 machine: Machine::new(init.instructions),
@@ -1234,7 +1223,7 @@ impl Execution {
         Ok(SyncPoint {
             future: Some(DevicePolled {
                 future: Box::pin(async_step),
-                gpu: &self.gpu,
+                gpu: self.gpu.clone(),
             }),
             marker: core::marker::PhantomData,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1259,7 +1248,8 @@ impl Execution {
     /// Stop the execution, depositing all resources into the provided pool.
     #[must_use = "You won't get the ids of outputs."]
     pub fn retire_gracefully(self, pool: &mut Pool) -> Retire<'_> {
-        self.gpu.with_gpu(|gpu| gpu.device.stop_capture());
+        self.gpu.with_gpu(|gpu| gpu.device().stop_capture());
+
         Retire {
             execution: self,
             pool,
@@ -1280,7 +1270,7 @@ impl Host {
     async fn step_inner(
         &mut self,
         cache: &mut Cache,
-        gpu: impl WithGpu,
+        gpu: &Gpu,
         limits: &mut StepLimits,
     ) -> Result<(), StepError> {
         struct DumpFrame<'stack> {
@@ -1328,7 +1318,7 @@ impl Host {
                     .descriptors
                     .bind_group_layout(desc, &mut entry_buffer)?;
                 // eprintln!("Made {}: {:?}", self.descriptors.bind_group_layouts.len(), group);
-                let group = gpu.with_gpu(|gpu| gpu.device.create_bind_group_layout(&group));
+                let group = gpu.with_gpu(|gpu| gpu.device().create_bind_group_layout(&group));
                 self.descriptors.bind_group_layouts.push(group);
                 Ok(())
             }
@@ -1336,7 +1326,7 @@ impl Host {
                 let mut entry_buffer = vec![];
                 let group = self.descriptors.bind_group(desc, &mut entry_buffer)?;
                 // eprintln!("{}: {:?}", desc.layout_idx, group);
-                let group = gpu.with_gpu(|gpu| gpu.device.create_bind_group(&group));
+                let group = gpu.with_gpu(|gpu| gpu.device().create_bind_group(&group));
                 self.descriptors.bind_groups.push(group);
                 Ok(())
             }
@@ -1353,7 +1343,7 @@ impl Host {
                     buffer
                 } else {
                     self.usage.buffer_mem += desc.u64_len();
-                    gpu.with_gpu(|gpu| gpu.device.create_buffer(&wgpu_desc))
+                    gpu.with_gpu(|gpu| gpu.device().create_buffer(&wgpu_desc))
                 };
 
                 let buffer_idx = self.descriptors.buffers.len();
@@ -1372,7 +1362,7 @@ impl Host {
                 };
 
                 self.usage.buffer_mem += desc.u64_len();
-                let buffer = gpu.with_gpu(|gpu| gpu.device.create_buffer_init(&wgpu_desc));
+                let buffer = gpu.with_gpu(|gpu| gpu.device().create_buffer_init(&wgpu_desc));
                 self.descriptors.buffers.push(buffer);
                 Ok(())
             }
@@ -1389,7 +1379,7 @@ impl Host {
                         shader
                     } else {
                         self.usage.shaders_compiled += 1;
-                        gpu.with_gpu(|gpu| gpu.device.create_shader_module(wgpu_desc))
+                        gpu.with_gpu(|gpu| gpu.device().create_shader_module(wgpu_desc))
                     };
                 } else {
                     let wgpu_desc = wgpu::ShaderModuleDescriptor {
@@ -1402,7 +1392,7 @@ impl Host {
                         shader
                     } else {
                         self.usage.shaders_compiled += 1;
-                        gpu.with_gpu(|gpu| gpu.device.create_shader_module(wgpu_desc))
+                        gpu.with_gpu(|gpu| gpu.device().create_shader_module(wgpu_desc))
                     };
                 };
 
@@ -1419,7 +1409,7 @@ impl Host {
             Low::PipelineLayout(desc) => {
                 let mut entry_buffer = vec![];
                 let layout = self.descriptors.pipeline_layout(desc, &mut entry_buffer)?;
-                let layout = gpu.with_gpu(|gpu| gpu.device.create_pipeline_layout(&layout));
+                let layout = gpu.with_gpu(|gpu| gpu.device().create_pipeline_layout(&layout));
                 self.descriptors.pipeline_layouts.push(layout);
                 Ok(())
             }
@@ -1441,7 +1431,7 @@ impl Host {
                     // in its implementation in glow's webGL1/2.
                     border_color: desc.border_color,
                 };
-                let sampler = gpu.with_gpu(|gpu| gpu.device.create_sampler(&desc));
+                let sampler = gpu.with_gpu(|gpu| gpu.device().create_sampler(&desc));
                 self.descriptors.sampler.push(sampler);
                 Ok(())
             }
@@ -1524,7 +1514,7 @@ impl Host {
                     texture
                 } else {
                     self.usage.texture_mem += desc.u64_len();
-                    gpu.with_gpu(|gpu| gpu.device.create_texture(&wgpu_desc))
+                    gpu.with_gpu(|gpu| gpu.device().create_texture(&wgpu_desc))
                 };
 
                 let texture_idx = self.descriptors.textures.len();
@@ -1547,7 +1537,7 @@ impl Host {
                     let pipeline =
                         self.descriptors
                             .pipeline(desc, &mut vertex_buffers, &mut fragments)?;
-                    gpu.with_gpu(|gpu| gpu.device.create_render_pipeline(&pipeline))
+                    gpu.with_gpu(|gpu| gpu.device().create_render_pipeline(&pipeline))
                 };
 
                 let pipeline_idx = self.descriptors.render_pipelines.len();
@@ -1570,7 +1560,7 @@ impl Host {
 
                 let descriptor = wgpu::CommandEncoderDescriptor { label: None };
 
-                let encoder = gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+                let encoder = gpu.with_gpu(|gpu| gpu.device().create_command_encoder(&descriptor));
                 self.command_encoder = Some(encoder);
                 Ok(())
             }
@@ -1603,14 +1593,14 @@ impl Host {
                     .command_buffers
                     .pop()
                     .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
-                gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                gpu.with_gpu(|gpu| gpu.queue().submit(once(command)));
                 Ok(())
             }
             &Low::RunTopCommand => {
                 let many = 1 + self.delayed_submits;
                 if let Some(top) = self.descriptors.command_buffers.len().checked_sub(many) {
                     let commands = self.descriptors.command_buffers.drain(top..);
-                    gpu.with_gpu(|gpu| gpu.queue.submit(commands));
+                    gpu.with_gpu(|gpu| gpu.queue().submit(commands));
                     self.delayed_submits = 0;
                     Ok(())
                 } else {
@@ -1621,7 +1611,7 @@ impl Host {
                 let many = many + self.delayed_submits;
                 if let Some(top) = self.descriptors.command_buffers.len().checked_sub(many) {
                     let commands = self.descriptors.command_buffers.drain(top..);
-                    gpu.with_gpu(|gpu| gpu.queue.submit(commands));
+                    gpu.with_gpu(|gpu| gpu.queue().submit(commands));
                     self.delayed_submits = 0;
                 } else {
                     return Err(StepError::InvalidInstruction(line!()));
@@ -1689,7 +1679,7 @@ impl Host {
                 {
                     let descriptor = wgpu::CommandEncoderDescriptor { label: None };
                     let mut encoder =
-                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+                        gpu.with_gpu(|gpu| gpu.device().create_command_encoder(&descriptor));
 
                     encoder.copy_texture_to_buffer(
                         texture.as_image_copy(),
@@ -1726,7 +1716,7 @@ impl Host {
                 {
                     let descriptor = wgpu::CommandEncoderDescriptor { label: None };
                     let mut encoder =
-                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+                        gpu.with_gpu(|gpu| gpu.device().create_command_encoder(&descriptor));
 
                     encoder.copy_buffer_to_buffer(
                         &*src_buffer,
@@ -1905,7 +1895,7 @@ impl Host {
                 {
                     let descriptor = wgpu::CommandEncoderDescriptor { label: None };
                     let mut encoder =
-                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+                        gpu.with_gpu(|gpu| gpu.device().create_command_encoder(&descriptor));
 
                     encoder.copy_buffer_to_texture(
                         wgpu::ImageCopyBufferBase {
@@ -1925,7 +1915,7 @@ impl Host {
                     );
 
                     let command = encoder.finish();
-                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                    gpu.with_gpu(|gpu| gpu.queue().submit(once(command)));
 
                     return Ok(());
                 } else if let ImageData::GpuBuffer {
@@ -1936,7 +1926,7 @@ impl Host {
                 {
                     let descriptor = wgpu::CommandEncoderDescriptor { label: None };
                     let mut encoder =
-                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+                        gpu.with_gpu(|gpu| gpu.device().create_command_encoder(&descriptor));
 
                     encoder.copy_buffer_to_buffer(
                         &self.descriptors.buffers[copy_src_buffer.0],
@@ -1947,7 +1937,7 @@ impl Host {
                     );
 
                     let command = encoder.finish();
-                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                    gpu.with_gpu(|gpu| gpu.queue().submit(once(command)));
 
                     return Ok(());
                 }
@@ -2589,7 +2579,7 @@ impl Retire<'_> {
     pub fn finish(mut self) {
         let _ = self.retire_buffers();
 
-        let gpu = self.execution.gpu.into_inner();
+        let gpu = self.execution.gpu;
         if let Some(gpu_key) = self.execution.gpu_key {
             self.pool.reinsert_device(gpu_key, gpu);
 
@@ -2648,7 +2638,7 @@ impl SyncPoint<'_> {
             None => Ok(()),
             Some(polled) => {
                 let DevicePolled { future, gpu } = polled;
-                block_on(future, Some(gpu))?;
+                block_on(future, Some(&gpu))?;
                 /*
                 let _took_time =
                     std::time::Instant::now().saturating_duration_since(self.host_start);
@@ -2673,7 +2663,7 @@ impl Drop for SyncPoint<'_> {
 }
 
 /// Block on an async future that may depend on a device being polled.
-pub(crate) fn block_on<F, T>(future: F, device: Option<&core::cell::RefCell<Gpu>>) -> T
+pub(crate) fn block_on<F, T>(future: F, device: Option<&Gpu>) -> T
 where
     F: Future<Output = T> + Unpin,
     T: 'static,
@@ -2717,7 +2707,7 @@ where
             ) -> core::task::Poll<F::Output> {
                 self.as_ref()
                     .device
-                    .with_gpu(|gpu| gpu.device.poll(wgpu::Maintain::Poll));
+                    .with_gpu(|gpu| gpu.device().poll(wgpu::Maintain::Poll));
                 // Ugh, noooo...
                 ctx.waker().wake_by_ref();
                 Pin::new(&mut self.get_mut().future).poll(ctx)
