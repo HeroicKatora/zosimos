@@ -1,3 +1,5 @@
+mod not_wren;
+
 use std::future::Future;
 
 use crate::surface::Surface;
