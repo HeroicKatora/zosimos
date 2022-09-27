@@ -34,7 +34,11 @@ version = "0.13"
 features = ["spirv"]
 
 [workspace]
-members = [".", "bin/editor"]
+members = [
+  ".",
+  "bin/editor",
+  "lib/not-wren",
+]
 
 
 [build-dependencies]

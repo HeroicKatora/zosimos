@@ -1,0 +1,10 @@
+[package]
+name = "not-wren"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "not_wren"
+
+[dependencies]
+im = ""
