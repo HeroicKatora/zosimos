@@ -10,14 +10,26 @@
 //! 
 //! Not distributed but in theory very much ready for distributed extensions. We also only have one
 //! data partition.
+use core::hash::Hash;
+
+use std::sync::Arc;
+use im::hashmap::HashMap;
 
 /// The map itself won't store values, only reference count identifiers.
 pub struct ValId(u64);
 
-pub struct Map<K: Hash + Eq> {
 
+pub struct Map<K: Hash + Eq> {
 }
 
+struct MapInner<K> {
+}
+
+pub struct Reader<K> {
+}
+
+pub struct Writer<K> {
+}
 
 impl<K> Map<K> {
     pub fn new(reader: usize, writer: usize)
