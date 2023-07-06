@@ -1,4 +1,4 @@
-use core::{future::Future, iter::once, marker::Unpin, num::NonZeroU32, pin::Pin};
+use core::{future::Future, iter::once, marker::Unpin, pin::Pin};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -1425,7 +1425,7 @@ impl Host {
                     lod_min_clamp: 0.0,
                     lod_max_clamp: 0.0,
                     compare: None,
-                    anisotropy_clamp: None,
+                    anisotropy_clamp: 1,
                     // FIXME(webGL2): on webGL2 a non-None *panics*.
                     // This is due to wgpu_hal-gles using sampler_parameter_f32_slice which panics
                     // in its implementation in glow's webGL1/2.
@@ -1507,6 +1507,7 @@ impl Host {
                             U::TEXTURE_BINDING | U::RENDER_ATTACHMENT
                         }
                     },
+                    view_formats: &[desc.format],
                 };
 
                 let texture = if let Some(texture) = cache.preallocated_textures.remove(&inst) {
@@ -1686,9 +1687,9 @@ impl Host {
                         wgpu::ImageCopyBufferBase {
                             buffer: &self.descriptors.buffers[copy_dst_buffer.0],
                             layout: wgpu::ImageDataLayout {
-                                bytes_per_row: NonZeroU32::new(bytes_per_row as u32),
+                                bytes_per_row: Some(bytes_per_row as u32),
                                 offset: 0,
-                                rows_per_image: NonZeroU32::new(size.1),
+                                rows_per_image: Some(size.1),
                             },
                         },
                         wgpu::Extent3d {
@@ -1901,9 +1902,9 @@ impl Host {
                         wgpu::ImageCopyBufferBase {
                             buffer: &self.descriptors.buffers[copy_src_buffer.0],
                             layout: wgpu::ImageDataLayout {
-                                bytes_per_row: NonZeroU32::new(bytes_per_row as u32),
+                                bytes_per_row: Some(bytes_per_row as u32),
                                 offset: 0,
-                                rows_per_image: NonZeroU32::new(size.1),
+                                rows_per_image: Some(size.1),
                             },
                         },
                         texture.as_image_copy(),
@@ -2227,9 +2228,9 @@ impl Descriptors {
         Ok(wgpu::ImageCopyBufferBase {
             buffer,
             layout: wgpu::ImageDataLayout {
-                bytes_per_row: NonZeroU32::new(layout.row_stride as u32),
+                bytes_per_row: Some(layout.row_stride as u32),
                 offset: 0,
-                rows_per_image: NonZeroU32::new(layout.height),
+                rows_per_image: Some(layout.height),
             },
         })
     }

@@ -682,6 +682,7 @@ impl PoolImageMut<'_> {
             dimension: wgpu::TextureDimension::D2,
             format: descriptor.format,
             usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[descriptor.format],
         });
 
         self.image.descriptor = image.clone();
@@ -736,6 +737,7 @@ impl PoolImageMut<'_> {
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::R8Unorm,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[wgpu::TextureFormat::R8Unorm],
                 });
 
                 mem::swap(&mut replace, ttexture);

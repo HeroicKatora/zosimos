@@ -59,7 +59,10 @@ impl Surface {
     pub fn new(window: &Window) -> Self {
         const ANY: wgpu::Backends = wgpu::Backends::all();
 
-        let instance = wgpu::Instance::new(ANY);
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            .. Default::default()
+        });
         let inner = window.create_surface(&instance);
 
         let adapter = Program::request_compatible_adapter(
@@ -74,56 +77,62 @@ impl Surface {
 
         eprintln!("Rendering on {:?}", adapter.get_info());
 
-        let (width, height) = window.inner_size();
         let (color, texel);
+        let capabilities = inner.get_capabilities(&adapter);
+
+        let preferred_format = match capabilities.formats.get(0) {
+            None => {
+                log::warn!("No supported surface formats …");
+                color = Color::SRGB;
+                texel = Texel::new_u8(SampleParts::RgbA);
+                wgpu::TextureFormat::Rgba8Unorm
+            }
+            Some(wgpu::TextureFormat::Rgba8Unorm) => {
+                log::warn!("Using format {:?}", wgpu::TextureFormat::Rgba8Unorm);
+                color = match Color::SRGB {
+                    Color::Rgb {
+                        luminance,
+                        transfer: _,
+                        primary,
+                        whitepoint,
+                    } => Color::Rgb {
+                        luminance,
+                        primary,
+                        whitepoint,
+                        transfer: Transfer::Linear,
+                    },
+                    _ => unreachable!("That's not the right color"),
+                };
+
+                texel = Texel::new_u8(SampleParts::RgbA);
+                wgpu::TextureFormat::Rgba8Unorm
+            }
+            Some(wgpu::TextureFormat::Rgba8UnormSrgb) => {
+                log::warn!("Using format {:?}", wgpu::TextureFormat::Rgba8UnormSrgb);
+
+                color = Color::SRGB;
+                texel = Texel::new_u8(SampleParts::RgbA);
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            }
+            Some(wgpu::TextureFormat::Bgra8UnormSrgb) | _ => {
+                log::warn!("Using format {:?}", wgpu::TextureFormat::Bgra8UnormSrgb);
+
+                color = Color::SRGB;
+                texel = Texel::new_u8(SampleParts::BgrA);
+                wgpu::TextureFormat::Bgra8UnormSrgb
+            }
+        };
+
+        let (width, height) = window.inner_size();
         let config = SurfaceConfiguration {
             //  FIXME: COPY_DST is not universal. Should fix `run.rs` so that RENDER_ATTACHMENT suffices.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: match inner.get_supported_formats(&adapter).get(0) {
-                None => {
-                    log::warn!("No supported surface formats …");
-                    color = Color::SRGB;
-                    texel = Texel::new_u8(SampleParts::RgbA);
-                    wgpu::TextureFormat::Rgba8Unorm
-                }
-                Some(wgpu::TextureFormat::Rgba8Unorm) => {
-                    log::warn!("Using format {:?}", wgpu::TextureFormat::Rgba8Unorm);
-                    color = match Color::SRGB {
-                        Color::Rgb {
-                            luminance,
-                            transfer: _,
-                            primary,
-                            whitepoint,
-                        } => Color::Rgb {
-                            luminance,
-                            primary,
-                            whitepoint,
-                            transfer: Transfer::Linear,
-                        },
-                        _ => unreachable!("That's not the right color"),
-                    };
-
-                    texel = Texel::new_u8(SampleParts::RgbA);
-                    wgpu::TextureFormat::Rgba8Unorm
-                }
-                Some(wgpu::TextureFormat::Rgba8UnormSrgb) => {
-                    log::warn!("Using format {:?}", wgpu::TextureFormat::Rgba8UnormSrgb);
-
-                    color = Color::SRGB;
-                    texel = Texel::new_u8(SampleParts::RgbA);
-                    wgpu::TextureFormat::Rgba8UnormSrgb
-                }
-                Some(wgpu::TextureFormat::Bgra8UnormSrgb) | _ => {
-                    log::warn!("Using format {:?}", wgpu::TextureFormat::Bgra8UnormSrgb);
-
-                    color = Color::SRGB;
-                    texel = Texel::new_u8(SampleParts::BgrA);
-                    wgpu::TextureFormat::Bgra8UnormSrgb
-                }
-            },
+            format: preferred_format,
             width,
             height,
             present_mode: wgpu::PresentMode::AutoVsync,
+            view_formats: [preferred_format].to_vec(),
+            alpha_mode: Default::default(),
         };
 
         let descriptor = Descriptor {
