@@ -2,8 +2,19 @@ use crate::{compute, editor, surface, winit::Window};
 use wasm_bindgen::prelude::*;
 use web_sys;
 
-#[wasm_bindgen(start)]
+#[cfg(all(
+    not(target_os = "wasi"),
+    target_arch = "wasm32",
+))]
 pub async fn run() {
+    let level: log::Level = log::Level::Info;
+    console_log::init_with_level(level).expect("could not initialize logger");
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+
+    run_sync();
+}
+
+pub fn run_sync() {
     // TODO: setup panic hook here?
     // TODO: schedule async IO-tasks here?
     let winit = Window::new_wasm();
@@ -31,15 +42,22 @@ pub async fn run() {
 
 impl Window {
     fn new_wasm() -> Self {
-        use winit::platform::web::WindowExtWebSys;
+        use winit::platform::web::{WindowExtWebSys, WindowBuilderExtWebSys};
+
+        let canvas: web_sys::HtmlCanvasElement = web_sys::window().and_then(|w| w.document())
+            .expect("find a document")
+            .query_selector("canvas")
+            .expect("find something")
+            .expect("find a canvas")
+            .dyn_into()
+            .expect("find a real canvas");
+        eprintln!("{}×{}", canvas.width(), canvas.height());
 
         let event_loop = winit::event_loop::EventLoop::new();
         let mut builder = winit::window::WindowBuilder::new();
+        builder = builder.with_canvas(Some(canvas));
         let window = builder.build(&event_loop).unwrap();
 
-        let level: log::Level = log::Level::Info;
-        console_log::init_with_level(level).expect("could not initialize logger");
-        std::panic::set_hook(Box::new(console_error_panic_hook::hook));
         // On wasm, append the canvas to the document body
         web_sys::window()
             .and_then(|win| win.document())

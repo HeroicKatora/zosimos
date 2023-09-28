@@ -1,8 +1,11 @@
 mod compute;
 mod editor;
 mod surface;
+#[cfg(target_arch = "wasm32")]
+mod wasm32;
 mod winit;
 
+#[cfg(not(target_os = "wasi"))]
 fn main() {
     env_logger::init();
 
@@ -21,4 +24,10 @@ fn main() {
     });
 
     winit.run_on_main(editor, compute, surface)
+}
+
+#[cfg(target_os = "wasi")]
+fn main() {
+    env_logger::init();
+    wasm32::run_sync();
 }

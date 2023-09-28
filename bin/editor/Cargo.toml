@@ -33,10 +33,10 @@ version = "0.4"
 [dependencies.winit]
 version = "0.28.6"
 [dependencies.wgpu]
-version = "0.16.1"
+version = "0.17.1"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-env_logger = "0.9.0"
+[dependencies.env_logger]
+version = "0.9.0"
 
 # Wasm compatibility following, roughly
 # <https://sotrh.github.io/learn-wgpu/beginner/tutorial1-window/#the-code>
@@ -44,9 +44,9 @@ env_logger = "0.9.0"
 console_log = { version = "0.2.0" }
 console_error_panic_hook = { version = "0.1.7" }
 wgpu = { version = "0.16.1", features = ["webgl"]}
-wasm-bindgen = "=0.2.84"
-wasm-bindgen-futures = "0.4.30"
-web-sys = { version = "=0.3.61", features = [
+wasm-bindgen = "=0.2.87"
+wasm-bindgen-futures = "0.4.34"
+web-sys = { version = "=0.3.64", features = [
     "Document",
     "Window",
     "Element",
