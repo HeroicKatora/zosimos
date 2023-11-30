@@ -2095,6 +2095,8 @@ impl Descriptors {
             label: None,
             color_attachments: buf,
             depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
         })
     }
 

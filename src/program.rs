@@ -1112,12 +1112,12 @@ impl Program {
                             wgpu::Operations {
                                 // TODO: we could let choose a replacement color..
                                 load: wgpu::LoadOp::Clear(wgpu::Color::BLUE),
-                                store: true,
+                                store: wgpu::StoreOp::Store,
                             }
                         }
                         Target::Load(_) => wgpu::Operations {
                             load: wgpu::LoadOp::Load,
-                            store: true,
+                            store: wgpu::StoreOp::Store,
                         },
                     };
 

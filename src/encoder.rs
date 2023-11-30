@@ -20,6 +20,7 @@ use crate::util::ExtendOne;
 use crate::{run, shaders};
 
 use image_canvas::layout::{CanvasLayout, RowLayoutDescription};
+use wgpu::StoreOp;
 
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
 #[derive(Default)]
@@ -712,7 +713,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 ops: wgpu::Operations {
                     // TODO: we could let choose a replacement color..
                     load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
-                    store: true,
+                    store: StoreOp::Store,
                 },
             };
 
@@ -762,7 +763,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 ops: wgpu::Operations {
                     // TODO: we could let choose a replacement color..
                     load: wgpu::LoadOp::Clear(wgpu::Color::RED),
-                    store: true,
+                    store: StoreOp::Store,
                 },
             };
 
@@ -915,7 +916,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             texture_view,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
-                store: true,
+                store: StoreOp::Store,
             },
         };
 
