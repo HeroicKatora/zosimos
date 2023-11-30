@@ -865,6 +865,8 @@ impl Executable {
     pub fn launch(&self, mut env: Environment) -> Result<Execution, StartError> {
         log::info!("Instructions {:#?}", self.instructions);
         self.check_satisfiable(&mut env)?;
+        env.gpu.device().start_capture();
+
         Ok(Execution {
             gpu: env.gpu.into(),
             gpu_key: env.gpu_key,
@@ -887,6 +889,8 @@ impl Executable {
     /// Run the executable but take all by value.
     pub fn launch_once(self, mut env: Environment) -> Result<Execution, StartError> {
         self.check_satisfiable(&mut env)?;
+        env.gpu.device().start_capture();
+
         Ok(Execution {
             gpu: env.gpu.into(),
             gpu_key: env.gpu_key,
@@ -1248,7 +1252,9 @@ impl Execution {
     /// Stop the execution, depositing all resources into the provided pool.
     #[must_use = "You won't get the ids of outputs."]
     pub fn retire_gracefully(self, pool: &mut Pool) -> Retire<'_> {
-        self.gpu.with_gpu(|gpu| gpu.device().stop_capture());
+        self.gpu.with_gpu(|gpu| {
+            gpu.device().stop_capture()
+        });
 
         Retire {
             execution: self,
