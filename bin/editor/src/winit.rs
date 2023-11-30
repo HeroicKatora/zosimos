@@ -54,6 +54,8 @@ pub trait ModalEditor {
     fn outdated(&mut self, _: &mut Self::Surface);
     /// Issued to query if an exit is required.
     fn exit(&self) -> bool;
+    /// Update the surface with changes to the compute instructions.
+    fn reconfigure_compute(&mut self, _: &mut Self::Surface, _: &Self::Compute);
 }
 
 pub trait WindowedSurface {
@@ -115,6 +117,8 @@ impl Window {
                     inner.window.request_redraw();
                 }
                 Some(ModalEvent::RedrawRequested) => {
+                    ed.reconfigure_compute(&mut surface, &compute);
+
                     ed.event(ModalEvent::RedrawRequested, &mut modal);
                     match ed.redraw_request(&mut surface) {
                         Ok(()) => {}

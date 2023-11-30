@@ -1,10 +1,12 @@
 use crate::winit::{Window, WindowSurface, WindowedSurface};
+use crate::compute::{ComputeTailCommands, Compute};
 
 use stealth_paint::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
 use stealth_paint::command;
 use stealth_paint::pool::{GpuKey, Pool, PoolKey};
 use stealth_paint::program::{Capabilities, CompileError, LaunchError, Program};
 use stealth_paint::run::{Executable, StepLimits};
+
 use wgpu::{Adapter, Instance, SurfaceConfiguration};
 
 pub struct Surface {
@@ -22,6 +24,8 @@ pub struct Surface {
     entry: PoolEntry,
     /// The runtime state from stealth paint.
     runtimes: Runtimes,
+    /// 
+    commands: ComputeTailCommands,
 }
 
 #[derive(Debug)]
@@ -153,6 +157,7 @@ impl Surface {
                 descriptor,
             },
             runtimes: Runtimes::default(),
+            commands: ComputeTailCommands::default(),
         };
 
         let gpu = that.reconfigure_gpu();
@@ -171,6 +176,10 @@ impl Surface {
         self.pool
             .share_device(internal_key, pool)
             .expect("maintained incorrect gpu key")
+    }
+
+    pub(crate) fn reconfigure_compute(&mut self, compute: &Compute) {
+        compute.acquire(&mut self.commands);
     }
 
     /// Change the base device.
@@ -199,10 +208,6 @@ impl Surface {
             self.entry.presentable = Some(key);
             self.pool.upload(key, gpu).unwrap();
         }
-    }
-
-    pub fn resize(&mut self, width: u32, height: u32) {
-        todo!()
     }
 
     pub fn get_current_texture(&mut self) -> Result<wgpu::SurfaceTexture, wgpu::SurfaceError> {
