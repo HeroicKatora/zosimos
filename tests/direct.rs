@@ -35,7 +35,7 @@ fn standard() {
 
     run_blending(
         &mut pool,
-        instance.enumerate_adapters(ANY),
+        instance.enumerate_adapters(ANY).into_iter(),
         pool_foreground,
         pool_background,
     );

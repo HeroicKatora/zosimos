@@ -47,11 +47,11 @@ fn mandelbrot() {
     const ANY: wgpu::Backends = wgpu::Backends::VULKAN;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: ANY,
-        .. Default::default()
+        ..Default::default()
     });
 
-    let adapter =
-        Program::minimum_adapter(instance.enumerate_adapters(ANY)).expect("to get an adapter");
+    let adapter = Program::minimum_adapter(instance.enumerate_adapters(ANY).into_iter())
+        .expect("to get an adapter");
 
     let mut pool = Pool::new();
 
@@ -59,7 +59,7 @@ fn mandelbrot() {
         .expect("to get a device");
 
     // Actual program begins here.
-    let target = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4000, 4000));
+    let target = image::DynamicImage::ImageRgba8(image::RgbaImage::new(2048, 2048));
 
     let mut commands = CommandBuffer::default();
     let brot = commands.construct_dynamic(&Mandelbrot::new(Descriptor {
