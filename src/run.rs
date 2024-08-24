@@ -114,20 +114,52 @@ pub(crate) struct Host {
 pub(crate) struct Debug {
     bind_groups: HashMap<usize, DebugInfo>,
     bind_group_layouts: HashMap<usize, DebugInfo>,
-    buffers: HashMap<usize, DebugInfo>,
+    buffers: HashMap<DeviceBuffer, DebugBufferInfo>,
+    buffer_history: HashMap<DeviceBuffer, Vec<TextureInitState>>,
     command_buffers: HashMap<usize, DebugInfo>,
     shaders: HashMap<usize, DebugInfo>,
     pipeline_layouts: HashMap<usize, DebugInfo>,
     render_pipelines: HashMap<usize, DebugInfo>,
     sampler: HashMap<usize, DebugInfo>,
-    textures: HashMap<usize, DebugInfo>,
-    texture_views: HashMap<usize, DebugInfo>,
+    textures: HashMap<DeviceTexture, DebugTextureInfo>,
+    texture_history: HashMap<DeviceTexture, Vec<TextureInitState>>,
+    texture_views: HashMap<usize, DebugViewInfo>,
 }
 
 #[derive(Default, Debug)]
 pub(crate) struct DebugInfo {
     /// Information attached at runtime to this object, i.e. a special kind of name.
     assertion_data: Option<String>,
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct DebugBufferInfo {
+    info: DebugInfo,
+    init: TextureInitState,
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct DebugTextureInfo {
+    info: DebugInfo,
+    init: TextureInitState,
+}
+
+#[derive(Debug)]
+pub(crate) struct DebugViewInfo {
+    info: DebugInfo,
+    init: Option<DeviceTexture>,
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+enum TextureInitState {
+    #[default]
+    Uninit,
+    WriteTo,
+    /// Utilized as a shader source.
+    UseRead,
+    /// Utilized as a shader target.
+    UseWrite,
+    ReadFrom,
 }
 
 #[derive(Default)]
@@ -342,7 +374,11 @@ pub struct RetireError {
 
 impl core::fmt::Display for RetireError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Execution inconsistent during retiring: {:?}", self.inner)
+        write!(
+            f,
+            "Execution inconsistent during retiring: {:?}",
+            self.inner
+        )
     }
 }
 
@@ -381,7 +417,11 @@ impl Executable {
             gpu,
             gpu_key: Some(gpu_key),
             info: self.info.clone(),
-            buffers: self.image_io_buffers.iter().map(Image::clone_like).collect(),
+            buffers: self
+                .image_io_buffers
+                .iter()
+                .map(Image::clone_like)
+                .collect(),
             io_map: self.io_map.clone(),
             cache: Cache::default(),
         })
@@ -1375,7 +1415,9 @@ impl Host {
             }
             Low::BindGroup(desc) => {
                 let mut entry_buffer = vec![];
-                let group = self.descriptors.bind_group(desc, &mut entry_buffer)?;
+                let group =
+                    self.descriptors
+                        .bind_group(desc, &mut entry_buffer, &mut self.debug)?;
                 // eprintln!("{}: {:?}", desc.layout_idx, group);
                 let group = gpu.with_gpu(|gpu| gpu.device().create_bind_group(&group));
                 self.descriptors.bind_groups.push(group);
@@ -1398,6 +1440,8 @@ impl Host {
                 };
 
                 let buffer_idx = self.descriptors.buffers.len();
+                self.debug
+                    .buffer_use(DeviceBuffer(buffer_idx), TextureInitState::Uninit);
                 self.descriptors
                     .buffer_descriptors
                     .insert(buffer_idx, desc.clone());
@@ -1411,6 +1455,10 @@ impl Host {
                     contents: desc.content.as_slice(&self.binary_data),
                     usage: desc.usage.to_wgpu(),
                 };
+
+                let buffer_idx = self.descriptors.buffers.len();
+                self.debug
+                    .buffer_use(DeviceBuffer(buffer_idx), TextureInitState::WriteTo);
 
                 self.usage.buffer_mem += desc.u64_len();
                 let buffer = gpu.with_gpu(|gpu| gpu.device().create_buffer_init(&wgpu_desc));
@@ -1492,6 +1540,10 @@ impl Host {
                     .textures
                     .get(desc.texture.0)
                     .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
+
+                self.debug
+                    .texture_view(self.descriptors.texture_views.len(), desc.texture);
+
                 let desc = wgpu::TextureViewDescriptor {
                     label: None,
                     format: None,
@@ -1516,6 +1568,8 @@ impl Host {
                     } => texture,
                     _ => return Err(StepError::InvalidInstruction(line!())),
                 };
+
+                self.debug.image_view(self.descriptors.texture_views.len());
 
                 let desc = wgpu::TextureViewDescriptor {
                     label: None,
@@ -1570,9 +1624,16 @@ impl Host {
                 };
 
                 let texture_idx = self.descriptors.textures.len();
+
                 self.descriptors
                     .texture_descriptors
                     .insert(texture_idx, desc.clone());
+
+                self.debug.texture_use(
+                    DeviceTexture(self.descriptors.textures.len()),
+                    TextureInitState::default(),
+                );
+
                 self.descriptors.textures.push(texture);
                 Ok(())
             }
@@ -1618,9 +1679,11 @@ impl Host {
             }
             Low::BeginRenderPass(descriptor) => {
                 let mut attachment_buf = vec![];
-                let descriptor = self
-                    .descriptors
-                    .render_pass(descriptor, &mut attachment_buf)?;
+                let descriptor = self.descriptors.prepare_attachments_for_render_pass(
+                    descriptor,
+                    &mut attachment_buf,
+                    &mut self.debug,
+                )?;
                 let encoder = match &mut self.command_encoder {
                     Some(encoder) => encoder,
                     None => return Err(StepError::InvalidInstruction(line!())),
@@ -1688,6 +1751,9 @@ impl Host {
                     None => return Err(StepError::InvalidInstruction(line!())),
                     Some(source) => &source.data,
                 };
+
+                self.debug
+                    .buffer_use(target_buffer, TextureInitState::WriteTo);
 
                 let layout = source.layout().clone();
                 let target_size = (target_layout.width, target_layout.height);
@@ -1833,6 +1899,11 @@ impl Host {
                     None => return Err(StepError::InvalidInstruction(line!())),
                 };
 
+                self.debug
+                    .texture_use(target_texture, TextureInitState::WriteTo);
+                self.debug
+                    .buffer_use(source_buffer, TextureInitState::ReadFrom);
+
                 let buffer = self.descriptors.buffer(source_buffer, source_layout)?;
                 let texture = self.descriptors.texture(target_texture)?;
 
@@ -1870,6 +1941,11 @@ impl Host {
                     None => return Err(StepError::InvalidInstruction(line!())),
                 };
 
+                self.debug
+                    .texture_use(source_texture, TextureInitState::ReadFrom);
+                self.debug
+                    .buffer_use(target_buffer, TextureInitState::WriteTo);
+
                 let texture = self.descriptors.texture(source_texture)?;
                 let buffer = self.descriptors.buffer(target_buffer, target_layout)?;
 
@@ -1903,6 +1979,11 @@ impl Host {
                     None => return Err(StepError::InvalidInstruction(line!())),
                 };
 
+                self.debug
+                    .buffer_use(source_buffer, TextureInitState::ReadFrom);
+                self.debug
+                    .buffer_use(target_buffer, TextureInitState::WriteTo);
+
                 // eprintln!("CopyBufferToBuffer");
                 // eprintln!(" Source: {:?}", source_buffer.0);
                 // eprintln!(" Target: {:?}", target_buffer.0);
@@ -1929,6 +2010,9 @@ impl Host {
                 if size != source_size {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
+
+                self.debug
+                    .buffer_use(source_buffer, TextureInitState::ReadFrom);
 
                 let bytes_per_row = source_layout.row_stride;
                 let bytes_per_texel = source_layout.texel_stride;
@@ -2054,11 +2138,12 @@ impl Descriptors {
         &'set self,
         desc: &program::BindGroupDescriptor,
         buf: &'set mut Vec<wgpu::BindGroupEntry<'set>>,
+        debug: &mut Debug,
     ) -> Result<wgpu::BindGroupDescriptor<'set>, StepError> {
         buf.clear();
 
         for (idx, entry) in desc.entries.iter().enumerate() {
-            let resource = self.binding_resource(entry)?;
+            let resource = self.binding_resource(entry, debug)?;
             buf.push(wgpu::BindGroupEntry {
                 binding: idx as u32,
                 resource,
@@ -2066,7 +2151,7 @@ impl Descriptors {
         }
 
         for &(idx, ref entry) in desc.sparse.iter() {
-            let resource = self.binding_resource(entry)?;
+            let resource = self.binding_resource(entry, debug)?;
             buf.push(wgpu::BindGroupEntry {
                 binding: idx as u32,
                 resource,
@@ -2086,6 +2171,7 @@ impl Descriptors {
     fn binding_resource(
         &self,
         desc: &program::BindingResource,
+        debug: &mut Debug,
     ) -> Result<wgpu::BindingResource<'_>, StepError> {
         use program::BindingResource::{Buffer, Sampler, TextureView};
         // eprintln!("{:?}", desc);
@@ -2095,6 +2181,7 @@ impl Descriptors {
                 offset,
                 size,
             } => {
+                debug.buffer_use(DeviceBuffer(buffer_idx), TextureInitState::ReadFrom);
                 let buffer = self
                     .buffers
                     .get(buffer_idx)
@@ -2110,11 +2197,14 @@ impl Descriptors {
                 .get(idx)
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))
                 .map(wgpu::BindingResource::Sampler),
-            TextureView(idx) => self
-                .texture_views
-                .get(idx)
-                .ok_or_else(|| StepError::InvalidInstruction(line!()))
-                .map(wgpu::BindingResource::TextureView),
+            TextureView(idx) => {
+                debug.view_use(idx, TextureInitState::ReadFrom);
+
+                self.texture_views
+                    .get(idx)
+                    .ok_or_else(|| StepError::InvalidInstruction(line!()))
+                    .map(wgpu::BindingResource::TextureView)
+            }
         }
     }
 
@@ -2131,14 +2221,16 @@ impl Descriptors {
         })
     }
 
-    fn render_pass<'set, 'buf>(
+    fn prepare_attachments_for_render_pass<'set, 'buf>(
         &'set self,
         desc: &program::RenderPassDescriptor,
         buf: &'buf mut Vec<Option<wgpu::RenderPassColorAttachment<'set>>>,
+        debug: &mut Debug,
     ) -> Result<wgpu::RenderPassDescriptor<'set, 'buf>, StepError> {
         buf.clear();
 
         for attachment in &desc.color_attachments {
+            debug.view_use(attachment.texture_view, TextureInitState::UseWrite);
             buf.push(Some(self.color_attachment(attachment)?));
         }
 
@@ -2713,6 +2805,44 @@ impl Drop for SyncPoint<'_> {
         if self.future.is_some() {
             let _ = self.block_on();
         }
+    }
+}
+
+impl Debug {
+    fn buffer_use(&mut self, tex: DeviceBuffer, state: TextureInitState) {
+        self.buffers.entry(tex).or_default().init = state;
+        self.buffer_history.entry(tex).or_default().push(state);
+    }
+
+    fn texture_use(&mut self, tex: DeviceTexture, state: TextureInitState) {
+        self.textures.entry(tex).or_default().init = state;
+        self.texture_history.entry(tex).or_default().push(state);
+    }
+
+    fn view_use(&mut self, view: usize, state: TextureInitState) {
+        if let Some(texture) = self.texture_views[&view].init {
+            self.texture_use(texture, state);
+        }
+    }
+
+    fn texture_view(&mut self, view: usize, init: DeviceTexture) {
+        self.texture_views.insert(
+            view,
+            DebugViewInfo {
+                info: DebugInfo::default(),
+                init: Some(init),
+            },
+        );
+    }
+
+    fn image_view(&mut self, view: usize) {
+        self.texture_views.insert(
+            view,
+            DebugViewInfo {
+                info: DebugInfo::default(),
+                init: None,
+            },
+        );
     }
 }
 

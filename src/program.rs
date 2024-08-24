@@ -154,11 +154,11 @@ pub(crate) struct Frame {
 }
 
 /// A gpu buffer associated with an image buffer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DeviceBuffer(pub(crate) usize);
 
 /// A gpu texture associated with an image buffer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DeviceTexture(pub(crate) usize);
 
 /// Identifies one layout based buffer in the render pipeline, by an index.

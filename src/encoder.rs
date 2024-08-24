@@ -286,8 +286,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// This ensures we can keep track of the expected state change, and validate the correct order
     /// of commands. More specific sequencing commands will expect correct order or assume it
     /// internally.
-    pub(crate) fn push(&mut self, low: Low) -> Result<Instruction, LaunchError> {
-        match low {
+    pub(crate) fn push(&mut self, mut low: Low) -> Result<Instruction, LaunchError> {
+        match &mut low {
             // Not yet handled.
             Low::AssertBuffer { .. } | Low::AssertTexture { .. } => {}
             Low::BindGroupLayout(_) => self.bind_group_layouts += 1,
@@ -351,18 +351,21 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             }
             Low::SetPipeline(_) => {}
             Low::SetBindGroup { group, .. } => {
-                if group >= self.bind_groups {
+                if *group >= self.bind_groups {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
             }
             Low::SetVertexBuffer { buffer, .. } => {
-                if buffer >= self.buffers {
+                if *buffer >= self.buffers {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
             }
             // TODO: could validate indices.
             Low::DrawOnce { .. } | Low::DrawIndexedZero { .. } | Low::SetPushConstants { .. } => {}
             Low::RunTopCommand => {
+                // If we delayed anything, run it now to preserve order of commands.
+                self.plan_gpu_effects_visible()?;
+
                 if self.command_buffers == 0 {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
@@ -370,7 +373,13 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 self.command_buffers -= 1;
             }
             Low::RunBotToTop(num) => {
-                if let Some(num) = self.command_buffers.checked_sub(num) {
+                // If we delayed anything, run it now to preserve order of commands.
+                if !self.delayed_commands.is_empty() {
+                    *num += self.delayed_commands.len();
+                    self.delayed_commands.clear();
+                }
+
+                if let Some(num) = self.command_buffers.checked_sub(*num) {
                     self.command_buffers = num;
                 } else {
                     return Err(LaunchError::InternalCommandError(line!()));
@@ -404,8 +413,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     fn plan_gpu_effects_visible(&mut self) -> Result<(), LaunchError> {
         if !self.delayed_commands.is_empty() {
-            self.push(Low::RunBotToTop(self.delayed_commands.len()))?;
-            self.delayed_commands.clear();
+            // This synchronizes itself.
+            self.push(Low::RunBotToTop(0))?;
         }
 
         Ok(())
