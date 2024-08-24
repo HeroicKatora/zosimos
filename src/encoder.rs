@@ -363,14 +363,16 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             // TODO: could validate indices.
             Low::DrawOnce { .. } | Low::DrawIndexedZero { .. } | Low::SetPushConstants { .. } => {}
             Low::RunTopCommand => {
-                // If we delayed anything, run it now to preserve order of commands.
-                self.plan_gpu_effects_visible()?;
+                if !self.delayed_commands.is_empty() {
+                    low = Low::RunBotToTop(self.delayed_commands.len() + 1);
+                    self.delayed_commands.clear();
+                } else {
+                    if self.command_buffers == 0 {
+                        return Err(LaunchError::InternalCommandError(line!()));
+                    }
 
-                if self.command_buffers == 0 {
-                    return Err(LaunchError::InternalCommandError(line!()));
+                    self.command_buffers -= 1;
                 }
-
-                self.command_buffers -= 1;
             }
             Low::RunBotToTop(num) => {
                 // If we delayed anything, run it now to preserve order of commands.
