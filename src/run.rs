@@ -1,11 +1,11 @@
-use core::{future::Future, iter::once, marker::Unpin, num::NonZeroU32, pin::Pin};
+use core::{future::Future, iter::once, marker::Unpin, pin::Pin};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::buffer::{BufferLayout, ByteLayout, Descriptor};
 use crate::command::Register;
 use crate::pool::{
-    BufferKey, GpuKey, ImageData, PipelineKey, Pool, PoolImage, PoolKey, ShaderKey, TextureKey,
+    BufferKey, Gpu, GpuKey, ImageData, PipelineKey, Pool, PoolImage, PoolKey, ShaderKey, TextureKey,
 };
 use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
 use crate::util::Ping;
@@ -33,7 +33,7 @@ pub struct Executable {
     /// All device related state which we have preserved.
     pub(crate) descriptors: Descriptors,
     /// Input/Output buffers used for execution.
-    pub(crate) buffers: Vec<Image>,
+    pub(crate) image_io_buffers: Vec<Image>,
     /// The map from registers to the index in image data.
     pub(crate) io_map: Arc<IoMap>,
     /// The capabilities required from devices to execute this.
@@ -79,7 +79,7 @@ pub struct Environment<'pool> {
 /// A running `Executable`.
 pub struct Execution {
     /// The gpu processor handles.
-    pub(crate) gpu: core::cell::RefCell<Gpu>,
+    pub(crate) gpu: Gpu,
     /// The key of the gpu if it was extracted from a pool.
     pub(crate) gpu_key: Option<GpuKey>,
     /// All the host state of execution.
@@ -92,7 +92,7 @@ pub(crate) struct Host {
     pub(crate) machine: Machine,
     pub(crate) descriptors: Descriptors,
     pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
-    pub(crate) buffers: Vec<Image>,
+    pub(crate) image_io_buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
     pub(crate) io_map: Arc<IoMap>,
     pub(crate) info: Arc<ProgramInfo>,
@@ -105,6 +105,61 @@ pub(crate) struct Host {
     /// until such scheduling happens as it is GPU synchronous instead of host-synchronous, when we
     /// need not map a buffer.
     pub(crate) delayed_submits: usize,
+
+    /// Debug information.
+    pub(crate) debug: Debug,
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct Debug {
+    bind_groups: HashMap<usize, DebugInfo>,
+    bind_group_layouts: HashMap<usize, DebugInfo>,
+    buffers: HashMap<DeviceBuffer, DebugBufferInfo>,
+    buffer_history: HashMap<DeviceBuffer, Vec<TextureInitState>>,
+    command_buffers: HashMap<usize, DebugInfo>,
+    shaders: HashMap<usize, DebugInfo>,
+    pipeline_layouts: HashMap<usize, DebugInfo>,
+    render_pipelines: HashMap<usize, DebugInfo>,
+    sampler: HashMap<usize, DebugInfo>,
+    textures: HashMap<DeviceTexture, DebugTextureInfo>,
+    texture_history: HashMap<DeviceTexture, Vec<TextureInitState>>,
+    texture_views: HashMap<usize, DebugViewInfo>,
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct DebugInfo {
+    /// Information attached at runtime to this object, i.e. a special kind of name.
+    assertion_data: Option<String>,
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct DebugBufferInfo {
+    info: DebugInfo,
+    init: TextureInitState,
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct DebugTextureInfo {
+    info: DebugInfo,
+    init: TextureInitState,
+}
+
+#[derive(Debug)]
+pub(crate) struct DebugViewInfo {
+    info: DebugInfo,
+    init: Option<DeviceTexture>,
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+enum TextureInitState {
+    #[default]
+    Uninit,
+    WriteTo,
+    /// Utilized as a shader source.
+    UseRead,
+    /// Utilized as a shader target.
+    UseWrite,
+    ReadFrom,
 }
 
 #[derive(Default)]
@@ -143,7 +198,7 @@ pub(crate) struct InitialState {
     pub(crate) info: Arc<ProgramInfo>,
     pub(crate) device: Device,
     pub(crate) queue: Queue,
-    pub(crate) buffers: Vec<Image>,
+    pub(crate) image_io_buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
     pub(crate) io_map: IoMap,
 }
@@ -204,11 +259,6 @@ pub(crate) struct Descriptors {
     precomputed: HashMap<program::Event, Precomputed>,
 }
 
-pub(crate) struct Gpu {
-    pub(crate) device: Device,
-    pub(crate) queue: Queue,
-}
-
 /// Information about the source of computation for skipped instructions.
 #[derive(Default)]
 struct Precomputed;
@@ -230,20 +280,18 @@ pub struct RetiredBufferStats {
 }
 
 trait WithGpu {
-    fn with_gpu<T>(&self, once: impl FnOnce(&mut Gpu) -> T) -> T;
+    fn with_gpu<T>(&self, once: impl FnOnce(&Gpu) -> T) -> T;
 }
 
-impl WithGpu for core::cell::RefCell<Gpu> {
-    fn with_gpu<T>(&self, once: impl FnOnce(&mut Gpu) -> T) -> T {
-        let mut borrow = self.borrow_mut();
-        once(&mut *borrow)
+impl WithGpu for Gpu {
+    fn with_gpu<T>(&self, once: impl FnOnce(&Gpu) -> T) -> T {
+        once(self)
     }
 }
 
-impl WithGpu for &'_ core::cell::RefCell<Gpu> {
-    fn with_gpu<T>(&self, once: impl FnOnce(&mut Gpu) -> T) -> T {
-        let mut borrow = self.borrow_mut();
-        once(&mut *borrow)
+impl WithGpu for &'_ Gpu {
+    fn with_gpu<T>(&self, once: impl FnOnce(&Gpu) -> T) -> T {
+        once(&**self)
     }
 }
 
@@ -255,7 +303,7 @@ struct DevicePolled<'exe, T: WithGpu> {
 }
 
 pub struct SyncPoint<'exe> {
-    future: Option<DevicePolled<'exe, &'exe core::cell::RefCell<Gpu>>>,
+    future: Option<DevicePolled<'exe, Gpu>>,
     marker: core::marker::PhantomData<&'exe mut Execution>,
     #[cfg(not(target_arch = "wasm32"))]
     host_start: std::time::Instant,
@@ -283,6 +331,12 @@ pub struct StartError {
     kind: LaunchErrorKind,
 }
 
+impl core::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.kind)
+    }
+}
+
 #[derive(Debug)]
 pub enum LaunchErrorKind {
     FromLine(u32),
@@ -307,9 +361,25 @@ pub struct BadInstruction {
     inner: String,
 }
 
+impl core::fmt::Display for BadInstruction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Bad Instruction: {:?}", self.inner)
+    }
+}
+
 #[derive(Debug)]
 pub struct RetireError {
     inner: RetireErrorKind,
+}
+
+impl core::fmt::Display for RetireError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Execution inconsistent during retiring: {:?}",
+            self.inner
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -347,7 +417,11 @@ impl Executable {
             gpu,
             gpu_key: Some(gpu_key),
             info: self.info.clone(),
-            buffers: self.buffers.iter().map(Image::clone_like).collect(),
+            buffers: self
+                .image_io_buffers
+                .iter()
+                .map(Image::clone_like)
+                .collect(),
             io_map: self.io_map.clone(),
             cache: Cache::default(),
         })
@@ -386,8 +460,8 @@ impl Executable {
                         " bind_group_layout_{0} [label=\"Bind Group Layout {0}\"];",
                         bind_group_layouts
                     );
-                    bind_group_layouts += 1;
                     */
+                    bind_group_layouts += 1;
                 }
                 Low::BindGroup(group) => {
                     let idx = bind_groups;
@@ -650,12 +724,12 @@ impl Executable {
                         buffer, buffer_states[buffer], render_passes
                     );
                 }
-                Low::DrawOnce { vertices } => {}
-                Low::DrawIndexedZero { vertices } => {}
+                Low::DrawOnce { vertices: _ } => {}
+                Low::DrawIndexedZero { vertices: _ } => {}
                 Low::SetPushConstants {
-                    stages,
-                    offset,
-                    data,
+                    stages: _,
+                    offset: _,
+                    data: _,
                 } => {}
 
                 Low::RunTopCommand => {
@@ -679,12 +753,12 @@ impl Executable {
 
                 Low::WriteImageToBuffer {
                     source_image,
-                    offset,
-                    size,
+                    offset: _,
+                    size: _,
                     target_buffer,
-                    target_layout,
+                    target_layout: _,
                     copy_dst_buffer,
-                    write_event,
+                    write_event: _,
                 } => {
                     let idx = queue;
                     let _ = write!(&mut cons, " queue_{};", idx);
@@ -708,9 +782,9 @@ impl Executable {
                 }
                 Low::CopyBufferToTexture {
                     source_buffer,
-                    source_layout,
-                    offset,
-                    size,
+                    source_layout: _,
+                    offset: _,
+                    size: _,
                     target_texture,
                 } => {
                     let idx = queue;
@@ -733,10 +807,10 @@ impl Executable {
                 }
                 Low::CopyTextureToBuffer {
                     source_texture,
-                    offset,
-                    size,
+                    offset: _,
+                    size: _,
                     target_buffer,
-                    target_layout,
+                    target_layout: _,
                 } => {
                     let idx = queue;
                     let _ = write!(&mut cons, " queue_{};", idx);
@@ -758,7 +832,7 @@ impl Executable {
                 }
                 Low::CopyBufferToBuffer {
                     source_buffer,
-                    size,
+                    size: _,
                     target_buffer,
                 } => {
                     let idx = queue;
@@ -781,9 +855,9 @@ impl Executable {
                 }
                 Low::ReadBuffer {
                     source_buffer,
-                    source_layout,
-                    offset,
-                    size,
+                    source_layout: _,
+                    offset: _,
+                    size: _,
                     target_image,
                     copy_src_buffer,
                 } => {
@@ -872,6 +946,8 @@ impl Executable {
     pub fn launch(&self, mut env: Environment) -> Result<Execution, StartError> {
         log::info!("Instructions {:#?}", self.instructions);
         self.check_satisfiable(&mut env)?;
+        env.gpu.device().start_capture();
+
         Ok(Execution {
             gpu: env.gpu.into(),
             gpu_key: env.gpu_key,
@@ -879,13 +955,14 @@ impl Executable {
                 machine: Machine::new(Arc::clone(&self.instructions)),
                 descriptors: Descriptors::default(),
                 command_encoder: None,
-                buffers: env.buffers,
+                image_io_buffers: env.buffers,
                 binary_data: self.binary_data.clone(),
                 io_map: self.io_map.clone(),
                 info: self.info.clone(),
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
                 delayed_submits: 0,
+                debug: Debug::default(),
             },
             cache: env.cache,
         })
@@ -894,6 +971,8 @@ impl Executable {
     /// Run the executable but take all by value.
     pub fn launch_once(self, mut env: Environment) -> Result<Execution, StartError> {
         self.check_satisfiable(&mut env)?;
+        env.gpu.device().start_capture();
+
         Ok(Execution {
             gpu: env.gpu.into(),
             gpu_key: env.gpu_key,
@@ -901,13 +980,14 @@ impl Executable {
                 machine: Machine::new(Arc::clone(&self.instructions)),
                 descriptors: self.descriptors,
                 command_encoder: None,
-                buffers: env.buffers,
+                image_io_buffers: env.buffers,
                 binary_data: self.binary_data,
                 io_map: self.io_map.clone(),
                 info: self.info.clone(),
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
                 delayed_submits: 0,
+                debug: Debug::default(),
             },
             cache: env.cache,
         })
@@ -925,7 +1005,7 @@ impl Executable {
                 .get(input)
                 .ok_or_else(|| StartError::InternalCommandError(line!()))?;
             // It's okay to index our own state with our own index.
-            let reference = &self.buffers[input];
+            let reference = &self.image_io_buffers[input];
 
             if reference.data.layout() != buffer.data.layout() {
                 return Err(StartError::InternalCommandError(line!()));
@@ -1150,18 +1230,15 @@ impl Environment<'_> {
 
 impl Execution {
     pub(crate) fn new(init: InitialState) -> Self {
+        eprintln!("Start capture");
         init.device.start_capture();
         Execution {
-            gpu: Gpu {
-                device: init.device,
-                queue: init.queue,
-            }
-            .into(),
+            gpu: Gpu::new(init.device, init.queue).into(),
             gpu_key: None,
             host: Host {
                 machine: Machine::new(init.instructions),
                 descriptors: Descriptors::default(),
-                buffers: init.buffers,
+                image_io_buffers: init.image_io_buffers,
                 command_encoder: None,
                 binary_data: init.binary_data,
                 io_map: Arc::new(init.io_map),
@@ -1169,6 +1246,7 @@ impl Execution {
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
                 delayed_submits: 0,
+                debug: Debug::default(),
             },
             cache: Cache::default(),
         }
@@ -1234,7 +1312,7 @@ impl Execution {
         Ok(SyncPoint {
             future: Some(DevicePolled {
                 future: Box::pin(async_step),
-                gpu: &self.gpu,
+                gpu: self.gpu.clone(),
             }),
             marker: core::marker::PhantomData,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1259,7 +1337,10 @@ impl Execution {
     /// Stop the execution, depositing all resources into the provided pool.
     #[must_use = "You won't get the ids of outputs."]
     pub fn retire_gracefully(self, pool: &mut Pool) -> Retire<'_> {
-        self.gpu.with_gpu(|gpu| gpu.device.stop_capture());
+        self.gpu.with_gpu(|gpu| {
+            gpu.device().stop_capture()
+        });
+
         Retire {
             execution: self,
             pool,
@@ -1280,7 +1361,7 @@ impl Host {
     async fn step_inner(
         &mut self,
         cache: &mut Cache,
-        gpu: impl WithGpu,
+        gpu: &Gpu,
         limits: &mut StepLimits,
     ) -> Result<(), StepError> {
         struct DumpFrame<'stack> {
@@ -1328,15 +1409,17 @@ impl Host {
                     .descriptors
                     .bind_group_layout(desc, &mut entry_buffer)?;
                 // eprintln!("Made {}: {:?}", self.descriptors.bind_group_layouts.len(), group);
-                let group = gpu.with_gpu(|gpu| gpu.device.create_bind_group_layout(&group));
+                let group = gpu.with_gpu(|gpu| gpu.device().create_bind_group_layout(&group));
                 self.descriptors.bind_group_layouts.push(group);
                 Ok(())
             }
             Low::BindGroup(desc) => {
                 let mut entry_buffer = vec![];
-                let group = self.descriptors.bind_group(desc, &mut entry_buffer)?;
+                let group =
+                    self.descriptors
+                        .bind_group(desc, &mut entry_buffer, &mut self.debug)?;
                 // eprintln!("{}: {:?}", desc.layout_idx, group);
-                let group = gpu.with_gpu(|gpu| gpu.device.create_bind_group(&group));
+                let group = gpu.with_gpu(|gpu| gpu.device().create_bind_group(&group));
                 self.descriptors.bind_groups.push(group);
                 Ok(())
             }
@@ -1353,10 +1436,12 @@ impl Host {
                     buffer
                 } else {
                     self.usage.buffer_mem += desc.u64_len();
-                    gpu.with_gpu(|gpu| gpu.device.create_buffer(&wgpu_desc))
+                    gpu.with_gpu(|gpu| gpu.device().create_buffer(&wgpu_desc))
                 };
 
                 let buffer_idx = self.descriptors.buffers.len();
+                self.debug
+                    .buffer_use(DeviceBuffer(buffer_idx), TextureInitState::Uninit);
                 self.descriptors
                     .buffer_descriptors
                     .insert(buffer_idx, desc.clone());
@@ -1371,8 +1456,12 @@ impl Host {
                     usage: desc.usage.to_wgpu(),
                 };
 
+                let buffer_idx = self.descriptors.buffers.len();
+                self.debug
+                    .buffer_use(DeviceBuffer(buffer_idx), TextureInitState::WriteTo);
+
                 self.usage.buffer_mem += desc.u64_len();
-                let buffer = gpu.with_gpu(|gpu| gpu.device.create_buffer_init(&wgpu_desc));
+                let buffer = gpu.with_gpu(|gpu| gpu.device().create_buffer_init(&wgpu_desc));
                 self.descriptors.buffers.push(buffer);
                 Ok(())
             }
@@ -1389,7 +1478,7 @@ impl Host {
                         shader
                     } else {
                         self.usage.shaders_compiled += 1;
-                        gpu.with_gpu(|gpu| gpu.device.create_shader_module(wgpu_desc))
+                        gpu.with_gpu(|gpu| gpu.device().create_shader_module(wgpu_desc))
                     };
                 } else {
                     let wgpu_desc = wgpu::ShaderModuleDescriptor {
@@ -1402,7 +1491,7 @@ impl Host {
                         shader
                     } else {
                         self.usage.shaders_compiled += 1;
-                        gpu.with_gpu(|gpu| gpu.device.create_shader_module(wgpu_desc))
+                        gpu.with_gpu(|gpu| gpu.device().create_shader_module(wgpu_desc))
                     };
                 };
 
@@ -1419,7 +1508,7 @@ impl Host {
             Low::PipelineLayout(desc) => {
                 let mut entry_buffer = vec![];
                 let layout = self.descriptors.pipeline_layout(desc, &mut entry_buffer)?;
-                let layout = gpu.with_gpu(|gpu| gpu.device.create_pipeline_layout(&layout));
+                let layout = gpu.with_gpu(|gpu| gpu.device().create_pipeline_layout(&layout));
                 self.descriptors.pipeline_layouts.push(layout);
                 Ok(())
             }
@@ -1435,13 +1524,13 @@ impl Host {
                     lod_min_clamp: 0.0,
                     lod_max_clamp: 0.0,
                     compare: None,
-                    anisotropy_clamp: None,
+                    anisotropy_clamp: 1,
                     // FIXME(webGL2): on webGL2 a non-None *panics*.
                     // This is due to wgpu_hal-gles using sampler_parameter_f32_slice which panics
                     // in its implementation in glow's webGL1/2.
                     border_color: desc.border_color,
                 };
-                let sampler = gpu.with_gpu(|gpu| gpu.device.create_sampler(&desc));
+                let sampler = gpu.with_gpu(|gpu| gpu.device().create_sampler(&desc));
                 self.descriptors.sampler.push(sampler);
                 Ok(())
             }
@@ -1451,6 +1540,10 @@ impl Host {
                     .textures
                     .get(desc.texture.0)
                     .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
+
+                self.debug
+                    .texture_view(self.descriptors.texture_views.len(), desc.texture);
+
                 let desc = wgpu::TextureViewDescriptor {
                     label: None,
                     format: None,
@@ -1466,7 +1559,7 @@ impl Host {
                 Ok(())
             }
             Low::RenderView(source_image) => {
-                let texture = match &mut self.buffers[source_image.0].data {
+                let texture = match &mut self.image_io_buffers[source_image.0].data {
                     ImageData::GpuTexture {
                         texture,
                         // FIXME: validate layout? What for?
@@ -1475,6 +1568,8 @@ impl Host {
                     } => texture,
                     _ => return Err(StepError::InvalidInstruction(line!())),
                 };
+
+                self.debug.image_view(self.descriptors.texture_views.len());
 
                 let desc = wgpu::TextureViewDescriptor {
                     label: None,
@@ -1517,6 +1612,7 @@ impl Host {
                             U::TEXTURE_BINDING | U::RENDER_ATTACHMENT
                         }
                     },
+                    view_formats: &[desc.format],
                 };
 
                 let texture = if let Some(texture) = cache.preallocated_textures.remove(&inst) {
@@ -1524,13 +1620,20 @@ impl Host {
                     texture
                 } else {
                     self.usage.texture_mem += desc.u64_len();
-                    gpu.with_gpu(|gpu| gpu.device.create_texture(&wgpu_desc))
+                    gpu.with_gpu(|gpu| gpu.device().create_texture(&wgpu_desc))
                 };
 
                 let texture_idx = self.descriptors.textures.len();
+
                 self.descriptors
                     .texture_descriptors
                     .insert(texture_idx, desc.clone());
+
+                self.debug.texture_use(
+                    DeviceTexture(self.descriptors.textures.len()),
+                    TextureInitState::default(),
+                );
+
                 self.descriptors.textures.push(texture);
                 Ok(())
             }
@@ -1547,7 +1650,7 @@ impl Host {
                     let pipeline =
                         self.descriptors
                             .pipeline(desc, &mut vertex_buffers, &mut fragments)?;
-                    gpu.with_gpu(|gpu| gpu.device.create_render_pipeline(&pipeline))
+                    gpu.with_gpu(|gpu| gpu.device().create_render_pipeline(&pipeline))
                 };
 
                 let pipeline_idx = self.descriptors.render_pipelines.len();
@@ -1570,15 +1673,17 @@ impl Host {
 
                 let descriptor = wgpu::CommandEncoderDescriptor { label: None };
 
-                let encoder = gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+                let encoder = gpu.with_gpu(|gpu| gpu.device().create_command_encoder(&descriptor));
                 self.command_encoder = Some(encoder);
                 Ok(())
             }
             Low::BeginRenderPass(descriptor) => {
                 let mut attachment_buf = vec![];
-                let descriptor = self
-                    .descriptors
-                    .render_pass(descriptor, &mut attachment_buf)?;
+                let descriptor = self.descriptors.prepare_attachments_for_render_pass(
+                    descriptor,
+                    &mut attachment_buf,
+                    &mut self.debug,
+                )?;
                 let encoder = match &mut self.command_encoder {
                     Some(encoder) => encoder,
                     None => return Err(StepError::InvalidInstruction(line!())),
@@ -1603,14 +1708,14 @@ impl Host {
                     .command_buffers
                     .pop()
                     .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
-                gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                gpu.with_gpu(|gpu| gpu.queue().submit(once(command)));
                 Ok(())
             }
             &Low::RunTopCommand => {
                 let many = 1 + self.delayed_submits;
                 if let Some(top) = self.descriptors.command_buffers.len().checked_sub(many) {
                     let commands = self.descriptors.command_buffers.drain(top..);
-                    gpu.with_gpu(|gpu| gpu.queue.submit(commands));
+                    gpu.with_gpu(|gpu| gpu.queue().submit(commands));
                     self.delayed_submits = 0;
                     Ok(())
                 } else {
@@ -1621,7 +1726,7 @@ impl Host {
                 let many = many + self.delayed_submits;
                 if let Some(top) = self.descriptors.command_buffers.len().checked_sub(many) {
                     let commands = self.descriptors.command_buffers.drain(top..);
-                    gpu.with_gpu(|gpu| gpu.queue.submit(commands));
+                    gpu.with_gpu(|gpu| gpu.queue().submit(commands));
                     self.delayed_submits = 0;
                 } else {
                     return Err(StepError::InvalidInstruction(line!()));
@@ -1642,10 +1747,13 @@ impl Host {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let source = match self.buffers.get(source_image.0) {
+                let source = match self.image_io_buffers.get(source_image.0) {
                     None => return Err(StepError::InvalidInstruction(line!())),
                     Some(source) => &source.data,
                 };
+
+                self.debug
+                    .buffer_use(target_buffer, TextureInitState::WriteTo);
 
                 let layout = source.layout().clone();
                 let target_size = (target_layout.width, target_layout.height);
@@ -1673,12 +1781,12 @@ impl Host {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let (width, height) = target_size;
+                let (width, _height) = target_size;
                 let bytes_per_row = target_layout.row_stride;
                 let bytes_per_texel = target_layout.texel_stride;
-                let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
+                let _bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
-                let image = &mut self.buffers[source_image.0].data;
+                let image = &mut self.image_io_buffers[source_image.0].data;
 
                 if let ImageData::GpuTexture {
                     texture,
@@ -1689,16 +1797,16 @@ impl Host {
                 {
                     let descriptor = wgpu::CommandEncoderDescriptor { label: None };
                     let mut encoder =
-                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+                        gpu.with_gpu(|gpu| gpu.device().create_command_encoder(&descriptor));
 
                     encoder.copy_texture_to_buffer(
                         texture.as_image_copy(),
                         wgpu::ImageCopyBufferBase {
                             buffer: &self.descriptors.buffers[copy_dst_buffer.0],
                             layout: wgpu::ImageDataLayout {
-                                bytes_per_row: NonZeroU32::new(bytes_per_row as u32),
+                                bytes_per_row: Some(bytes_per_row as u32),
                                 offset: 0,
-                                rows_per_image: NonZeroU32::new(size.1),
+                                rows_per_image: Some(size.1),
                             },
                         },
                         wgpu::Extent3d {
@@ -1726,7 +1834,7 @@ impl Host {
                 {
                     let descriptor = wgpu::CommandEncoderDescriptor { label: None };
                     let mut encoder =
-                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+                        gpu.with_gpu(|gpu| gpu.device().create_command_encoder(&descriptor));
 
                     encoder.copy_buffer_to_buffer(
                         &*src_buffer,
@@ -1791,6 +1899,11 @@ impl Host {
                     None => return Err(StepError::InvalidInstruction(line!())),
                 };
 
+                self.debug
+                    .texture_use(target_texture, TextureInitState::WriteTo);
+                self.debug
+                    .buffer_use(source_buffer, TextureInitState::ReadFrom);
+
                 let buffer = self.descriptors.buffer(source_buffer, source_layout)?;
                 let texture = self.descriptors.texture(target_texture)?;
 
@@ -1828,6 +1941,11 @@ impl Host {
                     None => return Err(StepError::InvalidInstruction(line!())),
                 };
 
+                self.debug
+                    .texture_use(source_texture, TextureInitState::ReadFrom);
+                self.debug
+                    .buffer_use(target_buffer, TextureInitState::WriteTo);
+
                 let texture = self.descriptors.texture(source_texture)?;
                 let buffer = self.descriptors.buffer(target_buffer, target_layout)?;
 
@@ -1861,6 +1979,11 @@ impl Host {
                     None => return Err(StepError::InvalidInstruction(line!())),
                 };
 
+                self.debug
+                    .buffer_use(source_buffer, TextureInitState::ReadFrom);
+                self.debug
+                    .buffer_use(target_buffer, TextureInitState::WriteTo);
+
                 // eprintln!("CopyBufferToBuffer");
                 // eprintln!(" Source: {:?}", source_buffer.0);
                 // eprintln!(" Target: {:?}", target_buffer.0);
@@ -1888,13 +2011,16 @@ impl Host {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
+                self.debug
+                    .buffer_use(source_buffer, TextureInitState::ReadFrom);
+
                 let bytes_per_row = source_layout.row_stride;
                 let bytes_per_texel = source_layout.texel_stride;
                 let (width, height) = size;
                 let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
                 let buffer = &self.descriptors.buffers[source_buffer.0];
-                let image = &mut self.buffers[target_image.0].data;
+                let image = &mut self.image_io_buffers[target_image.0].data;
 
                 if let ImageData::GpuTexture {
                     texture,
@@ -1905,15 +2031,15 @@ impl Host {
                 {
                     let descriptor = wgpu::CommandEncoderDescriptor { label: None };
                     let mut encoder =
-                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+                        gpu.with_gpu(|gpu| gpu.device().create_command_encoder(&descriptor));
 
                     encoder.copy_buffer_to_texture(
                         wgpu::ImageCopyBufferBase {
                             buffer: &self.descriptors.buffers[copy_src_buffer.0],
                             layout: wgpu::ImageDataLayout {
-                                bytes_per_row: NonZeroU32::new(bytes_per_row as u32),
+                                bytes_per_row: Some(bytes_per_row as u32),
                                 offset: 0,
-                                rows_per_image: NonZeroU32::new(size.1),
+                                rows_per_image: Some(size.1),
                             },
                         },
                         texture.as_image_copy(),
@@ -1925,7 +2051,7 @@ impl Host {
                     );
 
                     let command = encoder.finish();
-                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                    gpu.with_gpu(|gpu| gpu.queue().submit(once(command)));
 
                     return Ok(());
                 } else if let ImageData::GpuBuffer {
@@ -1936,7 +2062,7 @@ impl Host {
                 {
                     let descriptor = wgpu::CommandEncoderDescriptor { label: None };
                     let mut encoder =
-                        gpu.with_gpu(|gpu| gpu.device.create_command_encoder(&descriptor));
+                        gpu.with_gpu(|gpu| gpu.device().create_command_encoder(&descriptor));
 
                     encoder.copy_buffer_to_buffer(
                         &self.descriptors.buffers[copy_src_buffer.0],
@@ -1947,7 +2073,7 @@ impl Host {
                     );
 
                     let command = encoder.finish();
-                    gpu.with_gpu(|gpu| gpu.queue.submit(once(command)));
+                    gpu.with_gpu(|gpu| gpu.queue().submit(once(command)));
 
                     return Ok(());
                 }
@@ -2012,11 +2138,12 @@ impl Descriptors {
         &'set self,
         desc: &program::BindGroupDescriptor,
         buf: &'set mut Vec<wgpu::BindGroupEntry<'set>>,
+        debug: &mut Debug,
     ) -> Result<wgpu::BindGroupDescriptor<'set>, StepError> {
         buf.clear();
 
         for (idx, entry) in desc.entries.iter().enumerate() {
-            let resource = self.binding_resource(entry)?;
+            let resource = self.binding_resource(entry, debug)?;
             buf.push(wgpu::BindGroupEntry {
                 binding: idx as u32,
                 resource,
@@ -2024,7 +2151,7 @@ impl Descriptors {
         }
 
         for &(idx, ref entry) in desc.sparse.iter() {
-            let resource = self.binding_resource(entry)?;
+            let resource = self.binding_resource(entry, debug)?;
             buf.push(wgpu::BindGroupEntry {
                 binding: idx as u32,
                 resource,
@@ -2044,6 +2171,7 @@ impl Descriptors {
     fn binding_resource(
         &self,
         desc: &program::BindingResource,
+        debug: &mut Debug,
     ) -> Result<wgpu::BindingResource<'_>, StepError> {
         use program::BindingResource::{Buffer, Sampler, TextureView};
         // eprintln!("{:?}", desc);
@@ -2053,6 +2181,7 @@ impl Descriptors {
                 offset,
                 size,
             } => {
+                debug.buffer_use(DeviceBuffer(buffer_idx), TextureInitState::ReadFrom);
                 let buffer = self
                     .buffers
                     .get(buffer_idx)
@@ -2068,11 +2197,14 @@ impl Descriptors {
                 .get(idx)
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))
                 .map(wgpu::BindingResource::Sampler),
-            TextureView(idx) => self
-                .texture_views
-                .get(idx)
-                .ok_or_else(|| StepError::InvalidInstruction(line!()))
-                .map(wgpu::BindingResource::TextureView),
+            TextureView(idx) => {
+                debug.view_use(idx, TextureInitState::ReadFrom);
+
+                self.texture_views
+                    .get(idx)
+                    .ok_or_else(|| StepError::InvalidInstruction(line!()))
+                    .map(wgpu::BindingResource::TextureView)
+            }
         }
     }
 
@@ -2089,14 +2221,16 @@ impl Descriptors {
         })
     }
 
-    fn render_pass<'set, 'buf>(
+    fn prepare_attachments_for_render_pass<'set, 'buf>(
         &'set self,
         desc: &program::RenderPassDescriptor,
         buf: &'buf mut Vec<Option<wgpu::RenderPassColorAttachment<'set>>>,
+        debug: &mut Debug,
     ) -> Result<wgpu::RenderPassDescriptor<'set, 'buf>, StepError> {
         buf.clear();
 
         for attachment in &desc.color_attachments {
+            debug.view_use(attachment.texture_view, TextureInitState::UseWrite);
             buf.push(Some(self.color_attachment(attachment)?));
         }
 
@@ -2104,6 +2238,8 @@ impl Descriptors {
             label: None,
             color_attachments: buf,
             depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
         })
     }
 
@@ -2237,9 +2373,9 @@ impl Descriptors {
         Ok(wgpu::ImageCopyBufferBase {
             buffer,
             layout: wgpu::ImageDataLayout {
-                bytes_per_row: NonZeroU32::new(layout.row_stride as u32),
+                bytes_per_row: Some(layout.row_stride as u32),
                 offset: 0,
-                rows_per_image: NonZeroU32::new(layout.height),
+                rows_per_image: Some(layout.height),
             },
         })
     }
@@ -2404,7 +2540,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchInput,
             })?;
 
-        let image = &mut self.execution.host.buffers[index];
+        let image = &mut self.execution.host.image_io_buffers[index];
         let descriptor = image.data.layout().clone();
 
         let mut pool_image;
@@ -2438,7 +2574,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        let image = &mut self.execution.host.buffers[index];
+        let image = &mut self.execution.host.image_io_buffers[index];
         let descriptor = image.data.layout().clone();
 
         let mut pool_image;
@@ -2471,7 +2607,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        let image = &mut self.execution.host.buffers[index];
+        let image = &mut self.execution.host.image_io_buffers[index];
         let descriptor = image.data.layout().clone();
 
         let mut pool_image;
@@ -2502,7 +2638,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        Ok(self.execution.host.buffers[index].key)
+        Ok(self.execution.host.image_io_buffers[index].key)
     }
 
     /// Retain temporary buffers that had been allocated during execution.
@@ -2589,7 +2725,7 @@ impl Retire<'_> {
     pub fn finish(mut self) {
         let _ = self.retire_buffers();
 
-        let gpu = self.execution.gpu.into_inner();
+        let gpu = self.execution.gpu;
         if let Some(gpu_key) = self.execution.gpu_key {
             self.pool.reinsert_device(gpu_key, gpu);
 
@@ -2648,7 +2784,7 @@ impl SyncPoint<'_> {
             None => Ok(()),
             Some(polled) => {
                 let DevicePolled { future, gpu } = polled;
-                block_on(future, Some(gpu))?;
+                block_on(future, Some(&gpu))?;
                 /*
                 let _took_time =
                     std::time::Instant::now().saturating_duration_since(self.host_start);
@@ -2672,8 +2808,46 @@ impl Drop for SyncPoint<'_> {
     }
 }
 
+impl Debug {
+    fn buffer_use(&mut self, tex: DeviceBuffer, state: TextureInitState) {
+        self.buffers.entry(tex).or_default().init = state;
+        self.buffer_history.entry(tex).or_default().push(state);
+    }
+
+    fn texture_use(&mut self, tex: DeviceTexture, state: TextureInitState) {
+        self.textures.entry(tex).or_default().init = state;
+        self.texture_history.entry(tex).or_default().push(state);
+    }
+
+    fn view_use(&mut self, view: usize, state: TextureInitState) {
+        if let Some(texture) = self.texture_views[&view].init {
+            self.texture_use(texture, state);
+        }
+    }
+
+    fn texture_view(&mut self, view: usize, init: DeviceTexture) {
+        self.texture_views.insert(
+            view,
+            DebugViewInfo {
+                info: DebugInfo::default(),
+                init: Some(init),
+            },
+        );
+    }
+
+    fn image_view(&mut self, view: usize) {
+        self.texture_views.insert(
+            view,
+            DebugViewInfo {
+                info: DebugInfo::default(),
+                init: None,
+            },
+        );
+    }
+}
+
 /// Block on an async future that may depend on a device being polled.
-pub(crate) fn block_on<F, T>(future: F, device: Option<&core::cell::RefCell<Gpu>>) -> T
+pub(crate) fn block_on<F, T>(future: F, device: Option<&Gpu>) -> T
 where
     F: Future<Output = T> + Unpin,
     T: 'static,
@@ -2717,7 +2891,7 @@ where
             ) -> core::task::Poll<F::Output> {
                 self.as_ref()
                     .device
-                    .with_gpu(|gpu| gpu.device.poll(wgpu::Maintain::Poll));
+                    .with_gpu(|gpu| gpu.device().poll(wgpu::Maintain::Poll));
                 // Ugh, noooo...
                 ctx.waker().wake_by_ref();
                 Pin::new(&mut self.get_mut().future).poll(ctx)

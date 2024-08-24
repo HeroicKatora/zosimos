@@ -13,13 +13,14 @@ use crate::program::{
     ImageBufferPlan, ImageDescriptor, ImagePoolPlan, Instruction, LaunchError, Low,
     PipelineLayoutDescriptor, PipelineLayoutKey, PrimitiveState, RenderPassDescriptor,
     RenderPipelineDescriptor, RenderPipelineKey, SamplerDescriptor, ShaderDescriptor,
-    ShaderDescriptorKey, StagingDescriptor, Texture, TextureDescriptor, TextureUsage,
-    TextureViewDescriptor, VertexState,
+    ShaderDescriptorKey, Texture, TextureDescriptor, TextureUsage, TextureViewDescriptor,
+    VertexState,
 };
 use crate::util::ExtendOne;
 use crate::{run, shaders};
 
 use image_canvas::layout::{CanvasLayout, RowLayoutDescription};
+use wgpu::StoreOp;
 
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
 #[derive(Default)]
@@ -285,8 +286,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// This ensures we can keep track of the expected state change, and validate the correct order
     /// of commands. More specific sequencing commands will expect correct order or assume it
     /// internally.
-    pub(crate) fn push(&mut self, low: Low) -> Result<Instruction, LaunchError> {
-        match low {
+    pub(crate) fn push(&mut self, mut low: Low) -> Result<Instruction, LaunchError> {
+        match &mut low {
+            // Not yet handled.
+            Low::AssertBuffer { .. } | Low::AssertTexture { .. } => {}
             Low::BindGroupLayout(_) => self.bind_group_layouts += 1,
             Low::BindGroup(_) => self.bind_groups += 1,
             Low::Buffer(ref desc) => {
@@ -348,26 +351,37 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             }
             Low::SetPipeline(_) => {}
             Low::SetBindGroup { group, .. } => {
-                if group >= self.bind_groups {
+                if *group >= self.bind_groups {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
             }
             Low::SetVertexBuffer { buffer, .. } => {
-                if buffer >= self.buffers {
+                if *buffer >= self.buffers {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
             }
             // TODO: could validate indices.
             Low::DrawOnce { .. } | Low::DrawIndexedZero { .. } | Low::SetPushConstants { .. } => {}
             Low::RunTopCommand => {
-                if self.command_buffers == 0 {
-                    return Err(LaunchError::InternalCommandError(line!()));
-                }
+                if !self.delayed_commands.is_empty() {
+                    low = Low::RunBotToTop(self.delayed_commands.len() + 1);
+                    self.delayed_commands.clear();
+                } else {
+                    if self.command_buffers == 0 {
+                        return Err(LaunchError::InternalCommandError(line!()));
+                    }
 
-                self.command_buffers -= 1;
+                    self.command_buffers -= 1;
+                }
             }
             Low::RunBotToTop(num) => {
-                if let Some(num) = self.command_buffers.checked_sub(num) {
+                // If we delayed anything, run it now to preserve order of commands.
+                if !self.delayed_commands.is_empty() {
+                    *num += self.delayed_commands.len();
+                    self.delayed_commands.clear();
+                }
+
+                if let Some(num) = self.command_buffers.checked_sub(*num) {
                     self.command_buffers = num;
                 } else {
                     return Err(LaunchError::InternalCommandError(line!()));
@@ -401,8 +415,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     fn plan_gpu_effects_visible(&mut self) -> Result<(), LaunchError> {
         if !self.delayed_commands.is_empty() {
-            self.push(Low::RunBotToTop(self.delayed_commands.len()))?;
-            self.delayed_commands.clear();
+            // This synchronizes itself.
+            self.push(Low::RunBotToTop(0))?;
         }
 
         Ok(())
@@ -712,7 +726,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 ops: wgpu::Operations {
                     // TODO: we could let choose a replacement color..
                     load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
-                    store: true,
+                    store: StoreOp::Store,
                 },
             };
 
@@ -762,7 +776,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 ops: wgpu::Operations {
                     // TODO: we could let choose a replacement color..
                     load: wgpu::LoadOp::Clear(wgpu::Color::RED),
-                    store: true,
+                    store: StoreOp::Store,
                 },
             };
 
@@ -915,7 +929,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             texture_view,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
-                store: true,
+                store: StoreOp::Store,
             },
         };
 

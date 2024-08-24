@@ -54,6 +54,8 @@ pub trait ModalEditor {
     fn outdated(&mut self, _: &mut Self::Surface);
     /// Issued to query if an exit is required.
     fn exit(&self) -> bool;
+    /// Update the surface with changes to the compute instructions.
+    fn reconfigure_compute(&mut self, _: &mut Self::Surface, _: &Self::Compute);
 }
 
 pub trait WindowedSurface {
@@ -78,7 +80,7 @@ impl Window {
 
     pub fn create_surface(&self, instance: &wgpu::Instance) -> WindowSurface {
         let window = self.inner.window.clone();
-        let surface = unsafe { instance.create_surface(&*window) };
+        let surface = unsafe { instance.create_surface(&*window) }.unwrap();
         WindowSurface {
             surface: Some(surface),
             window,
@@ -115,6 +117,8 @@ impl Window {
                     inner.window.request_redraw();
                 }
                 Some(ModalEvent::RedrawRequested) => {
+                    ed.reconfigure_compute(&mut surface, &compute);
+
                     ed.event(ModalEvent::RedrawRequested, &mut modal);
                     match ed.redraw_request(&mut surface) {
                         Ok(()) => {}
@@ -169,7 +173,7 @@ impl Window {
                 WindowEvent::CursorMoved {
                     device_id,
                     position,
-                    modifiers,
+                    modifiers: _,
                 } => todo!(),
                 WindowEvent::CursorEntered { device_id } => todo!(),
                 WindowEvent::CursorLeft { device_id } => todo!(),
@@ -177,13 +181,13 @@ impl Window {
                     device_id,
                     delta,
                     phase,
-                    modifiers,
+                    modifiers: _,
                 } => todo!(),
                 WindowEvent::MouseInput {
                     device_id,
                     state,
                     button,
-                    modifiers,
+                    modifiers: _,
                 } => todo!(),
                 WindowEvent::TouchpadPressure {
                     device_id,
@@ -210,7 +214,7 @@ impl Window {
 impl WindowSurface {
     pub fn recreate(&mut self, instance: &wgpu::Instance) {
         self.surface = None;
-        let surface = unsafe { instance.create_surface(&*self.window) };
+        let surface = unsafe { instance.create_surface(&*self.window) }.unwrap();
         self.surface = Some(surface);
     }
 

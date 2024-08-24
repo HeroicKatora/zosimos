@@ -14,8 +14,10 @@ fn standard() {
     env_logger::init();
 
     const ANY: wgpu::Backends = wgpu::Backends::VULKAN;
-    // FIXME: this drop SEGFAULTs for me...
-    let instance = core::mem::ManuallyDrop::new(wgpu::Instance::new(ANY));
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: ANY,
+        .. Default::default()
+    });
 
     let background = image::open(BACKGROUND).expect("Background image opened");
     let foreground = image::open(FOREGROUND).expect("Background image opened");

@@ -49,6 +49,10 @@ impl ModalEditor for Editor {
             self.close_requested = true;
         }
     }
+
+    fn reconfigure_compute(&mut self, surface: &mut Self::Surface, compute: &Self::Compute) {
+        surface.reconfigure_compute(compute)
+    }
 }
 
 impl Editor {

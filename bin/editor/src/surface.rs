@@ -1,10 +1,12 @@
 use crate::winit::{Window, WindowSurface, WindowedSurface};
+use crate::compute::{ComputeTailCommands, Compute};
 
 use stealth_paint::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
 use stealth_paint::command;
 use stealth_paint::pool::{GpuKey, Pool, PoolKey};
 use stealth_paint::program::{Capabilities, CompileError, LaunchError, Program};
 use stealth_paint::run::{Executable, StepLimits};
+
 use wgpu::{Adapter, Instance, SurfaceConfiguration};
 
 pub struct Surface {
@@ -22,6 +24,8 @@ pub struct Surface {
     entry: PoolEntry,
     /// The runtime state from stealth paint.
     runtimes: Runtimes,
+    /// 
+    commands: ComputeTailCommands,
 }
 
 #[derive(Debug)]
@@ -59,7 +63,10 @@ impl Surface {
     pub fn new(window: &Window) -> Self {
         const ANY: wgpu::Backends = wgpu::Backends::all();
 
-        let instance = wgpu::Instance::new(ANY);
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            .. Default::default()
+        });
         let inner = window.create_surface(&instance);
 
         let adapter = Program::request_compatible_adapter(
@@ -74,56 +81,62 @@ impl Surface {
 
         eprintln!("Rendering on {:?}", adapter.get_info());
 
-        let (width, height) = window.inner_size();
         let (color, texel);
+        let capabilities = inner.get_capabilities(&adapter);
+
+        let preferred_format = match capabilities.formats.get(0) {
+            None => {
+                log::warn!("No supported surface formats …");
+                color = Color::SRGB;
+                texel = Texel::new_u8(SampleParts::RgbA);
+                wgpu::TextureFormat::Rgba8Unorm
+            }
+            Some(wgpu::TextureFormat::Rgba8Unorm) => {
+                log::warn!("Using format {:?}", wgpu::TextureFormat::Rgba8Unorm);
+                color = match Color::SRGB {
+                    Color::Rgb {
+                        luminance,
+                        transfer: _,
+                        primary,
+                        whitepoint,
+                    } => Color::Rgb {
+                        luminance,
+                        primary,
+                        whitepoint,
+                        transfer: Transfer::Linear,
+                    },
+                    _ => unreachable!("That's not the right color"),
+                };
+
+                texel = Texel::new_u8(SampleParts::RgbA);
+                wgpu::TextureFormat::Rgba8Unorm
+            }
+            Some(wgpu::TextureFormat::Rgba8UnormSrgb) => {
+                log::warn!("Using format {:?}", wgpu::TextureFormat::Rgba8UnormSrgb);
+
+                color = Color::SRGB;
+                texel = Texel::new_u8(SampleParts::RgbA);
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            }
+            Some(wgpu::TextureFormat::Bgra8UnormSrgb) | _ => {
+                log::warn!("Using format {:?}", wgpu::TextureFormat::Bgra8UnormSrgb);
+
+                color = Color::SRGB;
+                texel = Texel::new_u8(SampleParts::BgrA);
+                wgpu::TextureFormat::Bgra8UnormSrgb
+            }
+        };
+
+        let (width, height) = window.inner_size();
         let config = SurfaceConfiguration {
             //  FIXME: COPY_DST is not universal. Should fix `run.rs` so that RENDER_ATTACHMENT suffices.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: match inner.get_supported_formats(&adapter).get(0) {
-                None => {
-                    log::warn!("No supported surface formats …");
-                    color = Color::SRGB;
-                    texel = Texel::new_u8(SampleParts::RgbA);
-                    wgpu::TextureFormat::Rgba8Unorm
-                }
-                Some(wgpu::TextureFormat::Rgba8Unorm) => {
-                    log::warn!("Using format {:?}", wgpu::TextureFormat::Rgba8Unorm);
-                    color = match Color::SRGB {
-                        Color::Rgb {
-                            luminance,
-                            transfer: _,
-                            primary,
-                            whitepoint,
-                        } => Color::Rgb {
-                            luminance,
-                            primary,
-                            whitepoint,
-                            transfer: Transfer::Linear,
-                        },
-                        _ => unreachable!("That's not the right color"),
-                    };
-
-                    texel = Texel::new_u8(SampleParts::RgbA);
-                    wgpu::TextureFormat::Rgba8Unorm
-                }
-                Some(wgpu::TextureFormat::Rgba8UnormSrgb) => {
-                    log::warn!("Using format {:?}", wgpu::TextureFormat::Rgba8UnormSrgb);
-
-                    color = Color::SRGB;
-                    texel = Texel::new_u8(SampleParts::RgbA);
-                    wgpu::TextureFormat::Rgba8UnormSrgb
-                }
-                Some(wgpu::TextureFormat::Bgra8UnormSrgb) | _ => {
-                    log::warn!("Using format {:?}", wgpu::TextureFormat::Bgra8UnormSrgb);
-
-                    color = Color::SRGB;
-                    texel = Texel::new_u8(SampleParts::BgrA);
-                    wgpu::TextureFormat::Bgra8UnormSrgb
-                }
-            },
+            format: preferred_format,
             width,
             height,
             present_mode: wgpu::PresentMode::AutoVsync,
+            view_formats: [preferred_format].to_vec(),
+            alpha_mode: Default::default(),
         };
 
         let descriptor = Descriptor {
@@ -144,36 +157,47 @@ impl Surface {
                 descriptor,
             },
             runtimes: Runtimes::default(),
+            commands: ComputeTailCommands::default(),
         };
 
-        let mut pool = Pool::new();
-        let gpu = that.configure_pool(&mut pool);
+        let gpu = that.reconfigure_gpu();
         that.entry.gpu = Some(gpu);
-        let surface = pool.declare(that.descriptor());
+        let surface = that.pool.declare(that.descriptor());
         that.entry.key = Some(surface.key());
-        that.pool = pool;
         that.reconfigure_surface().unwrap();
 
         that
     }
 
-    pub fn configure_pool(&self, pool: &mut Pool) -> GpuKey {
-        pool.request_device(&self.adapter, Program::minimal_device_descriptor())
-            .expect("to get a device")
+    pub fn configure_pool(&mut self, pool: &mut Pool) -> GpuKey {
+        log::info!("Surface reconfiguring pool device");
+        let internal_key = self.reconfigure_gpu();
+
+        self.pool
+            .share_device(internal_key, pool)
+            .expect("maintained incorrect gpu key")
     }
 
+    pub(crate) fn reconfigure_compute(&mut self, compute: &Compute) {
+        compute.acquire(&mut self.commands);
+    }
+
+    /// Change the base device.
     pub(crate) fn reconfigure_gpu(&mut self) -> GpuKey {
         if let Some(gpu) = self.entry.gpu {
             gpu
         } else {
-            let mut pool = core::mem::take(&mut self.pool);
-            let gpu = self.configure_pool(&mut pool);
-            self.pool = pool;
+            log::info!("No gpu key, device lost or not initialized?");
+            let gpu = self
+                .pool
+                .request_device(&self.adapter, Program::minimal_device_descriptor())
+                .expect("to get a device");
             gpu
         }
     }
 
     pub fn set_image(&mut self, image: &image::DynamicImage) {
+        log::info!("Uploading DynamicImage {:?} to GPU buffer", image.color());
         let gpu = self.reconfigure_gpu();
         if let Some(key) = self.entry.presentable {
             let mut entry = self.pool.entry(key).unwrap();
@@ -184,10 +208,6 @@ impl Surface {
             self.entry.presentable = Some(key);
             self.pool.upload(key, gpu).unwrap();
         }
-    }
-
-    pub fn resize(&mut self, width: u32, height: u32) {
-        todo!()
     }
 
     pub fn get_current_texture(&mut self) -> Result<wgpu::SurfaceTexture, wgpu::SurfaceError> {

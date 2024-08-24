@@ -45,7 +45,10 @@ fn mandelbrot() {
     env_logger::init();
 
     const ANY: wgpu::Backends = wgpu::Backends::VULKAN;
-    let instance = wgpu::Instance::new(ANY);
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: ANY,
+        .. Default::default()
+    });
 
     let adapter =
         Program::minimum_adapter(instance.enumerate_adapters(ANY)).expect("to get an adapter");
