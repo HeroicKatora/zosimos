@@ -975,7 +975,7 @@ impl Program {
     pub fn minimal_device_descriptor() -> wgpu::DeviceDescriptor<'static> {
         wgpu::DeviceDescriptor {
             label: None,
-            features: if std::env::var("STEALTH_PAINT_PASSTHROUGH").is_err() {
+            required_features: if std::env::var("STEALTH_PAINT_PASSTHROUGH").is_err() {
                 wgpu::Features::empty()
             } else {
                 wgpu::Features::SPIRV_SHADER_PASSTHROUGH
@@ -983,7 +983,8 @@ impl Program {
             // Well, technically... We need the texture format.
             // But should be able to workaround most other restrictions.
             // FIXME: make the use of this configurable.
-            limits: wgpu::Limits::downlevel_webgl2_defaults(),
+            required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+            memory_hints: wgpu::MemoryHints::Performance,
             /*
             wgpu::Limits {
                 // We can't afform downlevel_webgl2_defaults due to using buffer textures et.al.

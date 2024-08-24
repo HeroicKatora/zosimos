@@ -1337,9 +1337,7 @@ impl Execution {
     /// Stop the execution, depositing all resources into the provided pool.
     #[must_use = "You won't get the ids of outputs."]
     pub fn retire_gracefully(self, pool: &mut Pool) -> Retire<'_> {
-        self.gpu.with_gpu(|gpu| {
-            gpu.device().stop_capture()
-        });
+        self.gpu.with_gpu(|gpu| gpu.device().stop_capture());
 
         Retire {
             execution: self,
@@ -2226,7 +2224,7 @@ impl Descriptors {
         desc: &program::RenderPassDescriptor,
         buf: &'buf mut Vec<Option<wgpu::RenderPassColorAttachment<'set>>>,
         debug: &mut Debug,
-    ) -> Result<wgpu::RenderPassDescriptor<'set, 'buf>, StepError> {
+    ) -> Result<wgpu::RenderPassDescriptor<'buf>, StepError> {
         buf.clear();
 
         for attachment in &desc.color_attachments {
@@ -2293,6 +2291,7 @@ impl Descriptors {
             // evaluation, geometry, and fragment shader built-ins:
             // highp int gl_ViewIndex;
             multiview: None,
+            cache: None,
         })
     }
 
@@ -2340,6 +2339,7 @@ impl Descriptors {
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))?,
             entry_point: desc.entry_point,
             buffers: buf,
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
         })
     }
 
@@ -2358,6 +2358,7 @@ impl Descriptors {
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))?,
             entry_point: desc.entry_point,
             targets: buf,
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
         })
     }
 

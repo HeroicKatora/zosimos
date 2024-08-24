@@ -20,11 +20,11 @@ fn integration() {
     const ANY: wgpu::Backends = wgpu::Backends::VULKAN;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: ANY,
-        .. Default::default()
+        ..Default::default()
     });
 
-    let adapter =
-        Program::minimum_adapter(instance.enumerate_adapters(ANY)).expect("to get an adapter");
+    let adapter = Program::minimum_adapter(instance.enumerate_adapters(ANY).into_iter())
+        .expect("to get an adapter");
 
     let background = image::open(BACKGROUND).expect("Background image opened");
     let foreground = image::open(FOREGROUND).expect("Background image opened");
