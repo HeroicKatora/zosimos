@@ -16,7 +16,7 @@ fn standard() {
     const ANY: wgpu::Backends = wgpu::Backends::VULKAN;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: ANY,
-        .. Default::default()
+        ..Default::default()
     });
 
     let background = image::open(BACKGROUND).expect("Background image opened");

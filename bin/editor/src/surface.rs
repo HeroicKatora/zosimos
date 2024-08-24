@@ -1,5 +1,5 @@
+use crate::compute::{Compute, ComputeTailCommands};
 use crate::winit::{Window, WindowSurface, WindowedSurface};
-use crate::compute::{ComputeTailCommands, Compute};
 
 use stealth_paint::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
 use stealth_paint::command;
@@ -24,7 +24,7 @@ pub struct Surface {
     entry: PoolEntry,
     /// The runtime state from stealth paint.
     runtimes: Runtimes,
-    /// 
+    ///
     commands: ComputeTailCommands,
 }
 
@@ -65,7 +65,7 @@ impl Surface {
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            .. Default::default()
+            ..Default::default()
         });
         let inner = window.create_surface(&instance);
 

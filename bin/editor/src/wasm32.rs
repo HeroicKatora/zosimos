@@ -2,10 +2,7 @@ use crate::{compute, editor, surface, winit::Window};
 use wasm_bindgen::prelude::*;
 use web_sys;
 
-#[cfg(all(
-    not(target_os = "wasi"),
-    target_arch = "wasm32",
-))]
+#[cfg(all(not(target_os = "wasi"), target_arch = "wasm32",))]
 pub async fn run() {
     let level: log::Level = log::Level::Info;
     console_log::init_with_level(level).expect("could not initialize logger");
@@ -42,9 +39,10 @@ pub fn run_sync() {
 
 impl Window {
     fn new_wasm() -> Self {
-        use winit::platform::web::{WindowExtWebSys, WindowBuilderExtWebSys};
+        use winit::platform::web::{WindowBuilderExtWebSys, WindowExtWebSys};
 
-        let canvas: web_sys::HtmlCanvasElement = web_sys::window().and_then(|w| w.document())
+        let canvas: web_sys::HtmlCanvasElement = web_sys::window()
+            .and_then(|w| w.document())
             .expect("find a document")
             .query_selector("canvas")
             .expect("find something")

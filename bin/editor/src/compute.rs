@@ -4,14 +4,14 @@ use std::sync::Arc;
 use crate::surface::Surface;
 use arc_swap::ArcSwapAny;
 
-use stealth_paint::pool::{GpuKey, Pool};
 use stealth_paint::command::CommandBuffer;
+use stealth_paint::pool::{GpuKey, Pool};
 
 /// A compute graph.
 pub struct Compute {
     pool: Pool,
     key: GpuKey,
-    program: ArcSwapAny<Arc<Program>>
+    program: ArcSwapAny<Arc<Program>>,
 }
 
 struct Program {
@@ -31,7 +31,7 @@ impl Compute {
     pub fn new(surface: &mut Surface) -> Compute {
         let mut pool = Pool::new();
         let key = surface.configure_pool(&mut pool);
-        
+
         let program = Arc::new(Program {
             commands: None,
             have: 0,
@@ -49,7 +49,7 @@ impl Compute {
     }
 
     /// Spawn a task to maintain derivations.
-    pub fn run(&self) -> Box<dyn Future<Output=()> + 'static> {
+    pub fn run(&self) -> Box<dyn Future<Output = ()> + 'static> {
         todo!()
     }
 }

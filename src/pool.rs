@@ -185,11 +185,7 @@ impl Pool {
         Ok(GpuKey(gpu_key))
     }
 
-    pub fn share_device(
-        &mut self,
-        key: GpuKey,
-        other: &mut Pool,
-    ) -> Option<GpuKey> {
+    pub fn share_device(&mut self, key: GpuKey, other: &mut Pool) -> Option<GpuKey> {
         let gpu = self.devices.get(key.0)?.clone();
         let gpu_key = other.devices.insert(gpu);
         Some(GpuKey(gpu_key))
@@ -661,7 +657,11 @@ impl PoolImageMut<'_> {
         GpuKey(key): GpuKey,
         image: &Descriptor,
     ) -> Result<(), ImageUploadError> {
-        let gpu = self.devices.get(key).ok_or(ImageUploadError::BadGpu)?.clone();
+        let gpu = self
+            .devices
+            .get(key)
+            .ok_or(ImageUploadError::BadGpu)?
+            .clone();
 
         let descriptor =
             ImageDescriptor::new(image).map_err(|_| ImageUploadError::BadDescriptor)?;

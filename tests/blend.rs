@@ -27,7 +27,7 @@ fn integration() {
     const ANY: wgpu::Backends = wgpu::Backends::VULKAN;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: ANY,
-        .. Default::default()
+        ..Default::default()
     });
 
     let adapter = Program::request_adapter(&instance).expect("to get an adapter");
