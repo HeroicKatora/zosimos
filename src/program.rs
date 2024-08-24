@@ -329,6 +329,15 @@ pub(crate) enum Low {
 
     StackFrame(run::Frame),
     StackPop,
+
+    AssertBuffer {
+        buffer: DeviceBuffer,
+        info: String,
+    },
+    AssertTexture {
+        buffer: DeviceBuffer,
+        info: String,
+    },
 }
 
 /// Create a bind group.
@@ -1023,7 +1032,7 @@ impl Program {
         // Convert all textures to buffers.
         // FIXME: _All_ textures? No, some amount of textures might not be IO.
         // Currently this is true but no in general.
-        let buffers = self
+        let image_io_buffers = self
             .image_buffers
             .texture
             .iter()
@@ -1041,7 +1050,7 @@ impl Program {
             }),
             binary_data: encoder.binary_data,
             descriptors: run::Descriptors::default(),
-            buffers,
+            image_io_buffers,
             capabilities,
             io_map: io_map.into(),
         })
@@ -1254,8 +1263,8 @@ impl Launcher<'_> {
         let mut encoder = self
             .program
             .lower_to_impl(&capabilities, Some(&self.pool_plan))?;
-        let mut buffers = self.binds;
-        encoder.extract_buffers(&mut buffers, &mut self.pool)?;
+        let mut image_io_buffers = self.binds;
+        encoder.extract_buffers(&mut image_io_buffers, &mut self.pool)?;
 
         // Unbalanced operands shouldn't happen.
         // This is part of validation layer but cheap and we always do it.
@@ -1275,7 +1284,7 @@ impl Launcher<'_> {
             }),
             device,
             queue,
-            buffers,
+            image_io_buffers,
             binary_data: encoder.binary_data,
             io_map,
         };

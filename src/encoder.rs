@@ -13,8 +13,8 @@ use crate::program::{
     ImageBufferPlan, ImageDescriptor, ImagePoolPlan, Instruction, LaunchError, Low,
     PipelineLayoutDescriptor, PipelineLayoutKey, PrimitiveState, RenderPassDescriptor,
     RenderPipelineDescriptor, RenderPipelineKey, SamplerDescriptor, ShaderDescriptor,
-    ShaderDescriptorKey, StagingDescriptor, Texture, TextureDescriptor, TextureUsage,
-    TextureViewDescriptor, VertexState,
+    ShaderDescriptorKey, Texture, TextureDescriptor, TextureUsage, TextureViewDescriptor,
+    VertexState,
 };
 use crate::util::ExtendOne;
 use crate::{run, shaders};
@@ -288,6 +288,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// internally.
     pub(crate) fn push(&mut self, low: Low) -> Result<Instruction, LaunchError> {
         match low {
+            // Not yet handled.
+            Low::AssertBuffer { .. } | Low::AssertTexture { .. } => {}
             Low::BindGroupLayout(_) => self.bind_group_layouts += 1,
             Low::BindGroup(_) => self.bind_groups += 1,
             Low::Buffer(ref desc) => {

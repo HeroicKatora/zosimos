@@ -33,7 +33,7 @@ pub struct Executable {
     /// All device related state which we have preserved.
     pub(crate) descriptors: Descriptors,
     /// Input/Output buffers used for execution.
-    pub(crate) buffers: Vec<Image>,
+    pub(crate) image_io_buffers: Vec<Image>,
     /// The map from registers to the index in image data.
     pub(crate) io_map: Arc<IoMap>,
     /// The capabilities required from devices to execute this.
@@ -92,7 +92,7 @@ pub(crate) struct Host {
     pub(crate) machine: Machine,
     pub(crate) descriptors: Descriptors,
     pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
-    pub(crate) buffers: Vec<Image>,
+    pub(crate) image_io_buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
     pub(crate) io_map: Arc<IoMap>,
     pub(crate) info: Arc<ProgramInfo>,
@@ -105,6 +105,29 @@ pub(crate) struct Host {
     /// until such scheduling happens as it is GPU synchronous instead of host-synchronous, when we
     /// need not map a buffer.
     pub(crate) delayed_submits: usize,
+
+    /// Debug information.
+    pub(crate) debug: Debug,
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct Debug {
+    bind_groups: HashMap<usize, DebugInfo>,
+    bind_group_layouts: HashMap<usize, DebugInfo>,
+    buffers: HashMap<usize, DebugInfo>,
+    command_buffers: HashMap<usize, DebugInfo>,
+    shaders: HashMap<usize, DebugInfo>,
+    pipeline_layouts: HashMap<usize, DebugInfo>,
+    render_pipelines: HashMap<usize, DebugInfo>,
+    sampler: HashMap<usize, DebugInfo>,
+    textures: HashMap<usize, DebugInfo>,
+    texture_views: HashMap<usize, DebugInfo>,
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct DebugInfo {
+    /// Information attached at runtime to this object, i.e. a special kind of name.
+    assertion_data: Option<String>,
 }
 
 #[derive(Default)]
@@ -143,7 +166,7 @@ pub(crate) struct InitialState {
     pub(crate) info: Arc<ProgramInfo>,
     pub(crate) device: Device,
     pub(crate) queue: Queue,
-    pub(crate) buffers: Vec<Image>,
+    pub(crate) image_io_buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
     pub(crate) io_map: IoMap,
 }
@@ -276,6 +299,12 @@ pub struct StartError {
     kind: LaunchErrorKind,
 }
 
+impl core::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.kind)
+    }
+}
+
 #[derive(Debug)]
 pub enum LaunchErrorKind {
     FromLine(u32),
@@ -300,9 +329,21 @@ pub struct BadInstruction {
     inner: String,
 }
 
+impl core::fmt::Display for BadInstruction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Bad Instruction: {:?}", self.inner)
+    }
+}
+
 #[derive(Debug)]
 pub struct RetireError {
     inner: RetireErrorKind,
+}
+
+impl core::fmt::Display for RetireError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Execution inconsistent during retiring: {:?}", self.inner)
+    }
 }
 
 #[derive(Debug)]
@@ -340,7 +381,7 @@ impl Executable {
             gpu,
             gpu_key: Some(gpu_key),
             info: self.info.clone(),
-            buffers: self.buffers.iter().map(Image::clone_like).collect(),
+            buffers: self.image_io_buffers.iter().map(Image::clone_like).collect(),
             io_map: self.io_map.clone(),
             cache: Cache::default(),
         })
@@ -643,12 +684,12 @@ impl Executable {
                         buffer, buffer_states[buffer], render_passes
                     );
                 }
-                Low::DrawOnce { vertices } => {}
-                Low::DrawIndexedZero { vertices } => {}
+                Low::DrawOnce { vertices: _ } => {}
+                Low::DrawIndexedZero { vertices: _ } => {}
                 Low::SetPushConstants {
-                    stages,
-                    offset,
-                    data,
+                    stages: _,
+                    offset: _,
+                    data: _,
                 } => {}
 
                 Low::RunTopCommand => {
@@ -672,12 +713,12 @@ impl Executable {
 
                 Low::WriteImageToBuffer {
                     source_image,
-                    offset,
-                    size,
+                    offset: _,
+                    size: _,
                     target_buffer,
-                    target_layout,
+                    target_layout: _,
                     copy_dst_buffer,
-                    write_event,
+                    write_event: _,
                 } => {
                     let idx = queue;
                     let _ = write!(&mut cons, " queue_{};", idx);
@@ -701,9 +742,9 @@ impl Executable {
                 }
                 Low::CopyBufferToTexture {
                     source_buffer,
-                    source_layout,
-                    offset,
-                    size,
+                    source_layout: _,
+                    offset: _,
+                    size: _,
                     target_texture,
                 } => {
                     let idx = queue;
@@ -726,10 +767,10 @@ impl Executable {
                 }
                 Low::CopyTextureToBuffer {
                     source_texture,
-                    offset,
-                    size,
+                    offset: _,
+                    size: _,
                     target_buffer,
-                    target_layout,
+                    target_layout: _,
                 } => {
                     let idx = queue;
                     let _ = write!(&mut cons, " queue_{};", idx);
@@ -751,7 +792,7 @@ impl Executable {
                 }
                 Low::CopyBufferToBuffer {
                     source_buffer,
-                    size,
+                    size: _,
                     target_buffer,
                 } => {
                     let idx = queue;
@@ -774,9 +815,9 @@ impl Executable {
                 }
                 Low::ReadBuffer {
                     source_buffer,
-                    source_layout,
-                    offset,
-                    size,
+                    source_layout: _,
+                    offset: _,
+                    size: _,
                     target_image,
                     copy_src_buffer,
                 } => {
@@ -874,13 +915,14 @@ impl Executable {
                 machine: Machine::new(Arc::clone(&self.instructions)),
                 descriptors: Descriptors::default(),
                 command_encoder: None,
-                buffers: env.buffers,
+                image_io_buffers: env.buffers,
                 binary_data: self.binary_data.clone(),
                 io_map: self.io_map.clone(),
                 info: self.info.clone(),
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
                 delayed_submits: 0,
+                debug: Debug::default(),
             },
             cache: env.cache,
         })
@@ -898,13 +940,14 @@ impl Executable {
                 machine: Machine::new(Arc::clone(&self.instructions)),
                 descriptors: self.descriptors,
                 command_encoder: None,
-                buffers: env.buffers,
+                image_io_buffers: env.buffers,
                 binary_data: self.binary_data,
                 io_map: self.io_map.clone(),
                 info: self.info.clone(),
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
                 delayed_submits: 0,
+                debug: Debug::default(),
             },
             cache: env.cache,
         })
@@ -922,7 +965,7 @@ impl Executable {
                 .get(input)
                 .ok_or_else(|| StartError::InternalCommandError(line!()))?;
             // It's okay to index our own state with our own index.
-            let reference = &self.buffers[input];
+            let reference = &self.image_io_buffers[input];
 
             if reference.data.layout() != buffer.data.layout() {
                 return Err(StartError::InternalCommandError(line!()));
@@ -1147,6 +1190,7 @@ impl Environment<'_> {
 
 impl Execution {
     pub(crate) fn new(init: InitialState) -> Self {
+        eprintln!("Start capture");
         init.device.start_capture();
         Execution {
             gpu: Gpu::new(init.device, init.queue).into(),
@@ -1154,7 +1198,7 @@ impl Execution {
             host: Host {
                 machine: Machine::new(init.instructions),
                 descriptors: Descriptors::default(),
-                buffers: init.buffers,
+                image_io_buffers: init.image_io_buffers,
                 command_encoder: None,
                 binary_data: init.binary_data,
                 io_map: Arc::new(init.io_map),
@@ -1162,6 +1206,7 @@ impl Execution {
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
                 delayed_submits: 0,
+                debug: Debug::default(),
             },
             cache: Cache::default(),
         }
@@ -1462,7 +1507,7 @@ impl Host {
                 Ok(())
             }
             Low::RenderView(source_image) => {
-                let texture = match &mut self.buffers[source_image.0].data {
+                let texture = match &mut self.image_io_buffers[source_image.0].data {
                     ImageData::GpuTexture {
                         texture,
                         // FIXME: validate layout? What for?
@@ -1639,7 +1684,7 @@ impl Host {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let source = match self.buffers.get(source_image.0) {
+                let source = match self.image_io_buffers.get(source_image.0) {
                     None => return Err(StepError::InvalidInstruction(line!())),
                     Some(source) => &source.data,
                 };
@@ -1670,12 +1715,12 @@ impl Host {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let (width, height) = target_size;
+                let (width, _height) = target_size;
                 let bytes_per_row = target_layout.row_stride;
                 let bytes_per_texel = target_layout.texel_stride;
-                let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
+                let _bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
-                let image = &mut self.buffers[source_image.0].data;
+                let image = &mut self.image_io_buffers[source_image.0].data;
 
                 if let ImageData::GpuTexture {
                     texture,
@@ -1891,7 +1936,7 @@ impl Host {
                 let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
                 let buffer = &self.descriptors.buffers[source_buffer.0];
-                let image = &mut self.buffers[target_image.0].data;
+                let image = &mut self.image_io_buffers[target_image.0].data;
 
                 if let ImageData::GpuTexture {
                     texture,
@@ -2403,7 +2448,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchInput,
             })?;
 
-        let image = &mut self.execution.host.buffers[index];
+        let image = &mut self.execution.host.image_io_buffers[index];
         let descriptor = image.data.layout().clone();
 
         let mut pool_image;
@@ -2437,7 +2482,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        let image = &mut self.execution.host.buffers[index];
+        let image = &mut self.execution.host.image_io_buffers[index];
         let descriptor = image.data.layout().clone();
 
         let mut pool_image;
@@ -2470,7 +2515,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        let image = &mut self.execution.host.buffers[index];
+        let image = &mut self.execution.host.image_io_buffers[index];
         let descriptor = image.data.layout().clone();
 
         let mut pool_image;
@@ -2501,7 +2546,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        Ok(self.execution.host.buffers[index].key)
+        Ok(self.execution.host.image_io_buffers[index].key)
     }
 
     /// Retain temporary buffers that had been allocated during execution.
