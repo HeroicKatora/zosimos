@@ -27,13 +27,13 @@ version = "1.6"
 # [dependencies.egui-wgpu]
 # version = "0.18"
 [dependencies.image]
-version = "0.24"
+version = "0.25"
 default-features = false
 features = ["png"]
 [dependencies.log]
 version = "0.4"
 [dependencies.winit]
-version = "0.28.6"
+version = "0.30"
 [dependencies.wgpu]
 version = "22.0"
 

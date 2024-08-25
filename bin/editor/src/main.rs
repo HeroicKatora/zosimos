@@ -20,7 +20,7 @@ fn main() {
             "/../../tests/input/background.png"
         );
         eprintln!("{}", img);
-        image::io::Reader::open(img).unwrap().decode().unwrap()
+        image::ImageReader::open(img).unwrap().decode().unwrap()
     });
 
     winit.run_on_main(editor, compute, surface)

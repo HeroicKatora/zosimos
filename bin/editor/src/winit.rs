@@ -6,7 +6,7 @@
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
+    window::WindowAttributes,
 };
 
 use std::sync::Arc;
@@ -18,7 +18,7 @@ pub struct Window {
 
 /// Combination of window/surface that fulfills safety property of `create_surface`.
 pub struct WindowSurface {
-    surface: Option<wgpu::Surface>,
+    surface: Option<wgpu::Surface<'static>>,
     window: Arc<winit::window::Window>,
 }
 
@@ -63,8 +63,10 @@ pub trait WindowedSurface {
 }
 
 pub fn build() -> Window {
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
+    let event_loop = EventLoop::new().unwrap();
+    let window = event_loop
+        .create_window(WindowAttributes::default())
+        .unwrap();
     Window::new(window, event_loop)
 }
 
@@ -80,7 +82,8 @@ impl Window {
 
     pub fn create_surface(&self, instance: &wgpu::Instance) -> WindowSurface {
         let window = self.inner.window.clone();
-        let surface = unsafe { instance.create_surface(&*window) }.unwrap();
+        let surface = instance.create_surface(window.clone()).unwrap();
+
         WindowSurface {
             surface: Some(surface),
             window,
@@ -92,19 +95,15 @@ impl Window {
         (phys.width, phys.height)
     }
 
-    pub fn run_on_main<Ed>(
-        self,
-        mut ed: Ed,
-        mut compute: Ed::Compute,
-        mut surface: Ed::Surface,
-    ) -> !
+    pub fn run_on_main<Ed>(self, mut ed: Ed, compute: Ed::Compute, mut surface: Ed::Surface) -> !
     where
         Ed: ModalEditor + 'static,
         Ed::Surface: WindowedSurface,
     {
         let Window { event_loop, inner } = self;
         let mut modal = ModalContext::Main;
-        event_loop.run(move |ev, _, ctrl| {
+
+        event_loop.run(move |ev, app| {
             let recreate = |surface: &mut Ed::Surface| {
                 surface.recreate();
             };
@@ -139,9 +138,11 @@ impl Window {
 
             if ed.exit() {
                 log::info!("Editor requested close, closing window");
-                *ctrl = ControlFlow::Exit;
+                app.exit();
             }
-        })
+        });
+
+        std::process::exit(0);
     }
 
     #[allow(unreachable_patterns)]
@@ -151,8 +152,6 @@ impl Window {
         ev: Event<()>,
     ) -> Option<ModalEvent> {
         Some(match ev {
-            Event::MainEventsCleared => ModalEvent::MainEventsCleared,
-            Event::RedrawRequested(wid) if window.id() == wid => ModalEvent::RedrawRequested,
             Event::WindowEvent { window_id, event } if window.id() == window_id => match event {
                 WindowEvent::CloseRequested => ModalEvent::ExitPressed,
                 _ => return None,
@@ -162,18 +161,16 @@ impl Window {
                 WindowEvent::DroppedFile(_) => todo!(),
                 WindowEvent::HoveredFile(_) => todo!(),
                 WindowEvent::HoveredFileCancelled => todo!(),
-                WindowEvent::ReceivedCharacter(_) => todo!(),
                 WindowEvent::Focused(_) => todo!(),
                 WindowEvent::KeyboardInput {
                     device_id,
-                    input,
+                    event: _,
                     is_synthetic,
                 } => todo!(),
                 WindowEvent::ModifiersChanged(_) => todo!(),
                 WindowEvent::CursorMoved {
                     device_id,
                     position,
-                    modifiers: _,
                 } => todo!(),
                 WindowEvent::CursorEntered { device_id } => todo!(),
                 WindowEvent::CursorLeft { device_id } => todo!(),
@@ -181,13 +178,11 @@ impl Window {
                     device_id,
                     delta,
                     phase,
-                    modifiers: _,
                 } => todo!(),
                 WindowEvent::MouseInput {
                     device_id,
                     state,
                     button,
-                    modifiers: _,
                 } => todo!(),
                 WindowEvent::TouchpadPressure {
                     device_id,
@@ -202,8 +197,11 @@ impl Window {
                 WindowEvent::Touch(_) => todo!(),
                 WindowEvent::ScaleFactorChanged {
                     scale_factor,
-                    new_inner_size,
+                    inner_size_writer,
                 } => todo!(),
+                WindowEvent::RedrawRequested if window.id() == window_id => {
+                    ModalEvent::RedrawRequested
+                }
                 WindowEvent::ThemeChanged(_) => todo!(),
             },
             _ => return None,
@@ -214,7 +212,7 @@ impl Window {
 impl WindowSurface {
     pub fn recreate(&mut self, instance: &wgpu::Instance) {
         self.surface = None;
-        let surface = unsafe { instance.create_surface(&*self.window) }.unwrap();
+        let surface = instance.create_surface(self.window.clone()).unwrap();
         self.surface = Some(surface);
     }
 
@@ -228,8 +226,8 @@ impl WindowSurface {
 }
 
 impl core::ops::Deref for WindowSurface {
-    type Target = wgpu::Surface;
-    fn deref(&self) -> &wgpu::Surface {
+    type Target = wgpu::Surface<'static>;
+    fn deref(&self) -> &wgpu::Surface<'static> {
         // Only the private copy of `Window` doesn't have this attribute.
         self.surface.as_ref().unwrap()
     }

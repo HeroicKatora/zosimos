@@ -137,6 +137,7 @@ impl Surface {
             present_mode: wgpu::PresentMode::AutoVsync,
             view_formats: [preferred_format].to_vec(),
             alpha_mode: Default::default(),
+            desired_maximum_frame_latency: 0,
         };
 
         let descriptor = Descriptor {
