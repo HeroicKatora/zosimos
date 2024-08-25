@@ -369,7 +369,10 @@ impl From<&'_ image::DynamicImage> for ImageBuffer {
             texel: descriptor.texel,
         })
         .expect("Valid layout");
-        layout.set_color(descriptor.color);
+
+        layout
+            .set_color(descriptor.color)
+            .expect("valid srgb color");
         let mut inner = Canvas::new(layout);
 
         let source = image.as_bytes();

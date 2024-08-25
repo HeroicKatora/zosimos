@@ -11,7 +11,7 @@ bytemuck = "1.4"
 waker-fn = "1.1"
 
 [dependencies.image]
-version = "0.24.0"
+version = "0.25.0"
 default-features = false
 
 [dependencies.image-canvas]
@@ -47,7 +47,7 @@ crc32fast = "1.2"
 env_logger = "0.9"
 
 [dev-dependencies.image]
-version = "0.24.0"
+version = "0.25.0"
 default-features = false
 features = ["png"]
 

@@ -2037,7 +2037,6 @@ fn rectangles() {
 #[test]
 fn simple_program() {
     use crate::pool::Pool;
-    use image::GenericImageView;
 
     const BACKGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/background.png");
     const FOREGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/foreground.png");
