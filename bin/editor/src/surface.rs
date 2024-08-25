@@ -60,13 +60,14 @@ struct NormalizingExe {
 }
 
 impl Surface {
-    pub fn new(window: &Window) -> Self {
+    pub fn new(window: &WindowSurface) -> Self {
         const ANY: wgpu::Backends = wgpu::Backends::all();
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
+
         let inner = window.create_surface(&instance);
 
         let adapter = Program::request_compatible_adapter(
@@ -128,6 +129,7 @@ impl Surface {
         };
 
         let (width, height) = window.inner_size();
+
         let config = SurfaceConfiguration {
             //  FIXME: COPY_DST is not universal. Should fix `run.rs` so that RENDER_ATTACHMENT suffices.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -189,10 +191,15 @@ impl Surface {
             gpu
         } else {
             log::info!("No gpu key, device lost or not initialized?");
+            let mut descriptor = Program::minimal_device_descriptor();
+            descriptor.required_limits.max_texture_dimension_1d = 4096;
+            descriptor.required_limits.max_texture_dimension_2d = 4096;
+
             let gpu = self
                 .pool
-                .request_device(&self.adapter, Program::minimal_device_descriptor())
+                .request_device(&self.adapter, descriptor)
                 .expect("to get a device");
+
             gpu
         }
     }
@@ -396,6 +403,10 @@ impl Surface {
 
 impl WindowedSurface for Surface {
     fn recreate(&mut self) {}
+
+    fn from_window(window: WindowSurface) -> Self {
+        Surface::new(&window)
+    }
 }
 
 impl Runtimes {

@@ -20,6 +20,7 @@ impl ModalEditor for Editor {
             ModalEvent::ExitPressed => self.close_requested = true,
             ModalEvent::MainEventsCleared => {}
             ModalEvent::RedrawRequested => {}
+            ModalEvent::Resized => {}
         }
     }
 

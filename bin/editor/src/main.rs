@@ -10,20 +10,20 @@ fn main() {
     env_logger::init();
 
     let winit = winit::build();
-    let mut surface = surface::Surface::new(&winit);
     let editor = editor::Editor::default();
-    let compute = compute::Compute::new(&mut surface);
 
-    surface.set_image(&{
-        let img = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/input/background.png"
-        );
-        eprintln!("{}", img);
-        image::ImageReader::open(img).unwrap().decode().unwrap()
-    });
+    winit.run_on_main(editor, |surface: &mut surface::Surface| {
+        surface.set_image(&{
+            let img = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/input/background.png"
+            );
+            eprintln!("{}", img);
+            image::ImageReader::open(img).unwrap().decode().unwrap()
+        });
 
-    winit.run_on_main(editor, compute, surface)
+        compute::Compute::new(surface)
+    })
 }
 
 #[cfg(target_os = "wasi")]

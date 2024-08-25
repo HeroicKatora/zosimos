@@ -3,17 +3,13 @@
 /// We have two responsibilities:
 /// - rewrite input events into program semantics, based on the its current input state. The callee
 ///     will cooperatively indicate when it changes.
-use winit::{
-    event::*,
-    event_loop::{ControlFlow, EventLoop},
-    window::WindowAttributes,
-};
+use winit::{event::*, event_loop::EventLoop, window::WindowAttributes};
 
 use std::sync::Arc;
 
 pub struct Window {
     event_loop: EventLoop<()>,
-    inner: WindowSurface,
+    window: Option<Arc<winit::window::Window>>,
 }
 
 /// Combination of window/surface that fulfills safety property of `create_surface`.
@@ -32,6 +28,7 @@ pub enum ModalEvent {
     ExitPressed,
     MainEventsCleared,
     RedrawRequested,
+    Resized,
 }
 
 /// The redraw errors handled by the window.
@@ -59,88 +56,98 @@ pub trait ModalEditor {
 }
 
 pub trait WindowedSurface {
+    fn from_window(window: WindowSurface) -> Self;
     fn recreate(&mut self);
 }
 
 pub fn build() -> Window {
     let event_loop = EventLoop::new().unwrap();
-    let window = event_loop
-        .create_window(WindowAttributes::default())
-        .unwrap();
-    Window::new(window, event_loop)
+    Window::new(event_loop)
 }
 
 impl Window {
-    pub(crate) fn new(window: winit::window::Window, event_loop: EventLoop<()>) -> Self {
-        let inner = WindowSurface {
-            window: Arc::new(window),
-            surface: None,
-        };
-
-        Window { event_loop, inner }
-    }
-
-    pub fn create_surface(&self, instance: &wgpu::Instance) -> WindowSurface {
-        let window = self.inner.window.clone();
-        let surface = instance.create_surface(window.clone()).unwrap();
-
-        WindowSurface {
-            surface: Some(surface),
-            window,
+    pub(crate) fn new(event_loop: EventLoop<()>) -> Self {
+        Window {
+            event_loop,
+            window: None,
         }
     }
 
-    pub fn inner_size(&self) -> (u32, u32) {
-        let phys = self.inner.window.inner_size();
-        (phys.width, phys.height)
-    }
-
-    pub fn run_on_main<Ed>(self, mut ed: Ed, compute: Ed::Compute, mut surface: Ed::Surface) -> !
+    pub fn run_on_main<Ed>(
+        self,
+        mut ed: Ed,
+        mut on_surface: impl FnMut(&mut Ed::Surface) -> Ed::Compute,
+    ) -> !
     where
         Ed: ModalEditor + 'static,
         Ed::Surface: WindowedSurface,
     {
-        let Window { event_loop, inner } = self;
+        let Window {
+            event_loop,
+            mut window,
+        } = self;
+
+        let mut surface = None;
         let mut modal = ModalContext::Main;
 
-        event_loop.run(move |ev, app| {
-            let recreate = |surface: &mut Ed::Surface| {
-                surface.recreate();
-            };
+        event_loop
+            .run(move |ev, app| {
+                log::info!("Window event: {:?}", ev);
+                let window = window.get_or_insert_with(|| {
+                    Arc::new(app.create_window(WindowAttributes::default()).unwrap())
+                });
 
-            log::info!("Window event: {:?}", ev);
-            match Self::input(&inner.window, &modal, ev) {
-                None => {}
-                Some(ModalEvent::MainEventsCleared) => {
-                    ed.event(ModalEvent::MainEventsCleared, &mut modal);
-                    inner.window.request_redraw();
-                }
-                Some(ModalEvent::RedrawRequested) => {
-                    ed.reconfigure_compute(&mut surface, &compute);
+                let empty = WindowSurface {
+                    surface: None,
+                    window: window.clone(),
+                };
 
-                    ed.event(ModalEvent::RedrawRequested, &mut modal);
-                    match ed.redraw_request(&mut surface) {
-                        Ok(()) => {}
-                        Err(RedrawError::Lost) => {
-                            recreate(&mut surface);
-                            ed.lost(&mut surface)
-                        }
-                        Err(RedrawError::Outdated) => {
-                            recreate(&mut surface);
-                            ed.outdated(&mut surface);
+                let (surface, compute) = surface.get_or_insert_with(|| {
+                    let mut preinit = Ed::Surface::from_window(empty);
+                    let compute = on_surface(&mut preinit);
+                    (preinit, compute)
+                });
+
+                log::info!("Window event: {:?}", ev);
+                match Self::input(&window, &modal, ev) {
+                    None => {}
+                    Some(ModalEvent::MainEventsCleared) => {
+                        ed.event(ModalEvent::MainEventsCleared, &mut modal);
+                        window.request_redraw();
+                    }
+                    Some(ModalEvent::Resized) => {
+                        surface.recreate();
+                        ed.lost(surface);
+                        ed.reconfigure_compute(surface, &compute);
+                    }
+                    Some(ModalEvent::RedrawRequested) => {
+                        ed.reconfigure_compute(surface, &compute);
+                        log::warn!("Redraw requested");
+
+                        ed.event(ModalEvent::RedrawRequested, &mut modal);
+                        match ed.redraw_request(surface) {
+                            Ok(()) => {}
+                            Err(RedrawError::Lost) => {
+                                surface.recreate();
+                                ed.lost(surface)
+                            }
+                            Err(RedrawError::Outdated) => {
+                                surface.recreate();
+                                ed.outdated(surface);
+                            }
                         }
                     }
+                    Some(ev) => {
+                        ed.event(ev, &mut modal);
+                    }
                 }
-                Some(ev) => {
-                    ed.event(ev, &mut modal);
-                }
-            }
 
-            if ed.exit() {
-                log::info!("Editor requested close, closing window");
-                app.exit();
-            }
-        });
+                if ed.exit() {
+                    log::info!("Editor requested close, closing window");
+                    app.exit();
+                }
+            })
+            .unwrap();
 
         std::process::exit(0);
     }
@@ -154,8 +161,11 @@ impl Window {
         Some(match ev {
             Event::WindowEvent { window_id, event } if window.id() == window_id => match event {
                 WindowEvent::CloseRequested => ModalEvent::ExitPressed,
+                WindowEvent::RedrawRequested if window.id() == window_id => {
+                    ModalEvent::RedrawRequested
+                }
+                WindowEvent::Resized(_) => ModalEvent::Resized,
                 _ => return None,
-                WindowEvent::Resized(_) => todo!(),
                 WindowEvent::Moved(_) => todo!(),
                 WindowEvent::Destroyed => todo!(),
                 WindowEvent::DroppedFile(_) => todo!(),
@@ -199,9 +209,6 @@ impl Window {
                     scale_factor,
                     inner_size_writer,
                 } => todo!(),
-                WindowEvent::RedrawRequested if window.id() == window_id => {
-                    ModalEvent::RedrawRequested
-                }
                 WindowEvent::ThemeChanged(_) => todo!(),
             },
             _ => return None,
@@ -222,6 +229,20 @@ impl WindowSurface {
 
     pub fn surface(&self) -> &wgpu::Surface {
         &*self
+    }
+
+    pub fn inner_size(&self) -> (u32, u32) {
+        let phys = self.window.inner_size();
+        (phys.width, phys.height)
+    }
+
+    pub fn create_surface(&self, instance: &wgpu::Instance) -> WindowSurface {
+        let surface = instance.create_surface(self.window.clone()).unwrap();
+
+        WindowSurface {
+            surface: Some(surface),
+            window: self.window.clone(),
+        }
     }
 }
 
