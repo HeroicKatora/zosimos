@@ -2,6 +2,7 @@ use shaderc::{Compiler, ShaderKind};
 use std::{env, fs, io, io::Read as _, path};
 
 #[derive(Debug)]
+#[allow(unused)]
 enum BuildError {
     Io(io::Error),
     Shader(shaderc::Error),
