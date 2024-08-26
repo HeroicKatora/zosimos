@@ -27,6 +27,26 @@ folder.
 
 Otherwise, see the documentation on: <http://docs.rs/>
 
+## Roadmap / Feature Future
+
+#### Medium term
+
+- [ ] Render Masks. Unsure if this is a separate type with constructor methods;
+  probably. Can they be applied to inputs or on some operations? Clear in the
+  mutable `High` IR but not for the SSA form that's user facing.
+- [ ] Rename; some memorable named based on a pun for magick, color, image,
+  Lucifer and witches, and parallel processing?
+- [ ] More operators based on a non-statically typed operator infrastructure
+  including binary and unary operators just derived from their shader.
+
+#### Long term
+
+- [ ] Non-Linear control flow, scalar runtime values.
+- [ ] Functions in the `command` module, stack-based control flow.
+- [ ] Generics in the `command` module, monomorphizing when lowering into a
+  `Program`.
+
+
 ## Project goals
 
 > AM/FM
