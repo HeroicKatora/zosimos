@@ -14,7 +14,6 @@
 pub mod buffer;
 mod color_matrix;
 pub mod command;
-mod encoder;
 pub mod pool;
 pub mod program;
 pub mod run;

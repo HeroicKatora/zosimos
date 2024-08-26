@@ -1,3 +1,5 @@
+mod encoder;
+
 use core::{num::NonZeroU32, ops::Range};
 
 use std::borrow::Cow;
@@ -9,9 +11,10 @@ use crate::buffer::{
 };
 use crate::color_matrix::RowMatrix;
 use crate::command::{Rectangle, Register};
-use crate::encoder::{Encoder, RegisterMap};
 use crate::pool::{Pool, PoolKey};
 use crate::{run, shaders};
+
+use encoder::{Encoder, RegisterMap};
 
 /// Planned out and intrinsically validated command buffer.
 ///
@@ -239,6 +242,7 @@ pub struct Capabilities {
 }
 
 #[derive(Debug)]
+#[allow(unused)]
 pub struct LaunchError {
     kind: LaunchErrorKind,
 }

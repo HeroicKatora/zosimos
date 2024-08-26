@@ -433,6 +433,8 @@ pub struct CommandError {
 }
 
 #[derive(Debug)]
+// `Debug` is our use. Until we get better errors.
+#[allow(unused)]
 enum CommandErrorKind {
     BadDescriptor(Descriptor),
     ConflictingTypes(Descriptor, Descriptor),
