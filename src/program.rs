@@ -8,7 +8,7 @@ use crate::buffer::{
     Block, ByteLayout, Color, Descriptor, SampleBits, SampleParts, Texel, Transfer,
 };
 use crate::color_matrix::RowMatrix;
-use crate::command::{High, Rectangle, Register, Target};
+use crate::command::{Rectangle, Register};
 use crate::encoder::{Encoder, RegisterMap};
 use crate::pool::{Pool, PoolKey};
 use crate::{run, shaders};
@@ -36,6 +36,62 @@ pub struct Program {
     pub(crate) texture_by_op: HashMap<usize, TextureDescriptor>,
     /// Annotates which function allocates a cacheable buffer.
     pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
+}
+
+/// A high-level, device independent, translation of ops.
+///
+/// This is a translated version of `Op`, for consumption in the interpreter internals instead of
+/// the programmer. The main difference to Op is that this is no longer masking as an SSA-form and
+/// simplified to the architecture. Operations are mostly in terms of textures they require
+/// already, not high-level values, and depend on actual capabilities. These functions are also
+/// monomorphized over the texture size / types of their operands whereas the high level command
+/// structure is planned to have generics.
+///
+/// In particular it will be amenable to the initial liveness analysis. This will also return the
+/// _available_ strategies for one operation. For example, some texels can not be represented on
+/// the GPU directly, depending on available formats, and need to be either processed on the CPU
+/// (with SIMD hopefully) or they must be converted first, potentially in a compute shader.
+#[derive(Clone, Debug)]
+pub(crate) enum High {
+    /// Assign a texture id to an input with given descriptor.
+    /// This instructs the program to insert instructions that load the image from the input in the
+    /// pool into the associated texture buffer.
+    Input(Register, Descriptor),
+    /// Designate the ith textures as output n, according to the position in sequence of outputs.
+    Output {
+        /// The source register/texture/buffers.
+        src: Register,
+        /// The target texture.
+        dst: Register,
+    },
+    Render {
+        /// The source register/texture/buffers.
+        src: Register,
+        /// The target texture.
+        dst: Register,
+    },
+    /// Add an additional texture operand to the next operation.
+    PushOperand(Texture),
+    /// Call a function on the currently prepared operands.
+    Construct { dst: Target, fn_: Function },
+    /// Last phase marking a register as done.
+    /// This is emitted after the Command defining the register has been translated.
+    Done(Register),
+    /// Copy binary data from a buffer to another.
+    Copy { src: Register, dst: Register },
+    /// Push one high-level function marker.
+    StackPush(Frame),
+    /// Pop a high-level function marker.
+    StackPop,
+}
+
+/// The target image texture of a paint operation (pipeline).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Target {
+    /// The data in the texture is to be discarded.
+    Discard(Texture),
+    /// The data in the texture must be loaded.
+    Load(Texture),
 }
 
 /// Describes a function call in more common terms.
@@ -893,6 +949,8 @@ impl Program {
         &self,
         from: impl Iterator<Item = wgpu::Adapter>,
     ) -> Result<wgpu::Adapter, MismatchError> {
+        // FIXME: no. We could derive 'trait bounds' on the system that are necessary for executing
+        // the operations. If we can make sure these are purely additive.
         Program::minimum_adapter(from)
     }
 
@@ -969,6 +1027,8 @@ impl Program {
 
     /// Return a descriptor for a device that's capable of executing the program.
     pub fn device_descriptor(&self) -> wgpu::DeviceDescriptor<'static> {
+        // FIXME: no. We could derive 'trait bounds' on the system that are necessary for executing
+        // the operations. If we can make sure these are purely additive.
         Self::minimal_device_descriptor()
     }
 
@@ -985,22 +1045,6 @@ impl Program {
             // FIXME: make the use of this configurable.
             required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
             memory_hints: wgpu::MemoryHints::Performance,
-            /*
-            wgpu::Limits {
-                // We can't afform downlevel_webgl2_defaults due to using buffer textures et.al.
-                // But we don't *need* compute at all.
-                //
-                max_storage_buffer_binding_size: 0,
-                max_storage_textures_per_shader_stage: 0,
-                // No compute workload required.
-                max_compute_workgroup_storage_size: 0,
-                max_compute_invocations_per_workgroup: 0,
-                max_compute_workgroup_size_x: 0,
-                max_compute_workgroup_size_y: 0,
-                max_compute_workgroup_size_z: 0,
-                max_compute_workgroups_per_dimension: 0,
-                .. wgpu::Limits::downlevel_defaults()
-            }, */
         }
     }
 

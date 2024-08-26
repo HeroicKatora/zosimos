@@ -6,8 +6,8 @@ use crate::buffer::{BufferLayout, ByteLayout, ChannelPosition, Descriptor, Texel
 use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
-    CompileError, Frame, Function, ImageBufferAssignment, ImageBufferPlan, ImageDescriptor,
-    Program, QuadTarget, Texture,
+    CompileError, Frame, Function, High, ImageBufferAssignment, ImageBufferPlan, ImageDescriptor,
+    Program, QuadTarget, Target, Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
@@ -104,56 +104,6 @@ pub(crate) enum ConstructOp {
     DistributionNoise(shaders::FractalNoise),
     // TODO: can optimize this repr for the common case.
     Solid(Vec<u8>),
-}
-
-/// A high-level, device independent, translation of ops.
-/// The main difference to Op is that this is no longer in SSA-form, and it may reinterpret and
-/// reuse resources. In particular it will ran after the initial liveness analysis.
-/// This will also return the _available_ strategies for one operation. For example, some texels
-/// can not be represented on the GPU directly, depending on available formats, and need to be
-/// either processed on the CPU (with SIMD hopefully) or they must be converted first, potentially
-/// in a compute shader.
-#[derive(Clone, Debug)]
-pub(crate) enum High {
-    /// Assign a texture id to an input with given descriptor.
-    /// This instructs the program to insert instructions that load the image from the input in the
-    /// pool into the associated texture buffer.
-    Input(Register, Descriptor),
-    /// Designate the ith textures as output n, according to the position in sequence of outputs.
-    Output {
-        /// The source register/texture/buffers.
-        src: Register,
-        /// The target texture.
-        dst: Register,
-    },
-    Render {
-        /// The source register/texture/buffers.
-        src: Register,
-        /// The target texture.
-        dst: Register,
-    },
-    /// Add an additional texture operand to the next operation.
-    PushOperand(Texture),
-    /// Call a function on the currently prepared operands.
-    Construct { dst: Target, fn_: Function },
-    /// Last phase marking a register as done.
-    /// This is emitted after the Command defining the register has been translated.
-    Done(Register),
-    /// Copy binary data from a buffer to another.
-    Copy { src: Register, dst: Register },
-    /// Push one high-level function marker.
-    StackPush(Frame),
-    /// Pop a high-level function marker.
-    StackPop,
-}
-
-/// The target image texture of a paint operation (pipeline).
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Target {
-    /// The data in the texture is to be discarded.
-    Discard(Texture),
-    /// The data in the texture must be loaded.
-    Load(Texture),
 }
 
 #[derive(Clone, Debug)]
@@ -1166,8 +1116,7 @@ impl CommandBuffer {
 
     /// Declare a render target.
     ///
-    /// Render targets MUST later be bound from the pool during launch, similar to outputs.
-    /// However, they are not assumed to be readable afterwards and will never be a copy target.
+    /// Render targets MUST later be bound from the pool during launch, similar to outputs. However, they are not assumed to be readable afterwards and will never be a copy target.
     ///
     /// The target register must be renderable, i.e. a color with a native texture representation.
     pub fn render(&mut self, src: Register) -> Result<(Register, Descriptor), CommandError> {
@@ -1613,17 +1562,12 @@ impl CommandBuffer {
     }
 
     /// Record a _unary operator_.
-    pub fn unary_dynamic(&mut self, lhs: Register, dynamic: &dyn ShaderCommand) -> Register {
+    pub fn unary_dynamic(&mut self, _: Register, _: &dyn ShaderCommand) -> Register {
         todo!()
     }
 
     /// Record a _binary operator_.
-    pub fn binary_dynamic(
-        &mut self,
-        lhs: Register,
-        rhs: Register,
-        dynamic: &dyn ShaderCommand,
-    ) -> Register {
+    pub fn binary_dynamic(&mut self, _: Register, _: Register, _: &dyn ShaderCommand) -> Register {
         todo!()
     }
 }
