@@ -1637,7 +1637,11 @@ impl ChromaticAdaptation {
             (@$source:expr, $target:expr, $lhs:ident => $lhsty:ty : $($rhs:ident => $ty:ty)|*) => {
                 $(
                     if let (Whitepoint::$lhs, Whitepoint::$rhs) = ($source, $target) {
-                        return Ok(<Method as TransformMatrix<$lhsty, $ty, f32>>::generate_transform_matrix
+                        return Ok((|method| {
+                            let lhswp = <$lhsty as wp::WhitePoint<f32>>::get_xyz();
+                            let rhswp = <$ty as wp::WhitePoint<f32>>::get_xyz();
+                            <Method as TransformMatrix<f32>>::generate_transform_matrix(method, lhswp, rhswp)
+                        })
                                   as fn(&Method) -> [f32;9]);
                     }
                 )*
