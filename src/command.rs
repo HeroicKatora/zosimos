@@ -45,6 +45,27 @@ pub struct Register(pub(crate) usize);
 #[derive(Default)]
 pub struct CommandBuffer {
     ops: Vec<Op>,
+    vars: Vec<TyVarBounds>,
+    declared_fn: Vec<CommandSignature>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TyVar(pub(crate) usize);
+
+pub struct CommandSignature {
+    vars: Vec<TyVarBounds>,
+    input: Vec<GenericDescriptor>,
+    output: Vec<GenericDescriptor>,
+}
+
+pub struct GenericDescriptor {
+    size: Generic<(u32, u32)>,
+    texel: Generic<Texel>,
+}
+
+enum Generic<T> {
+    Concrete(T),
+    Generic(TyVar),
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +108,8 @@ enum Op {
         desc: Descriptor,
     },
 }
+
+pub struct TyVarBounds {}
 
 #[derive(Clone, Debug)]
 enum OperandKind {
@@ -1137,6 +1160,18 @@ impl CommandBuffer {
     }
 
     pub fn compile(&self) -> Result<Program, CompileError> {
+        self.link(&[], &[])
+    }
+
+    pub fn link(&self, functions: &[Program], tys: &[Descriptor]) -> Result<Program, CompileError> {
+        if functions.len() != self.declared_fn.len() {
+            return Err(CompileError::NotYetImplemented);
+        }
+
+        if tys.len() != self.vars.len() {
+            return Err(CompileError::NotYetImplemented);
+        }
+
         let steps = self.ops.len();
 
         let mut last_use = vec![0; steps];
@@ -1570,6 +1605,44 @@ impl CommandBuffer {
 
     /// Record a _binary operator_.
     pub fn binary_dynamic(&mut self, _: Register, _: Register, _: &dyn ShaderCommand) -> Register {
+        todo!()
+    }
+}
+
+impl CommandSignature {
+    pub fn is_declaration_of(&self, actual: &CommandSignature) -> bool {
+        if self.vars.len() != actual.vars.len() {
+            return false;
+        }
+
+        for (decl, actual) in self.vars.iter().zip(&actual.vars) {
+            if !decl.contains_bounds(actual) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+impl GenericDescriptor {
+    pub fn monomorphize(&self, decl: &[Descriptor]) -> Descriptor {
+        let (w, h) = match self.size {
+            Generic::Concrete(size) => size,
+            Generic::Generic(ty) => decl[ty.0].size(),
+        };
+
+        let texel = match &self.texel {
+            Generic::Concrete(texel) => texel.clone(),
+            Generic::Generic(ty) => decl[ty.0].texel.clone(),
+        };
+
+        Descriptor::with_texel(texel, w, h).unwrap()
+    }
+}
+
+impl TyVarBounds {
+    pub fn contains_bounds(&self, actual: &TyVarBounds) -> bool {
         todo!()
     }
 }
