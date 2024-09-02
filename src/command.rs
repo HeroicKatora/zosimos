@@ -62,7 +62,7 @@ pub struct CommandSignature {
 pub struct GenericDescriptor {
     underlying: Generic<Descriptor>,
     size: Option<(u32, u32)>,
-    texel: Option<Texel>,
+    chroma: Option<(Texel, Color)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -733,7 +733,7 @@ impl CommandBuffer {
         let desc_below = self.describe_reg(below)?;
         let desc_above = self.describe_reg(above)?;
 
-        if desc_above.texel != desc_below.texel {
+        if desc_above.descriptor_chroma() != desc_below.descriptor_chroma() {
             return Err(CommandError {
                 inner: CommandErrorKind::ConflictingTypes(desc_below.clone(), desc_above.clone()),
             });
@@ -859,17 +859,20 @@ impl CommandBuffer {
 
         // Predict if monomorphize will only do correct transmutes. A transmute re-interprets the
         // buffer containing bit data in storage layout.
-        fn can_transmute(source: Generic<Texel>, target: Generic<Texel>) -> bool {
+        fn can_transmute(source: Generic<(Texel, Color)>, target: Generic<(Texel, Color)>) -> bool {
             match (source, target) {
                 (Generic::Generic(vsource), Generic::Generic(vtarget)) => vsource == vtarget,
-                (Generic::Concrete(source), Generic::Concrete(target)) => {
+                (Generic::Concrete((source, _)), Generic::Concrete((target, _))) => {
                     source.bits.bytes() == target.bits.bytes()
                 }
                 _ => false,
             }
         }
 
-        if !can_transmute(source.texel(), supposed_type.texel()) {
+        if !can_transmute(
+            source.descriptor_chroma(),
+            supposed_type.descriptor_chroma(),
+        ) {
             return Err(CommandError {
                 inner: CommandErrorKind::ConflictingTypes(source.clone(), supposed_type),
             });
@@ -901,6 +904,9 @@ impl CommandBuffer {
     /// This performs an implicit conversion of the overlaid data to the color channels which is
     /// performed as if by transmutation. However, contrary to the transmutation we will _only_
     /// allow the sample parts to be changed arbitrarily.
+    ///
+    /// To perform a mix of two images with differing texels or colors, as if by rendering rather
+    /// than as if by transmute, use `mix` [FIXME: not yet implemented].
     pub fn inject(
         &mut self,
         below: Register,
@@ -910,7 +916,7 @@ impl CommandBuffer {
         let desc_below = self.describe_reg(below)?;
         let desc_above = self.describe_reg(above)?.clone();
 
-        let Generic::Concrete(below_texel) = desc_below.texel() else {
+        let Generic::Concrete((below_texel, below_color)) = desc_below.descriptor_chroma() else {
             return Err(CommandError {
                 inner: CommandErrorKind::BadDescriptor(
                     desc_below.clone(),
@@ -919,7 +925,7 @@ impl CommandBuffer {
             });
         };
 
-        let Generic::Concrete(above_texel) = &mut desc_above.texel() else {
+        let Generic::Concrete((above_texel, above_color)) = desc_above.descriptor_chroma() else {
             return Err(CommandError {
                 inner: CommandErrorKind::BadDescriptor(
                     desc_above.clone(),
@@ -934,7 +940,7 @@ impl CommandBuffer {
 
         if above_texel.parts.num_components() != expected_texel.parts.num_components() {
             let wanted = GenericDescriptor {
-                texel: Some(expected_texel),
+                chroma: Some((expected_texel, below_color)),
                 ..desc_below.clone()
             };
 
@@ -943,8 +949,10 @@ impl CommandBuffer {
             });
         }
 
-        // Override the sample part interpretation.
         let from_channels = above_texel.clone();
+        // Override the sample part interpretation for comparison. We ignore this and compare
+        // everything else. This is because we change specifically the parts by this operation.
+        let mut above_texel = above_texel;
         above_texel.parts = expected_texel.parts;
 
         // FIXME: should we do parsing instead of validation?
@@ -953,9 +961,9 @@ impl CommandBuffer {
             return Err(CommandError::OTHER);
         }
 
-        if expected_texel != *above_texel {
+        if (&expected_texel, &below_color) != (&above_texel, &above_color) {
             let wanted = GenericDescriptor {
-                texel: Some(expected_texel),
+                chroma: Some((expected_texel, below_color)),
                 ..desc_below.clone()
             };
 
@@ -1005,7 +1013,7 @@ impl CommandBuffer {
             [0.0; 4]
         };
 
-        let Generic::Concrete(texel) = color_desc.texel() else {
+        let Generic::Concrete((texel, color)) = color_desc.descriptor_chroma() else {
             return Err(CommandError {
                 inner: CommandErrorKind::BadDescriptor(
                     color_desc.clone().into(),
@@ -1015,7 +1023,7 @@ impl CommandBuffer {
         };
 
         // Compute the target layout (and that we can represent it).
-        let target_layout = idx_desc.with_texel(texel);
+        let target_layout = idx_desc.with_texel(texel, color);
 
         let op = Op::Binary {
             lhs: palette,
@@ -1185,7 +1193,7 @@ impl CommandBuffer {
         let lhs = self.describe_reg(below)?.clone();
         let rhs = self.describe_reg(above)?.clone();
 
-        if lhs.texel != rhs.texel {
+        if lhs.descriptor_chroma() != rhs.descriptor_chroma() {
             return Err(CommandError::TYPE_ERR);
         }
 
@@ -1751,8 +1759,11 @@ impl CommandSignature {
 
 impl GenericDescriptor {
     pub fn as_concrete(&self) -> Option<Descriptor> {
-        if let Some(((w, h), texel)) = self.size.zip(self.texel.as_ref()) {
-            return Descriptor::with_texel(texel.clone(), w, h);
+        if let Some(((w, h), (texel, color))) = self.size.zip(self.chroma.as_ref()) {
+            return Descriptor::with_texel(texel.clone(), w, h).map(|mut desc| {
+                desc.color = color.clone();
+                desc
+            });
         }
 
         let base = match &self.underlying {
@@ -1764,22 +1775,33 @@ impl GenericDescriptor {
             return Descriptor::with_texel(base.texel.clone(), w, h);
         }
 
-        if let Some(texel) = &self.texel {
+        if let Some((texel, color)) = &self.chroma {
             let (w, h) = base.size();
-            return Descriptor::with_texel(texel.clone(), w, h);
+            return Descriptor::with_texel(texel.clone(), w, h).map(|mut desc| {
+                desc.color = color.clone();
+                desc
+            });
         }
 
         Some(base)
     }
 
-    pub fn with_texel(&self, texel: Texel) -> Self {
+    /// FIXME: fallible. If we change the texel from something small to something very large we can
+    /// exceed the allocation limits that are necessary to express the layout.
+    pub fn with_texel(&self, texel: Texel, color: Color) -> Self {
         if let Generic::Concrete(descriptor) = &self.underlying {
             let (w, h) = descriptor.size();
-            return Descriptor::with_texel(texel, w, h).unwrap().into();
+            return Descriptor::with_texel(texel.clone(), w, h)
+                .map(|mut desc| {
+                    desc.color = color.clone();
+                    desc
+                })
+                .expect("changing texel size to something that does not fit memory")
+                .into();
         };
 
         GenericDescriptor {
-            texel: Some(texel),
+            chroma: Some((texel, color)),
             ..self.clone()
         }
     }
@@ -1794,9 +1816,14 @@ impl GenericDescriptor {
             base = Descriptor::with_texel(base.texel, w, h).unwrap()
         };
 
-        if let Some(texel) = &self.texel {
+        if let Some((texel, color)) = &self.chroma {
             let (w, h) = base.size();
-            base = Descriptor::with_texel(texel.clone(), w, h).unwrap()
+            return Descriptor::with_texel(texel.clone(), w, h)
+                .map(|mut desc| {
+                    desc.color = color.clone();
+                    desc
+                })
+                .expect("changing texel and color to something that does not fit memory");
         }
 
         base
@@ -1813,12 +1840,16 @@ impl GenericDescriptor {
         }
     }
 
-    pub fn texel(&self) -> Generic<Texel> {
-        if let Some(texel) = &self.texel {
-            Generic::Concrete(texel.clone())
+    pub fn descriptor_chroma(&self) -> Generic<(Texel, Color)> {
+        if let Some(chroma) = &self.chroma {
+            Generic::Concrete(chroma.clone())
         } else {
             match &self.underlying {
-                Generic::Concrete(descriptor) => Generic::Concrete(descriptor.texel.clone()),
+                Generic::Concrete(descriptor) => {
+                    let texel = descriptor.texel.clone();
+                    let color = descriptor.color.clone();
+                    Generic::Concrete((texel, color))
+                }
                 Generic::Generic(ty) => Generic::Generic(*ty),
             }
         }
@@ -1830,7 +1861,7 @@ impl From<Descriptor> for GenericDescriptor {
         GenericDescriptor {
             underlying: Generic::Concrete(desc),
             size: None,
-            texel: None,
+            chroma: None,
         }
     }
 }

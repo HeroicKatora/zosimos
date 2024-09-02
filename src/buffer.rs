@@ -105,11 +105,13 @@ impl Descriptor {
         let color = Color::Scalars {
             transfer: Transfer::Linear,
         };
+
         let this = Descriptor {
             color,
             layout,
             texel,
         };
+
         let _ = this.try_to_canvas()?;
         Some(this)
     }
