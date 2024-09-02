@@ -1289,7 +1289,11 @@ impl CommandBuffer {
         self.link(&[], &[])
     }
 
-    pub fn link(&self, functions: &[Program], tys: &[Descriptor]) -> Result<Program, CompileError> {
+    pub fn link(
+        &self,
+        functions: &[CommandBuffer],
+        tys: &[Descriptor],
+    ) -> Result<Program, CompileError> {
         if functions.len() != self.declared_fn.len() {
             return Err(CompileError::NotYetImplemented);
         }
