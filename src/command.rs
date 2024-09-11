@@ -47,10 +47,20 @@ pub struct CommandBuffer {
     ops: Vec<Op>,
     vars: Vec<TyVarBounds>,
     declared_fn: Vec<CommandSignature>,
+    tys: Vec<GenericDescriptor>,
 }
 
+/// Refers to a generic argument declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TyVar(pub(crate) usize);
+pub struct GenericVar(pub(crate) usize);
+
+/// Refers to the descriptor introduced by a generic argument or a derived var.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DescriptorVar(pub(crate) usize);
+
+/// Refers to the function introduced by its signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FunctionVar(pub(crate) usize);
 
 pub struct CommandSignature {
     vars: Vec<TyVarBounds>,
@@ -68,7 +78,7 @@ pub struct GenericDescriptor {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Generic<T> {
     Concrete(T),
-    Generic(TyVar),
+    Generic(GenericVar),
 }
 
 #[derive(Clone, Debug)]
@@ -115,13 +125,30 @@ enum Op {
     },
 }
 
-pub struct TyVarBounds {}
+struct TyVarBounds {}
+
+/// Declare a fresh generic declaration parameter.
+pub struct GenericDeclaration<'lt> {
+    pub bounds: &'lt [GenericBound],
+}
+
+/// Declare a new descriptor type based on a generic bound.
+pub struct DescriptorDerivation {
+    pub base: DescriptorVar,
+    pub size: Option<(u32, u32)>,
+}
+
+pub enum GenericBound {}
 
 #[derive(Clone, Debug)]
 enum OperandKind {
     Construct,
     Unary(Register),
     Binary { lhs: Register, rhs: Register },
+}
+pub struct InvocationArguments<'lt> {
+    pub generics: &'lt [DescriptorVar],
+    pub arguments: &'lt [Register],
 }
 
 #[derive(Clone, Debug)]
@@ -507,9 +534,93 @@ impl CommandBuffer {
         Ok(self.push(Op::Input { desc: desc.into() }))
     }
 
+    /// Declare an input that depends on a generic descriptor parameter.
+    ///
+    /// See [`Self::generic`].
+    pub fn input_generic(&mut self, var: DescriptorVar) -> Result<Register, CommandError> {
+        let Some(desc) = self.tys.get(var.0).cloned() else {
+            return Err(CommandError::BAD_REGISTER);
+        };
+
+        Ok(self.push(Op::Input { desc }))
+    }
+
+    /// Declare a generic parameter.
+    ///
+    /// All generic parameters need to be filled with matching concrete variables when the function
+    /// is instantiated at a later point.
+    pub fn generic(&mut self, generic: GenericDeclaration) -> DescriptorVar {
+        for item in generic.bounds {
+            match *item {}
+        }
+
+        let bounds = TyVarBounds {};
+        let tyvar = GenericVar(self.vars.len());
+        self.vars.push(bounds);
+
+        let descriptor = DescriptorVar(self.tys.len());
+        self.tys.push(GenericDescriptor {
+            underlying: Generic::Generic(tyvar),
+            size: None,
+            chroma: None,
+        });
+
+        descriptor
+    }
+
+    pub fn derive_descriptor(
+        &mut self,
+        var: DescriptorDerivation,
+    ) -> Result<DescriptorVar, CommandError> {
+        let DescriptorDerivation { base, size } = var;
+        let Some(from) = self.tys.get(base.0) else {
+            return Err(CommandError::BAD_REGISTER);
+        };
+
+        let desc = GenericDescriptor {
+            underlying: from.underlying.clone(),
+            size,
+            // FIXME: chroma override.
+            chroma: None,
+        };
+
+        let descriptor = DescriptorVar(self.tys.len());
+        self.tys.push(desc);
+
+        Ok(descriptor)
+    }
+
+    pub fn register_descriptor(
+        &mut self,
+        register: Register,
+    ) -> Result<DescriptorVar, CommandError> {
+        let generic = self.describe_reg(register)?;
+
+        let descriptor = DescriptorVar(self.tys.len());
+        self.tys.push(generic.clone());
+
+        Ok(descriptor)
+    }
+
+    pub fn signature(&self) -> CommandSignature {
+        todo!()
+    }
+
+    pub fn function(&mut self, signature: CommandSignature) -> Result<FunctionVar, CommandError> {
+        todo!()
+    }
+
+    pub fn invoke(
+        &mut self,
+        function: FunctionVar,
+        arguments: InvocationArguments,
+    ) -> Result<Register, CommandError> {
+        todo!()
+    }
+
     /// Declare an image as input.
     ///
-    /// Returns its register if the image has a valid descriptor, otherwise returns an error.
+    /// Returns its register if the image has a valid descriptor, otherwise panics.
     pub fn input_from(&mut self, img: PoolImage) -> Register {
         let descriptor = img.descriptor();
         self.input(descriptor)

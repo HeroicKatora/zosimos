@@ -3,7 +3,9 @@
 mod util;
 
 use stealth_paint::buffer::{self, ColorChannel, Descriptor, SampleParts, Texel};
-use stealth_paint::command::{self, Bilinear, CommandBuffer, CommandError, Palette, ShaderCommand};
+use stealth_paint::command::{
+    self, Bilinear, CommandBuffer, CommandError, GenericDeclaration, Palette,
+};
 use stealth_paint::pool::Pool;
 use stealth_paint::program::{Capabilities, Program};
 
@@ -29,7 +31,9 @@ fn generic_palette() {
 
     let fixed_palette = (|| {
         let mut commands = CommandBuffer::default();
-        let img_input = commands.input(todo!())?;
+        let in_a = commands.generic(GenericDeclaration { bounds: &[] });
+
+        let img_input = commands.input_generic(in_a)?;
 
         let img_idx = commands.bilinear(
             Descriptor::with_texel(Texel::new_u8(SampleParts::Rgb), 2048, 2048).unwrap(),
@@ -60,15 +64,27 @@ fn generic_palette() {
     })()
     .expect("build generic inner function sequence");
 
+    let fixed_palette_sig = fixed_palette.signature();
     let (main, output) = (move || {
         let mut commands = CommandBuffer::default();
-        let img_input = commands.input(todo!())?;
+        let converter = commands.function(fixed_palette_sig)?;
 
         let target = image::DynamicImage::ImageRgba8(image::RgbaImage::new(512, 512));
         let srgb = Descriptor::with_srgb_image(&target);
 
-        let srgb = todo!();
-        let (output, _outformat) = commands.output(srgb).expect("Valid for output");
+        let img_input = commands.input(srgb)?;
+
+        let img_input_ty = commands.register_descriptor(img_input)?;
+
+        let img_output = commands.invoke(
+            converter,
+            command::InvocationArguments {
+                generics: &[img_input_ty],
+                arguments: &[img_input],
+            },
+        )?;
+
+        let (output, _outformat) = commands.output(img_output).expect("Valid for output");
 
         Ok::<_, CommandError>((commands, output))
     })()
