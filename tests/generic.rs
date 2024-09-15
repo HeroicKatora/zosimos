@@ -2,7 +2,7 @@
 #[path = "util.rs"]
 mod util;
 
-use stealth_paint::buffer::{self, ColorChannel, Descriptor, SampleParts, Texel};
+use stealth_paint::buffer::{ColorChannel, Descriptor, SampleParts, Texel};
 use stealth_paint::command::{
     self, Bilinear, CommandBuffer, CommandError, GenericDeclaration, Palette,
 };
@@ -64,7 +64,7 @@ fn generic_palette() {
     })()
     .expect("build generic inner function sequence");
 
-    let fixed_palette_sig = fixed_palette.signature();
+    let fixed_palette_sig = fixed_palette.computed_signature();
     let (main, output) = (move || {
         let mut commands = CommandBuffer::default();
         let converter = commands.function(fixed_palette_sig)?;

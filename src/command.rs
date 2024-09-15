@@ -70,9 +70,8 @@ pub struct CommandSignature {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct GenericDescriptor {
-    underlying: Generic<Descriptor>,
-    size: Option<(u32, u32)>,
-    chroma: Option<(Texel, Color)>,
+    size: Generic<(u32, u32)>,
+    chroma: Generic<(Texel, Color)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -125,6 +124,7 @@ enum Op {
     },
 }
 
+#[derive(Clone)]
 struct TyVarBounds {}
 
 /// Declare a fresh generic declaration parameter.
@@ -560,9 +560,8 @@ impl CommandBuffer {
 
         let descriptor = DescriptorVar(self.tys.len());
         self.tys.push(GenericDescriptor {
-            underlying: Generic::Generic(tyvar),
-            size: None,
-            chroma: None,
+            size: Generic::Generic(tyvar),
+            chroma: Generic::Generic(tyvar),
         });
 
         descriptor
@@ -573,15 +572,13 @@ impl CommandBuffer {
         var: DescriptorDerivation,
     ) -> Result<DescriptorVar, CommandError> {
         let DescriptorDerivation { base, size } = var;
-        let Some(from) = self.tys.get(base.0) else {
+        let Some(from) = self.tys.get(base.0).cloned() else {
             return Err(CommandError::BAD_REGISTER);
         };
 
         let desc = GenericDescriptor {
-            underlying: from.underlying.clone(),
-            size,
-            // FIXME: chroma override.
-            chroma: None,
+            size: size.map_or(from.size, Generic::Concrete),
+            chroma: from.chroma,
         };
 
         let descriptor = DescriptorVar(self.tys.len());
@@ -602,21 +599,88 @@ impl CommandBuffer {
         Ok(descriptor)
     }
 
-    pub fn signature(&self) -> CommandSignature {
-        todo!()
+    /// Calculate the signature based on generics, inputs, outputs.
+    pub fn computed_signature(&self) -> CommandSignature {
+        CommandSignature {
+            vars: self.vars.clone(),
+            input: self
+                .ops
+                .iter()
+                .filter_map(|op| {
+                    if let Op::Input { desc } = op {
+                        Some(desc.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            output: self
+                .ops
+                .iter()
+                .filter_map(|op| {
+                    if let &Op::Output { src } = op {
+                        Some(
+                            self.describe_reg(src)
+                                .expect("Validated when creating output")
+                                .clone(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        }
     }
 
+    /// Declare a function that is later linked in.
     pub fn function(&mut self, signature: CommandSignature) -> Result<FunctionVar, CommandError> {
         let symbol = FunctionVar(self.symbols.len());
         self.symbols.push(signature);
         Ok(symbol)
     }
 
+    /// Declare an invocation of a separate, possibly generic, function.
     pub fn invoke(
         &mut self,
         function: FunctionVar,
-        arguments: InvocationArguments,
+        invoke: InvocationArguments,
     ) -> Result<Register, CommandError> {
+        let signature = self
+            .symbols
+            .get(function.0)
+            .ok_or(CommandError::BAD_REGISTER)?;
+
+        if signature.input.len() != invoke.arguments.len() {
+            return Err(CommandError::INVALID_CALL);
+        }
+
+        if signature.vars.len() != invoke.generics.len() {
+            return Err(CommandError::INVALID_CALL);
+        }
+
+        let descriptors: Vec<_> = invoke
+            .generics
+            .iter()
+            .map(|&DescriptorVar(idx)| self.tys.get(idx).cloned())
+            .collect::<Option<_>>()
+            .ok_or(CommandError::BAD_REGISTER)?;
+
+        for (tyvar, tyarg) in signature.vars.iter().zip(invoke.generics) {
+            // FIXME: fully validate generics. We need to know specifics about a type variable, in
+            // particular its locally known bounds, and a system to query these bounds. We just
+            // incidentally do not yet have any such bounds.
+            let _ = (tyvar, tyarg);
+        }
+
+        for (param, arg) in signature.input.iter().zip(invoke.arguments) {
+            let expected = param.rewrite(&descriptors);
+            let arg_ty = self.describe_reg(*arg)?;
+
+            if expected != *arg_ty {
+                return Err(CommandError::INVALID_CALL);
+            }
+        }
+
         todo!()
     }
 
@@ -1053,7 +1117,7 @@ impl CommandBuffer {
 
         if above_texel.parts.num_components() != expected_texel.parts.num_components() {
             let wanted = GenericDescriptor {
-                chroma: Some((expected_texel, below_color)),
+                chroma: Generic::Concrete((expected_texel, below_color)),
                 ..desc_below.clone()
             };
 
@@ -1076,7 +1140,7 @@ impl CommandBuffer {
 
         if (&expected_texel, &below_color) != (&above_texel, &above_color) {
             let wanted = GenericDescriptor {
-                chroma: Some((expected_texel, below_color)),
+                chroma: Generic::Concrete((expected_texel, below_color)),
                 ..desc_below.clone()
             };
 
@@ -1126,17 +1190,11 @@ impl CommandBuffer {
             [0.0; 4]
         };
 
-        let Generic::Concrete((texel, color)) = color_desc.descriptor_chroma() else {
-            return Err(CommandError {
-                inner: CommandErrorKind::BadDescriptor(
-                    color_desc.clone().into(),
-                    "sampling generic palette",
-                ),
-            });
-        };
-
         // Compute the target layout (and that we can represent it).
-        let target_layout = idx_desc.with_texel(texel, color);
+        let target_layout = GenericDescriptor {
+            chroma: color_desc.descriptor_chroma(),
+            ..idx_desc.clone()
+        };
 
         let op = Op::Binary {
             lhs: palette,
@@ -1875,110 +1933,104 @@ impl CommandSignature {
 }
 
 impl GenericDescriptor {
+    /// Query if this describes a monomorphic descriptor.
+    ///
+    /// At the moment this means a fully constrained descriptor where both size and chroma are
+    /// defined. It's a bit odd that this would be an overlapping property with having been
+    /// constructed from an actually concrete defined descriptor. If we had a non-deterministic
+    /// layout algorithm (i.e. multiple permissible layouts for one combination of size/chroma)
+    /// then this might inadvertently throw away some of this information. But for now this
+    /// information is compile time only, the actual dependence of operational semantics on layout
+    /// information is evaluated at runtime. (FIXME: I will have regretted writing this).
     pub fn as_concrete(&self) -> Option<Descriptor> {
-        if let Some(((w, h), (texel, color))) = self.size.zip(self.chroma.as_ref()) {
-            return Descriptor::with_texel(texel.clone(), w, h).map(|mut desc| {
-                desc.color = color.clone();
-                desc
-            });
-        }
-
-        let base = match &self.underlying {
-            Generic::Concrete(descriptor) => descriptor.clone(),
-            Generic::Generic(_) => return None,
+        let Generic::Concrete((w, h)) = self.size else {
+            return None;
         };
 
-        if let Some((w, h)) = self.size {
-            return Descriptor::with_texel(base.texel.clone(), w, h);
-        }
+        let Generic::Concrete((texel, color)) = &self.chroma else {
+            return None;
+        };
 
-        if let Some((texel, color)) = &self.chroma {
-            let (w, h) = base.size();
-            return Descriptor::with_texel(texel.clone(), w, h).map(|mut desc| {
-                desc.color = color.clone();
-                desc
-            });
-        }
-
-        Some(base)
+        Descriptor::with_texel(texel.clone(), w, h).map(|mut desc| {
+            desc.color = color.clone();
+            desc
+        })
     }
 
     /// FIXME: fallible. If we change the texel from something small to something very large we can
     /// exceed the allocation limits that are necessary to express the layout.
-    pub fn with_texel(&self, texel: Texel, color: Color) -> Self {
-        if let Generic::Concrete(descriptor) = &self.underlying {
-            let (w, h) = descriptor.size();
-            return Descriptor::with_texel(texel.clone(), w, h)
-                .map(|mut desc| {
-                    desc.color = color.clone();
-                    desc
-                })
-                .expect("changing texel size to something that does not fit memory")
-                .into();
-        };
-
+    pub fn with_chroma(&self, texel: Texel, color: Color) -> Self {
         GenericDescriptor {
-            chroma: Some((texel, color)),
+            chroma: Generic::Concrete((texel, color)),
             ..self.clone()
         }
     }
 
     pub fn monomorphize(&self, decl: &[Descriptor]) -> Descriptor {
-        let mut base = match &self.underlying {
+        let (w, h) = match &self.size {
             Generic::Concrete(descriptor) => descriptor.clone(),
-            Generic::Generic(idx) => decl[idx.0].clone(),
+            Generic::Generic(idx) => decl[idx.0].size(),
         };
 
-        if let Some((w, h)) = self.size {
-            base = Descriptor::with_texel(base.texel, w, h).unwrap()
+        let (texel, color) = match &self.chroma {
+            Generic::Concrete(tuple) => tuple.clone(),
+            Generic::Generic(idx) => {
+                let from = &decl[idx.0];
+                (from.texel.clone(), from.color.clone())
+            }
         };
 
-        if let Some((texel, color)) = &self.chroma {
-            let (w, h) = base.size();
-            return Descriptor::with_texel(texel.clone(), w, h)
-                .map(|mut desc| {
-                    desc.color = color.clone();
-                    desc
-                })
-                .expect("changing texel and color to something that does not fit memory");
+        Descriptor::with_texel(texel, w, h)
+            .map(|mut desc| {
+                desc.color = color;
+                desc
+            })
+            .expect("changing texel and color to something that does not fit memory")
+    }
+
+    /// Apply an outer variable definition, replacing generics by at least as concrete terms.
+    ///
+    /// Does not verify any bounds of the rewrites! Which we'll need to do if we had associated
+    /// constants and the rewrite was looking into paths and impls. Consider a trait (similar to
+    /// the Rust type system) / type family such as `LinearizedColor` that associates the linear
+    /// optical colorspace to an arbitrary electrical color encoding. Then we might have the
+    /// signature written in pseudo-code:
+    ///
+    ///     function <C: LinearizedColor>(arg0: {C; 256×256}, arg1: {C::Linear; 256×256})
+    ///
+    /// Now if we rewrite with [C = sRGB] then we want the concrete [C::Linear=CIE-RGB-Wp-D70]
+    /// correspondence. But if we tried [C = CYMK] we have nonsense. Here we allow this function to
+    /// panic, a check must happen earlier.
+    pub fn rewrite(&self, decl: &[GenericDescriptor]) -> Self {
+        GenericDescriptor {
+            size: match &self.size {
+                &Generic::Concrete(size) => Generic::Concrete(size),
+                Generic::Generic(idx) => decl[idx.0].size.clone(),
+            },
+            chroma: match &self.chroma {
+                Generic::Concrete(chroma) => Generic::Concrete(chroma.clone()),
+                Generic::Generic(idx) => decl[idx.0].chroma.clone(),
+            },
         }
-
-        base
     }
 
     pub fn size(&self) -> Generic<(u32, u32)> {
-        if let Some(sz) = self.size {
-            Generic::Concrete(sz)
-        } else {
-            match &self.underlying {
-                Generic::Concrete(descriptor) => Generic::Concrete(descriptor.size()),
-                Generic::Generic(ty) => Generic::Generic(*ty),
-            }
-        }
+        self.size.clone()
     }
 
     pub fn descriptor_chroma(&self) -> Generic<(Texel, Color)> {
-        if let Some(chroma) = &self.chroma {
-            Generic::Concrete(chroma.clone())
-        } else {
-            match &self.underlying {
-                Generic::Concrete(descriptor) => {
-                    let texel = descriptor.texel.clone();
-                    let color = descriptor.color.clone();
-                    Generic::Concrete((texel, color))
-                }
-                Generic::Generic(ty) => Generic::Generic(*ty),
-            }
-        }
+        self.chroma.clone()
     }
 }
 
 impl From<Descriptor> for GenericDescriptor {
     fn from(desc: Descriptor) -> Self {
+        let size = desc.size();
+        let chroma = (desc.texel.clone(), desc.color.clone());
+
         GenericDescriptor {
-            underlying: Generic::Concrete(desc),
-            size: None,
-            chroma: None,
+            size: Generic::Concrete(size),
+            chroma: Generic::Concrete(chroma),
         }
     }
 }
@@ -2373,6 +2425,9 @@ impl CommandError {
 
     /// Specifies that a register reference was invalid.
     const BAD_REGISTER: Self = Self::OTHER;
+
+    /// Specifies that a register reference was invalid.
+    const INVALID_CALL: Self = Self::OTHER;
 
     /// This has not yet been implemented, sorry.
     ///
