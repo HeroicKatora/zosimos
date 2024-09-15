@@ -46,7 +46,7 @@ pub struct Register(pub(crate) usize);
 pub struct CommandBuffer {
     ops: Vec<Op>,
     vars: Vec<TyVarBounds>,
-    declared_fn: Vec<CommandSignature>,
+    symbols: Vec<CommandSignature>,
     tys: Vec<GenericDescriptor>,
 }
 
@@ -607,7 +607,9 @@ impl CommandBuffer {
     }
 
     pub fn function(&mut self, signature: CommandSignature) -> Result<FunctionVar, CommandError> {
-        todo!()
+        let symbol = FunctionVar(self.symbols.len());
+        self.symbols.push(signature);
+        Ok(symbol)
     }
 
     pub fn invoke(
@@ -1405,7 +1407,7 @@ impl CommandBuffer {
         functions: &[CommandBuffer],
         tys: &[Descriptor],
     ) -> Result<Program, CompileError> {
-        if functions.len() != self.declared_fn.len() {
+        if functions.len() != self.symbols.len() {
             return Err(CompileError::NotYetImplemented);
         }
 
