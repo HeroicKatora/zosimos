@@ -523,6 +523,12 @@ pub(crate) enum BufferInitContent {
 }
 
 #[derive(Debug)]
+pub(crate) struct FunctionFrame {
+    range: core::ops::Range<usize>,
+    results: Vec<Texture>,
+}
+
+#[derive(Debug)]
 pub(crate) struct BufferInitContentBuilder<'trgt> {
     buf: &'trgt mut Vec<u8>,
     start: usize,
@@ -1096,6 +1102,7 @@ impl Program {
                 shader_by_op: encoder.shader_by_op,
                 pipeline_by_op: encoder.pipeline_by_op,
                 skip_by_op: encoder.skip_by_op,
+                functions: Default::default(),
             }),
             binary_data: encoder.binary_data,
             descriptors: run::Descriptors::default(),
@@ -1330,6 +1337,7 @@ impl Launcher<'_> {
                 shader_by_op: encoder.shader_by_op,
                 pipeline_by_op: encoder.pipeline_by_op,
                 skip_by_op: encoder.skip_by_op,
+                functions: Default::default(),
             }),
             device,
             queue,

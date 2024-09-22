@@ -1,4 +1,4 @@
-use core::{future::Future, iter::once, marker::Unpin, pin::Pin};
+use core::{future::Future, iter::once, marker::Unpin, ops::Range, pin::Pin};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -48,6 +48,7 @@ pub(crate) struct ProgramInfo {
     /// When event `val` is already achieved, op `key` becomes irrelevant.
     /// TODO: some instruction results supply multiple events.
     pub(crate) skip_by_op: HashMap<program::Instruction, program::Event>,
+    pub(crate) functions: HashMap<usize, program::FunctionFrame>,
 }
 
 /// Configures devices and input/output buffers for an executable.
@@ -90,12 +91,14 @@ pub struct Execution {
 
 pub(crate) struct Host {
     pub(crate) machine: Machine,
-    pub(crate) descriptors: Descriptors,
-    pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
-    pub(crate) image_io_buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
     pub(crate) io_map: Arc<IoMap>,
     pub(crate) info: Arc<ProgramInfo>,
+
+    /// Variable information during execution.
+    pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
+    pub(crate) image_io_buffers: Vec<Image>,
+    pub(crate) descriptors: Descriptors,
     pub(crate) debug_stack: Vec<Frame>,
     pub(crate) usage: ResourcesUsed,
 
@@ -323,7 +326,7 @@ pub struct Retire<'pool> {
 
 pub(crate) struct Machine {
     instructions: Arc<[Low]>,
-    instruction_pointer: usize,
+    instruction_pointer: Vec<Range<usize>>,
 }
 
 #[derive(Debug)]
@@ -1266,7 +1269,12 @@ impl Execution {
 
     /// Do a number of limited steps.
     pub fn step_to(&mut self, limits: StepLimits) -> Result<SyncPoint<'_>, StepError> {
-        let instruction_pointer = self.host.machine.instruction_pointer;
+        let instruction_pointer = self
+            .host
+            .machine
+            .instruction_pointer
+            .last()
+            .map_or(usize::MAX, |range| range.start);
 
         #[cfg(not(target_arch = "wasm32"))]
         let host_start = std::time::Instant::now();
@@ -1385,9 +1393,8 @@ impl Host {
             stack: Some(&mut self.debug_stack),
         };
 
-        let inst = self.machine.instruction_pointer;
-
-        if let Some(event) = self.info.skip_by_op.get(&program::Instruction(inst)) {
+        let (inst, low) = self.machine.next_instruction()?;
+        if let Some(event) = self.info.skip_by_op.get(&inst) {
             if self.descriptors.precomputed.contains_key(event) {
                 // FIXME: Incorrect in general. We need to simulate the creation of whatever
                 // resource it was meant to create / grab this resource from the environment.
@@ -1400,7 +1407,7 @@ impl Host {
 
         limits.instructions = limits.instructions.saturating_sub(1);
 
-        match self.machine.next_instruction()? {
+        match low {
             Low::BindGroupLayout(desc) => {
                 let mut entry_buffer = vec![];
                 let group = self
@@ -1429,7 +1436,7 @@ impl Host {
                     mapped_at_creation: false,
                 };
 
-                let buffer = if let Some(buffer) = cache.preallocated_buffers.remove(&inst) {
+                let buffer = if let Some(buffer) = cache.preallocated_buffers.remove(&inst.0) {
                     self.usage.buffer_reused += desc.u64_len();
                     buffer
                 } else {
@@ -1471,7 +1478,7 @@ impl Host {
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
 
-                    shader = if let Some(shader) = cache.precompiled_shader.remove(&inst) {
+                    shader = if let Some(shader) = cache.precompiled_shader.remove(&inst.0) {
                         self.usage.shaders_reused += 1;
                         shader
                     } else {
@@ -1484,7 +1491,7 @@ impl Host {
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
 
-                    shader = if let Some(shader) = cache.precompiled_shader.remove(&inst) {
+                    shader = if let Some(shader) = cache.precompiled_shader.remove(&inst.0) {
                         self.usage.shaders_reused += 1;
                         shader
                     } else {
@@ -1613,7 +1620,7 @@ impl Host {
                     view_formats: &[desc.format],
                 };
 
-                let texture = if let Some(texture) = cache.preallocated_textures.remove(&inst) {
+                let texture = if let Some(texture) = cache.preallocated_textures.remove(&inst.0) {
                     self.usage.texture_reused += desc.u64_len();
                     texture
                 } else {
@@ -1636,7 +1643,7 @@ impl Host {
                 Ok(())
             }
             Low::RenderPipeline(desc) => {
-                let pipeline = if let Some(pipeline) = cache.precompiled_pipelines.remove(&inst) {
+                let pipeline = if let Some(pipeline) = cache.precompiled_pipelines.remove(&inst.0) {
                     self.usage.pipelines_reused += 1;
                     pipeline
                 } else {
@@ -1655,7 +1662,7 @@ impl Host {
                 // Pipelines are not cacheable (at least we don't assume so) from their descriptor
                 // alone which may refer to some arbitrary module instances and state that are not
                 // easily summarized. So, only cache this if the encoder generated a key for it.
-                if let Some(desc) = self.info.pipeline_by_op.get(&inst) {
+                if let Some(desc) = self.info.pipeline_by_op.get(&inst.0) {
                     self.descriptors
                         .pipeline_descriptors
                         .insert(pipeline_idx, desc.clone());
@@ -2398,22 +2405,42 @@ impl Descriptors {
 impl Machine {
     pub(crate) fn new(instructions: Arc<[Low]>) -> Self {
         Machine {
+            instruction_pointer: vec![0..instructions.len()],
             instructions,
-            instruction_pointer: 0,
         }
     }
 
     fn is_running(&self) -> bool {
-        self.instruction_pointer < self.instructions.len()
+        !self.instruction_pointer.is_empty()
     }
 
-    fn next_instruction(&mut self) -> Result<&Low, StepError> {
-        let instruction = self
+    fn next_instruction(&mut self) -> Result<(program::Instruction, &Low), StepError> {
+        let instruction = loop {
+            let ip = self
+                .instruction_pointer
+                .last_mut()
+                .ok_or(StepError::ProgramEnd)?;
+
+            // This is equivalent to flowing off the end of a function. Normally this must not
+            // happen without explicit return instructions, except at the end of a program. That
+            // is, if this occurs further instructions will not receive their expected values such
+            // as instead having broken or (logically) uninitialized buffer.
+            //
+            // The state being consumed immediately afterwards is okay though, which happens at the
+            // end of the program.
+            if let Some(instruction) = ip.next() {
+                break instruction;
+            }
+
+            let _ = self.instruction_pointer.pop();
+        };
+
+        let low = self
             .instructions
-            .get(self.instruction_pointer)
-            .ok_or(StepError::ProgramEnd)?;
-        self.instruction_pointer += 1;
-        Ok(instruction)
+            .get(instruction)
+            .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
+
+        Ok((program::Instruction(instruction), low))
     }
 
     fn render_pass<'pass>(
@@ -2422,7 +2449,7 @@ impl Machine {
         mut pass: wgpu::RenderPass<'pass>,
     ) -> Result<(), StepError> {
         loop {
-            let instruction = match self.next_instruction() {
+            let (_, instruction) = match self.next_instruction() {
                 Err(StepError {
                     inner: StepErrorKind::ProgramEnd,
                     ..
