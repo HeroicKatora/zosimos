@@ -16,6 +16,7 @@ default-features = false
 
 [dependencies.image-canvas]
 version = "0.4.2"
+path = "../image-canvas/canvas"
 
 [dependencies.log]
 version = "0.4"

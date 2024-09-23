@@ -76,7 +76,7 @@ pub(crate) enum High {
     /// Add an additional texture operand to the next operation.
     PushOperand(Texture),
     /// Call a function on the currently prepared operands.
-    Construct { dst: Target, fn_: Function },
+    Construct { dst: Target, fn_: Initializer },
     /// Create all the state for a texture, without doing anything in it.
     Uninit { dst: Target },
     /// Last phase marking a register as done.
@@ -107,7 +107,7 @@ pub(crate) enum Target {
 ///
 /// A single command might be translated to multiple functions.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Function {
+pub(crate) enum Initializer {
     /// Execute a shader on an target rectangle.
     ///
     /// The UV coordinates and position is determined by vertex shader parameters computed from a
@@ -225,6 +225,12 @@ pub struct DeviceTexture(pub(crate) usize);
 /// Identifies one layout based buffer in the render pipeline, by an index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Buffer(pub(crate) usize);
+
+/// Identifies one sequence of instructions that operate on the same stack.
+///
+/// Arguments and results are passed by the initial state of the stack, including a portion of IO
+/// buffers that can be textures and pre-allocated buffers from the GPU.
+pub(crate) struct Function(pub(crate) usize);
 
 /// Identifies one descriptor based resource in the render pipeline, by an index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

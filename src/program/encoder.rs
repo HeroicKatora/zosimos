@@ -9,8 +9,8 @@ use crate::pool::Pool;
 use crate::program::{
     BindGroupDescriptor, BindGroupLayoutDescriptor, BindingResource, Buffer, BufferDescriptor,
     BufferDescriptorInit, BufferInitContent, BufferUsage, Capabilities, ColorAttachmentDescriptor,
-    DeviceBuffer, DeviceTexture, Event, FragmentState, Function, ImageBufferAssignment,
-    ImageBufferPlan, ImageDescriptor, ImagePoolPlan, Instruction, LaunchError, Low,
+    DeviceBuffer, DeviceTexture, Event, FragmentState, ImageBufferAssignment, ImageBufferPlan,
+    ImageDescriptor, ImagePoolPlan, Initializer, Instruction, LaunchError, Low,
     PipelineLayoutDescriptor, PipelineLayoutKey, PrimitiveState, RenderPassDescriptor,
     RenderPipelineDescriptor, RenderPipelineKey, SamplerDescriptor, ShaderDescriptor,
     ShaderDescriptorKey, Texture, TextureDescriptor, TextureUsage, TextureViewDescriptor,
@@ -712,7 +712,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             let pipeline = if let Some(&pipeline) = self.staged_to_pipelines.get(&idx) {
                 pipeline
             } else {
-                let fn_ = Function::ToLinearOpto {
+                let fn_ = Initializer::ToLinearOpto {
                     parameter: staging.parameter,
                     stage_kind: staging.stage_kind,
                 };
@@ -755,7 +755,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             let pipeline = if let Some(&pipeline) = self.staged_from_pipelines.get(&idx) {
                 pipeline
             } else {
-                let fn_ = Function::FromLinearOpto {
+                let fn_ = Initializer::FromLinearOpto {
                     parameter: staging.parameter,
                     stage_kind: staging.stage_kind,
                 };
@@ -1592,12 +1592,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     pub(crate) fn prepare_render(
         &mut self,
         // The function we are using.
-        function: &Function,
+        function: &Initializer,
         // The texture we are rendering to.
         target: Texture,
     ) -> Result<SimpleRenderPipeline, LaunchError> {
         match function {
-            Function::PaintToSelection { texture, selection, target: target_coords, viewport, shader } => {
+            Initializer::PaintToSelection { texture, selection, target: target_coords, viewport, shader } => {
                 let (tex_width, tex_height) = self.texture_map[texture].format.size;
 
                 let vertex = self.vertex_shader(
@@ -1642,7 +1642,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
             },
-            Function::PaintFullScreen { shader } => {
+            Initializer::PaintFullScreen { shader } => {
                 let vertex = self.vertex_shader(
                     Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
@@ -1669,7 +1669,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
             },
-            Function::ToLinearOpto { parameter, stage_kind } => {
+            Initializer::ToLinearOpto { parameter, stage_kind } => {
                 let vertex = self.vertex_shader(
                     Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
@@ -1714,7 +1714,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     },
                 })
             }
-            Function::FromLinearOpto { parameter, stage_kind } => {
+            Initializer::FromLinearOpto { parameter, stage_kind } => {
                 let vertex = self.vertex_shader(
                     Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;

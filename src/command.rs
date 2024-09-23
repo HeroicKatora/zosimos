@@ -7,7 +7,7 @@ use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
     CompileError, Frame, Function, High, ImageBufferAssignment, ImageBufferPlan, ImageDescriptor,
-    Program, QuadTarget, Target, Texture,
+    Initializer, Program, QuadTarget, Target, Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
@@ -126,6 +126,7 @@ enum Op {
         function: FunctionVar,
         arguments: Vec<Register>,
         results: Vec<Register>,
+        generics: Vec<GenericDescriptor>,
     },
     /// The specific return value of a function.
     InvokedResult {
@@ -672,7 +673,7 @@ impl CommandBuffer {
             return Err(CommandError::INVALID_CALL);
         }
 
-        let descriptors: Vec<_> = invoke
+        let generics: Vec<_> = invoke
             .generics
             .iter()
             .map(|&DescriptorVar(idx)| self.tys.get(idx).cloned())
@@ -687,7 +688,7 @@ impl CommandBuffer {
         }
 
         for (param, arg) in signature.input.iter().zip(invoke.arguments) {
-            let expected = param.rewrite(&descriptors);
+            let expected = param.rewrite(&generics);
             let arg_ty = self.describe_reg(*arg)?;
 
             if expected != *arg_ty {
@@ -700,7 +701,7 @@ impl CommandBuffer {
         let mut results = vec![];
         for (target, output) in signature.output.iter().enumerate() {
             results.push(Register(self.ops.len()));
-            let desc = output.rewrite(&descriptors);
+            let desc = output.rewrite(&generics);
 
             self.ops.push(Op::InvokedResult {
                 invocation,
@@ -714,6 +715,7 @@ impl CommandBuffer {
             function,
             arguments: invoke.arguments.to_vec(),
             results: results.clone(),
+            generics,
         });
 
         Ok(results)
@@ -1565,6 +1567,7 @@ impl CommandBuffer {
                     function: _,
                     arguments: args,
                     results: _,
+                    generics: _,
                 } => {
                     for &Register(arg) in args {
                         last_use[arg] = last_use[arg].max(idx);
@@ -1582,8 +1585,16 @@ impl CommandBuffer {
             }
         }
 
+        #[derive(Hash, PartialEq, Eq)]
+        struct Signature {
+            function: FunctionVar,
+            tys: Vec<Descriptor>,
+        }
+
         let mut image_buffers = ImageBufferPlan::default();
         let mut reg_to_texture: HashMap<Register, Texture> = HashMap::default();
+
+        let mut signture_to_id: HashMap<Signature, Function> = HashMap::default();
 
         let mut realize_texture = |idx, op: &Op| {
             let liveness = first_use[idx]..last_use[idx];
@@ -1645,7 +1656,7 @@ impl CommandBuffer {
                         &ConstructOp::DistributionNormal(ref distribution) => {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     shader: FragmentShader::Normal2d(distribution.clone()),
                                 },
                             })
@@ -1653,14 +1664,14 @@ impl CommandBuffer {
                         ConstructOp::DistributionNoise(ref noise_params) => {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     shader: FragmentShader::FractalNoise(noise_params.clone()),
                                 },
                             })
                         }
                         ConstructOp::Bilinear(bilinear) => high_ops.push(High::Construct {
                             dst: Target::Discard(texture),
-                            fn_: Function::PaintFullScreen {
+                            fn_: Initializer::PaintFullScreen {
                                 shader: FragmentShader::Bilinear(bilinear.clone()),
                             },
                         }),
@@ -1683,7 +1694,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintToSelection {
+                                fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[src],
                                     selection: region,
                                     target: target.into(),
@@ -1707,7 +1718,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     shader: FragmentShader::LinearColorMatrix(
                                         shaders::LinearColorTransform {
                                             matrix: matrix.into(),
@@ -1734,7 +1745,7 @@ impl CommandBuffer {
                             // ephemeral intermediate attachment?
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     shader: color.to_shader(),
                                 },
                             });
@@ -1744,7 +1755,7 @@ impl CommandBuffer {
 
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     // This will grab the right channel, that is all of them.
                                     // The actual conversion is done in de-staging of the result.
                                     // TODO: evaluate if this is the right way to do it. We could
@@ -1760,7 +1771,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen { shader },
+                                fn_: Initializer::PaintFullScreen { shader },
                             })
                         }
                         UnaryOp::Transmute => high_ops.push(High::Copy {
@@ -1792,7 +1803,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintToSelection {
+                                fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[lhs],
                                     selection: lower_region,
                                     target: lower_region.into(),
@@ -1804,7 +1815,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
                             high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
-                                fn_: Function::PaintToSelection {
+                                fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[rhs],
                                     selection: upper_region,
                                     target: QuadTarget::from(upper_region).affine(&affine_matrix),
@@ -1824,7 +1835,7 @@ impl CommandBuffer {
 
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     shader: FragmentShader::Inject(shaders::inject::Shader {
                                         mix: channel.into_vec4(),
                                         color: from_channels.channel_weight_vec4().unwrap(),
@@ -1836,7 +1847,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintToSelection {
+                                fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[lhs],
                                     selection: lower_region,
                                     target: lower_region.into(),
@@ -1848,7 +1859,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
                             high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
-                                fn_: Function::PaintToSelection {
+                                fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[rhs],
                                     selection: upper_region,
                                     target: (*placement).into(),
@@ -1863,7 +1874,7 @@ impl CommandBuffer {
 
                             high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     shader: FragmentShader::Palette(shader.clone()),
                                 },
                             });
@@ -1899,7 +1910,7 @@ impl CommandBuffer {
 
                     high_ops.push(High::Construct {
                         dst: Target::Discard(texture),
-                        fn_: Function::PaintFullScreen {
+                        fn_: Initializer::PaintFullScreen {
                             shader: FragmentShader::Dynamic(command.clone()),
                         },
                     })
@@ -1917,7 +1928,13 @@ impl CommandBuffer {
                     function: _,
                     arguments: _,
                     results: _,
+                    generics,
                 } => {
+                    let monomorphic: Vec<_> = generics
+                        .iter()
+                        .map(|gen| gen.monomorphize(tys))
+                        .collect::<_>();
+
                     todo!()
                 }
                 // In case we add a new case.
