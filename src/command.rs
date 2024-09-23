@@ -122,6 +122,19 @@ enum Op {
         command: ShaderInvocation,
         desc: GenericDescriptor,
     },
+    Invoke {
+        function: FunctionVar,
+        arguments: Vec<Register>,
+        results: Vec<Register>,
+    },
+    /// The specific return value of a function.
+    InvokedResult {
+        invocation: Register,
+        function: FunctionVar,
+        target: usize,
+        /// The result's type monomorphized as called.
+        desc: GenericDescriptor,
+    },
 }
 
 #[derive(Clone)]
@@ -146,6 +159,7 @@ enum OperandKind {
     Unary(Register),
     Binary { lhs: Register, rhs: Register },
 }
+
 pub struct InvocationArguments<'lt> {
     pub generics: &'lt [DescriptorVar],
     pub arguments: &'lt [Register],
@@ -644,7 +658,7 @@ impl CommandBuffer {
         &mut self,
         function: FunctionVar,
         invoke: InvocationArguments,
-    ) -> Result<Register, CommandError> {
+    ) -> Result<Vec<Register>, CommandError> {
         let signature = self
             .symbols
             .get(function.0)
@@ -681,7 +695,28 @@ impl CommandBuffer {
             }
         }
 
-        todo!()
+        let invocation = Register(self.ops.len() + signature.output.len());
+
+        let mut results = vec![];
+        for (target, output) in signature.output.iter().enumerate() {
+            results.push(Register(self.ops.len()));
+            let desc = output.rewrite(&descriptors);
+
+            self.ops.push(Op::InvokedResult {
+                invocation,
+                function,
+                target,
+                desc,
+            });
+        }
+
+        self.ops.push(Op::Invoke {
+            function,
+            arguments: invoke.arguments.to_vec(),
+            results: results.clone(),
+        });
+
+        Ok(results)
     }
 
     /// Declare an image as input.
@@ -1526,14 +1561,34 @@ impl CommandBuffer {
                     last_use[lhs] = last_use[lhs].max(idx);
                     first_use[lhs] = first_use[lhs].min(idx);
                 }
+                Op::Invoke {
+                    function: _,
+                    arguments: args,
+                    results: _,
+                } => {
+                    for &Register(arg) in args {
+                        last_use[arg] = last_use[arg].max(idx);
+                        first_use[arg] = first_use[arg].min(idx);
+                    }
+                }
+                // Not a use of the return value itself.
+                &Op::InvokedResult {
+                    invocation: Register(invocation),
+                    ..
+                } => {
+                    last_use[invocation] = last_use[invocation].max(idx);
+                    first_use[invocation] = first_use[invocation].min(idx);
+                }
             }
         }
 
         let mut image_buffers = ImageBufferPlan::default();
         let mut reg_to_texture: HashMap<Register, Texture> = HashMap::default();
 
-        for (idx, op) in self.ops.iter().enumerate() {
+        let mut realize_texture = |idx, op: &Op| {
             let liveness = first_use[idx]..last_use[idx];
+
+            // FIXME: not all our High ops actually allocate textures..
             let descriptor = self
                 .describe_reg(if let Op::Output { src } = op {
                     *src
@@ -1549,30 +1604,44 @@ impl CommandBuffer {
             let ImageBufferAssignment { buffer: _, texture } =
                 image_buffers.allocate_for(&descriptor, liveness);
 
+            Ok(texture)
+        };
+
+        for (idx, op) in self.ops.iter().enumerate() {
             high_ops.push(High::StackPush(Frame {
                 name: format!("Command: {:#?}", op),
             }));
 
             match op {
                 Op::Input { desc } => {
+                    let texture = realize_texture(idx, op)?;
                     let descriptor = desc.monomorphize(tys);
                     high_ops.push(High::Input(Register(idx), descriptor));
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 &Op::Output { src } => {
+                    let _texture = realize_texture(idx, op)?;
+
                     high_ops.push(High::Output {
                         src,
                         dst: Register(idx),
                     });
                 }
                 &Op::Render { src } => {
+                    let _texture = realize_texture(idx, op)?;
+
                     high_ops.push(High::Render {
                         src,
                         dst: Register(idx),
                     });
                 }
-                Op::Construct { desc: _, op } => {
-                    match op {
+                Op::Construct {
+                    desc: _,
+                    op: construct_op,
+                } => {
+                    let texture = realize_texture(idx, op)?;
+
+                    match construct_op {
                         &ConstructOp::DistributionNormal(ref distribution) => {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
@@ -1600,8 +1669,14 @@ impl CommandBuffer {
 
                     reg_to_texture.insert(Register(idx), texture);
                 }
-                Op::Unary { desc: _, src, op } => {
-                    match op {
+                Op::Unary {
+                    desc: _,
+                    src,
+                    op: unary_op,
+                } => {
+                    let texture = realize_texture(idx, op)?;
+
+                    match unary_op {
                         &UnaryOp::Crop(region) => {
                             let target =
                                 Rectangle::with_width_height(region.width(), region.height());
@@ -1700,15 +1775,17 @@ impl CommandBuffer {
                     desc: _,
                     lhs,
                     rhs,
-                    op,
+                    op: binary_op,
                 } => {
+                    let texture = realize_texture(idx, op)?;
+
                     let lhs_descriptor = self.describe_reg(*lhs).unwrap().monomorphize(tys);
                     let rhs_descriptor = self.describe_reg(*rhs).unwrap().monomorphize(tys);
 
                     let lower_region = Rectangle::from(&lhs_descriptor);
                     let upper_region = Rectangle::from(&rhs_descriptor);
 
-                    match op {
+                    match binary_op {
                         BinaryOp::Affine(affine) => {
                             let affine_matrix = RowMatrix::new(affine.transformation);
 
@@ -1796,6 +1873,7 @@ impl CommandBuffer {
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 Op::Dynamic { call, command, .. } => {
+                    let texture = realize_texture(idx, op)?;
                     let (op_unary, op_binary, arguments);
 
                     match call {
@@ -1826,6 +1904,22 @@ impl CommandBuffer {
                         },
                     })
                 }
+                Op::InvokedResult { .. } => {
+                    let texture = realize_texture(idx, op)?;
+
+                    high_ops.push(High::Uninit {
+                        dst: Target::Discard(texture),
+                    });
+
+                    reg_to_texture.insert(Register(idx), texture);
+                }
+                Op::Invoke {
+                    function: _,
+                    arguments: _,
+                    results: _,
+                } => {
+                    todo!()
+                }
                 // In case we add a new case.
                 #[allow(unreachable_patterns)]
                 _ => {
@@ -1851,13 +1945,19 @@ impl CommandBuffer {
             None | Some(Op::Output { .. }) | Some(Op::Render { .. }) => {
                 Err(CommandError::BAD_REGISTER)
             }
-            Some(Op::Input { desc })
+            Some(Op::Invoke { .. }) => {
+                // This does not describe results directly.
+                Err(CommandError::BAD_REGISTER)
+            }
+            Some(Op::InvokedResult { desc, .. })
+            | Some(Op::Input { desc })
             | Some(Op::Construct { desc, .. })
             | Some(Op::Unary { desc, .. })
             | Some(Op::Binary { desc, .. })
             | Some(Op::Dynamic { desc, .. }) => Ok(desc),
         }
     }
+
     fn push(&mut self, op: Op) -> Register {
         let reg = Register(self.ops.len());
         self.ops.push(op);

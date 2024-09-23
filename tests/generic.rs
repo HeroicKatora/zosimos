@@ -84,6 +84,10 @@ fn generic_palette() {
             },
         )?;
 
+        let [img_output] = img_output[..] else {
+            panic!("Mismatched function arguments count");
+        };
+
         let (output, _outformat) = commands.output(img_output).expect("Valid for output");
 
         Ok::<_, CommandError>((commands, output))

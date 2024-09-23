@@ -77,6 +77,8 @@ pub(crate) enum High {
     PushOperand(Texture),
     /// Call a function on the currently prepared operands.
     Construct { dst: Target, fn_: Function },
+    /// Create all the state for a texture, without doing anything in it.
+    Uninit { dst: Target },
     /// Last phase marking a register as done.
     /// This is emitted after the Command defining the register has been translated.
     Done(Register),
@@ -1163,6 +1165,13 @@ impl Program {
                 &High::PushOperand(texture) => {
                     encoder.copy_staging_to_texture(texture)?;
                     encoder.push_operand(texture)?;
+                }
+                &High::Uninit { dst } => {
+                    encoder.ensure_allocate_texture(match dst {
+                        Target::Discard(texture) | Target::Load(texture) => texture,
+                    })?;
+
+                    // Nothing more to do.
                 }
                 High::Construct { dst, fn_ } => {
                     let dst_texture = match dst {
