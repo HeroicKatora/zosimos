@@ -98,6 +98,11 @@ pub(crate) enum High {
     StackPush(Frame),
     /// Pop a high-level function marker.
     StackPop,
+    Call {
+        function: Function,
+        /// Initial IO state of the callee.
+        image_io_buffers: Arc<[CallBinding]>,
+    },
 }
 
 /// The target image texture of a paint operation (pipeline).
@@ -240,6 +245,7 @@ pub(crate) struct Buffer(pub(crate) usize);
 ///
 /// Arguments and results are passed by the initial state of the stack, including a portion of IO
 /// buffers that can be textures and pre-allocated buffers from the GPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Function(pub(crate) usize);
 
 /// Identifies one descriptor based resource in the render pipeline, by an index.
@@ -407,7 +413,6 @@ pub(crate) enum Low {
 
     StackFrame(run::Frame),
     StackPop,
-
     AssertBuffer {
         buffer: DeviceBuffer,
         info: String,
@@ -416,6 +421,9 @@ pub(crate) enum Low {
         buffer: DeviceBuffer,
         info: String,
     },
+
+    // FIXME: to fill out.
+    Call {},
 }
 
 /// Create a bind group.
@@ -438,6 +446,20 @@ pub(crate) enum BindingResource {
     },
     Sampler(usize),
     TextureView(usize),
+}
+
+#[derive(Debug)]
+pub(crate) enum CallBinding {
+    Texture {
+        texture: Texture,
+        register: Register,
+    },
+    /* Do we want this? Would be necessary for buffer-valued registers but it is unclear if this
+     * will change the type system considerably anyways.
+    Buffer {
+        register: Register,
+    },
+    */
 }
 
 /// Describe a bind group.
@@ -1273,6 +1295,12 @@ impl Program {
                 }
                 High::StackPop => {
                     encoder.push(Low::StackPop)?;
+                }
+                High::Call {
+                    function,
+                    image_io_buffers,
+                } => {
+                    let _ = (function, image_io_buffers);
                 }
             }
 

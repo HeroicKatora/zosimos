@@ -6,8 +6,8 @@ use crate::buffer::{BufferLayout, ByteLayout, ChannelPosition, Descriptor, Texel
 use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
-    CompileError, Frame, Function, FunctionLinked, High, ImageBufferAssignment, ImageBufferPlan,
-    ImageDescriptor, Initializer, Program, QuadTarget, Target, Texture,
+    CallBinding, CompileError, Frame, Function, FunctionLinked, High, ImageBufferAssignment,
+    ImageBufferPlan, ImageDescriptor, Initializer, Program, QuadTarget, Target, Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
@@ -21,6 +21,7 @@ use image_canvas::layout::{SampleParts, Texel};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// A reference to one particular value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -131,9 +132,8 @@ enum Op {
     },
     /// The specific return value of a function.
     InvokedResult {
+        /// Where is this register initialized? Must be after its definition.
         invocation: Register,
-        function: FunctionVar,
-        target: usize,
         /// The result's type monomorphized as called.
         desc: GenericDescriptor,
     },
@@ -507,20 +507,22 @@ pub struct CommandError {
 /// Generic instantiation that is todo by the linker.
 struct CommandMonomorphization<'lt> {
     /// The name of the buffer in the linker.
-    buffer_idx: usize,
+    link_idx: usize,
     command: &'lt CommandBuffer,
     tys: Cow<'lt, [Descriptor]>,
 }
 
 #[derive(Hash, PartialEq, Eq)]
-struct Signature {
-    function: FunctionVar,
+struct LinkedMonomorphicSignature {
+    /// The function, by its Linker symbol index.
+    link_idx: usize,
     tys: Vec<Descriptor>,
 }
 
 struct Monomorphizing<'lt> {
     stack: Vec<CommandMonomorphization<'lt>>,
-    monomorphic: HashMap<Signature, usize>,
+    monomorphic: HashMap<LinkedMonomorphicSignature, Function>,
+    commands: Vec<&'lt CommandBuffer>,
 }
 
 #[derive(Debug)]
@@ -719,16 +721,11 @@ impl CommandBuffer {
         let invocation = Register(self.ops.len() + signature.output.len());
 
         let mut results = vec![];
-        for (target, output) in signature.output.iter().enumerate() {
+        for (_result_idx, output) in signature.output.iter().enumerate() {
             results.push(Register(self.ops.len()));
             let desc = output.rewrite(&generics);
 
-            self.ops.push(Op::InvokedResult {
-                invocation,
-                function,
-                target,
-                desc,
-            });
+            self.ops.push(Op::InvokedResult { invocation, desc });
         }
 
         self.ops.push(Op::Invoke {
@@ -1514,15 +1511,29 @@ impl CommandBuffer {
     }
 
     pub fn compile(&self) -> Result<Program, CompileError> {
-        self.link(&[], &[])
+        self.link(&[], &[], &[])
     }
 
+    /// An unergonomic interface for linking a collection of different command buffers to a
+    /// program. The `functions` are all buffers besides `self` that are linked. `links` describes
+    /// the relation between them. For each buffer (`self` at 0 then incremented across the array)
+    /// a list match all function declarations in that buffer to the command supplying the
+    /// definition. The generic signature must match each declaration it is linked to.
+    ///
+    /// FIXME: higher level interface here. We should be able to configured links with pairs of a
+    /// `FunctionVar` and a higher-level wrapper around a `CommandBuffer` index. Also it makes not
+    /// much sense to treat the `self` special except as a defaulted entry point and for the
+    /// `compile` helper that does not require any linkage.
     pub fn link(
         &self,
         tys: &[Descriptor],
         functions: &[CommandBuffer],
+        links: &[&[usize]],
     ) -> Result<Program, CompileError> {
-        if functions.len() != self.symbols.len() {
+        // We can default to 'no links', which is fine..
+        if functions.len() + 1 < links.len() {
+            eprintln!("Bad link listings count");
+            // Error: more links than functions..
             return Err(CompileError::NotYetImplemented);
         }
 
@@ -1530,16 +1541,46 @@ impl CommandBuffer {
 
         let mut monomorphic = Monomorphizing {
             stack: vec![CommandMonomorphization {
-                buffer_idx: 0,
+                link_idx: 0,
                 command: self,
                 tys: Cow::Borrowed(tys),
             }],
             monomorphic: HashMap::new(),
+            commands: Some(self).into_iter().chain(functions).collect(),
         };
+
+        impl Monomorphizing<'_> {
+            /// Assign a program function index to a specific generic instantiation.
+            ///
+            /// Remembers to process the monomorphization later if it was not instantiated yet.
+            pub fn push_function(&mut self, sig: LinkedMonomorphicSignature) -> Function {
+                let idx = self.monomorphic.len();
+
+                let stack = &mut self.stack;
+                let command = &self.commands[sig.link_idx];
+
+                *self.monomorphic.entry(sig).or_insert_with_key(|key| {
+                    stack.push(CommandMonomorphization {
+                        link_idx: key.link_idx,
+                        command,
+                        tys: Cow::Owned(key.tys.to_vec()),
+                    });
+
+                    Function(idx)
+                })
+            }
+        }
 
         let mut functions = vec![];
         while let Some(top) = monomorphic.stack.pop() {
-            let linked = Self::link_in(top, &mut high_ops, &mut monomorphic)?;
+            let CommandMonomorphization {
+                link_idx,
+                command,
+                tys,
+            } = top;
+
+            let links = links.get(link_idx).copied().unwrap_or_default();
+            let linked = Self::link_in(command, tys, &mut high_ops, &mut monomorphic, links)?;
             // FIXME: expand further requested generic instantiations.
             functions.push(linked);
         }
@@ -1554,17 +1595,19 @@ impl CommandBuffer {
     }
 
     fn link_in(
-        cmd: CommandMonomorphization<'_>,
+        command: &Self,
+        tys: Cow<'_, [Descriptor]>,
         high_ops: &mut Vec<High>,
-        _mono: &mut Monomorphizing,
+        mono: &mut Monomorphizing,
+        functions: &[usize],
     ) -> Result<FunctionLinked, CompileError> {
-        let CommandMonomorphization {
-            buffer_idx,
-            command,
-            tys,
-        } = cmd;
+        if functions.len() != command.symbols.len() {
+            eprintln!("Bad linked parameter count");
+            return Err(CompileError::NotYetImplemented);
+        }
 
         if tys.len() != command.vars.len() {
+            eprintln!("Bad type generic count");
             return Err(CompileError::NotYetImplemented);
         }
 
@@ -1978,22 +2021,57 @@ impl CommandBuffer {
                 }
                 Op::Invoke {
                     function,
-                    arguments: _,
-                    results: _,
+                    arguments,
+                    results,
                     generics,
                 } => {
-                    let _monomorphic: Vec<_> = generics
+                    let monomorphic_tys: Vec<_> = generics
                         .iter()
                         .map(|gen| gen.monomorphize(tys))
                         .collect::<_>();
 
-                    let _function_idx = function;
+                    let &FunctionVar(function_idx) = function;
+                    let link_idx = *functions
+                        .get(function_idx)
+                        .ok_or(CompileError::NotYetImplemented)?;
 
-                    todo!()
+                    let function = mono.push_function(LinkedMonomorphicSignature {
+                        link_idx,
+                        tys: monomorphic_tys,
+                    });
+
+                    let mut image_io = vec![];
+
+                    for &register in arguments {
+                        // Arguments must precede the function and already be laid out.
+                        if register.0 >= idx {
+                            return Err(CompileError::NotYetImplemented);
+                        }
+
+                        let texture = realize_texture(register.0, &ops[register.0])?;
+                        image_io.push(CallBinding::Texture { register, texture });
+                    }
+
+                    for &register in results {
+                        // Results must precede the function and already be laid out. They are not
+                        // initialized but initialized on return.
+                        if register.0 >= idx {
+                            return Err(CompileError::NotYetImplemented);
+                        }
+
+                        let texture = realize_texture(register.0, &ops[register.0])?;
+                        image_io.push(CallBinding::Texture { register, texture });
+                    }
+
+                    high_ops.push(High::Call {
+                        function,
+                        image_io_buffers: Arc::from(image_io),
+                    });
                 }
                 // In case we add a new case.
                 #[allow(unreachable_patterns)]
                 _ => {
+                    eprintln!("Unimplemented operation");
                     return Err(CompileError::NotYetImplemented);
                 }
             }

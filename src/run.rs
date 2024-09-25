@@ -886,6 +886,10 @@ impl Executable {
                 Low::StackFrame(_) => {}
                 Low::StackPop => {}
 
+                Low::Call {} => {
+                    todo!()
+                }
+
                 _ => {}
             }
         }
