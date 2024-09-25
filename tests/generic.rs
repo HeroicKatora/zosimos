@@ -95,7 +95,7 @@ fn generic_palette() {
     .expect("build generic inner function sequence");
 
     let plan = main
-        .link(&[fixed_palette], &[])
+        .link(&[], &[fixed_palette])
         .expect("compile full function sequence");
 
     let capabilities = Capabilities::from({

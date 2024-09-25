@@ -6,8 +6,8 @@ use crate::buffer::{BufferLayout, ByteLayout, ChannelPosition, Descriptor, Texel
 use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
-    CompileError, Frame, Function, High, ImageBufferAssignment, ImageBufferPlan, ImageDescriptor,
-    Initializer, Program, QuadTarget, Target, Texture,
+    CompileError, Frame, Function, FunctionLinked, High, ImageBufferAssignment, ImageBufferPlan,
+    ImageDescriptor, Initializer, Program, QuadTarget, Target, Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
@@ -18,6 +18,7 @@ use crate::shaders::{self, FragmentShader, PaintOnTopKind, ShaderInvocation};
 use image_canvas::color::{Color, ColorChannel, Whitepoint};
 use image_canvas::layout::{SampleParts, Texel};
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -501,6 +502,25 @@ pub enum SmoothingMethod {
 #[derive(Debug)]
 pub struct CommandError {
     inner: CommandErrorKind,
+}
+
+/// Generic instantiation that is todo by the linker.
+struct CommandMonomorphization<'lt> {
+    /// The name of the buffer in the linker.
+    buffer_idx: usize,
+    command: &'lt CommandBuffer,
+    tys: Cow<'lt, [Descriptor]>,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct Signature {
+    function: FunctionVar,
+    tys: Vec<Descriptor>,
+}
+
+struct Monomorphizing<'lt> {
+    stack: Vec<CommandMonomorphization<'lt>>,
+    monomorphic: HashMap<Signature, usize>,
 }
 
 #[derive(Debug)]
@@ -1499,27 +1519,68 @@ impl CommandBuffer {
 
     pub fn link(
         &self,
-        functions: &[CommandBuffer],
         tys: &[Descriptor],
+        functions: &[CommandBuffer],
     ) -> Result<Program, CompileError> {
         if functions.len() != self.symbols.len() {
             return Err(CompileError::NotYetImplemented);
         }
 
-        if tys.len() != self.vars.len() {
+        let mut high_ops = vec![];
+
+        let mut monomorphic = Monomorphizing {
+            stack: vec![CommandMonomorphization {
+                buffer_idx: 0,
+                command: self,
+                tys: Cow::Borrowed(tys),
+            }],
+            monomorphic: HashMap::new(),
+        };
+
+        let mut functions = vec![];
+        while let Some(top) = monomorphic.stack.pop() {
+            let linked = Self::link_in(top, &mut high_ops, &mut monomorphic)?;
+            // FIXME: expand further requested generic instantiations.
+            functions.push(linked);
+        }
+
+        Ok(Program {
+            ops: high_ops,
+            functions,
+            entry_index: 0,
+            buffer_by_op: HashMap::default(),
+            texture_by_op: HashMap::default(),
+        })
+    }
+
+    fn link_in(
+        cmd: CommandMonomorphization<'_>,
+        high_ops: &mut Vec<High>,
+        _mono: &mut Monomorphizing,
+    ) -> Result<FunctionLinked, CompileError> {
+        let CommandMonomorphization {
+            buffer_idx,
+            command,
+            tys,
+        } = cmd;
+
+        if tys.len() != command.vars.len() {
             return Err(CompileError::NotYetImplemented);
         }
 
-        let steps = self.ops.len();
+        let ops = &command.ops;
+        let steps = ops.len();
+        let tys = tys.as_ref();
+        let start = high_ops.len();
 
         let mut last_use = vec![0; steps];
         let mut first_use = vec![steps; steps];
 
-        let mut high_ops = vec![];
+        let mut image_buffers = ImageBufferPlan::default();
 
         // Liveness analysis.
-        for (back_idx, op) in self.ops.iter().rev().enumerate() {
-            let idx = self.ops.len() - 1 - back_idx;
+        for (back_idx, op) in ops.iter().rev().enumerate() {
+            let idx = ops.len() - 1 - back_idx;
             match op {
                 Op::Input { .. }
                 | Op::Construct { .. }
@@ -1585,22 +1646,13 @@ impl CommandBuffer {
             }
         }
 
-        #[derive(Hash, PartialEq, Eq)]
-        struct Signature {
-            function: FunctionVar,
-            tys: Vec<Descriptor>,
-        }
-
-        let mut image_buffers = ImageBufferPlan::default();
         let mut reg_to_texture: HashMap<Register, Texture> = HashMap::default();
-
-        let mut signture_to_id: HashMap<Signature, Function> = HashMap::default();
 
         let mut realize_texture = |idx, op: &Op| {
             let liveness = first_use[idx]..last_use[idx];
 
             // FIXME: not all our High ops actually allocate textures..
-            let descriptor = self
+            let descriptor = command
                 .describe_reg(if let Op::Output { src } = op {
                     *src
                 } else if let Op::Render { src } = op {
@@ -1618,7 +1670,7 @@ impl CommandBuffer {
             Ok(texture)
         };
 
-        for (idx, op) in self.ops.iter().enumerate() {
+        for (idx, op) in ops.iter().enumerate() {
             high_ops.push(High::StackPush(Frame {
                 name: format!("Command: {:#?}", op),
             }));
@@ -1790,8 +1842,8 @@ impl CommandBuffer {
                 } => {
                     let texture = realize_texture(idx, op)?;
 
-                    let lhs_descriptor = self.describe_reg(*lhs).unwrap().monomorphize(tys);
-                    let rhs_descriptor = self.describe_reg(*rhs).unwrap().monomorphize(tys);
+                    let lhs_descriptor = command.describe_reg(*lhs).unwrap().monomorphize(tys);
+                    let rhs_descriptor = command.describe_reg(*rhs).unwrap().monomorphize(tys);
 
                     let lower_region = Rectangle::from(&lhs_descriptor);
                     let upper_region = Rectangle::from(&rhs_descriptor);
@@ -1925,15 +1977,17 @@ impl CommandBuffer {
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 Op::Invoke {
-                    function: _,
+                    function,
                     arguments: _,
                     results: _,
                     generics,
                 } => {
-                    let monomorphic: Vec<_> = generics
+                    let _monomorphic: Vec<_> = generics
                         .iter()
                         .map(|gen| gen.monomorphize(tys))
                         .collect::<_>();
+
+                    let _function_idx = function;
 
                     todo!()
                 }
@@ -1948,11 +2002,11 @@ impl CommandBuffer {
             high_ops.push(High::StackPop);
         }
 
-        Ok(Program {
-            ops: high_ops,
+        let end = high_ops.len();
+
+        Ok(FunctionLinked {
+            ops: start..end,
             image_buffers,
-            buffer_by_op: HashMap::default(),
-            texture_by_op: HashMap::default(),
         })
     }
 

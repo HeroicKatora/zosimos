@@ -23,6 +23,20 @@ use encoder::{Encoder, RegisterMap};
 /// launch.
 pub struct Program {
     pub(crate) ops: Vec<High>,
+    /// The different functions.
+    pub(crate) functions: Vec<FunctionLinked>,
+    /// The entry point into the program, the function by which to layout the required input and
+    /// the output buffer plans.
+    pub(crate) entry_index: usize,
+    /// Annotates which function allocates a cacheable texture.
+    pub(crate) texture_by_op: HashMap<usize, TextureDescriptor>,
+    /// Annotates which function allocates a cacheable buffer.
+    pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
+}
+
+pub(crate) struct FunctionLinked {
+    /// The sequence in `ops` that belongs to this function.
+    pub(crate) ops: core::ops::Range<usize>,
     /// Assigns resources to each image based on liveness.
     /// This translates the SSA form into a mutable mapping where each image can be represented by
     /// a texture and a buffer. The difference is that the texture is assigned based on the _exact_
@@ -35,10 +49,6 @@ pub struct Program {
     /// The encoder can make use of this mapping as intermediate resources for transfer between
     /// different images or from host to graphic device etc.
     pub(crate) image_buffers: ImageBufferPlan,
-    /// Annotates which function allocates a cacheable texture.
-    pub(crate) texture_by_op: HashMap<usize, TextureDescriptor>,
-    /// Annotates which function allocates a cacheable buffer.
-    pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
 }
 
 /// A high-level, device independent, translation of ops.
@@ -867,6 +877,7 @@ pub struct MismatchError {}
 pub struct Launcher<'program> {
     program: &'program Program,
     pool: &'program mut Pool,
+    main: &'program FunctionLinked,
     /// The host image data for each texture (if any).
     /// Otherwise this a placeholder image.
     binds: Vec<run::Image>,
@@ -1071,8 +1082,10 @@ impl Program {
     /// Required input and output image descriptors must match those declared, or be convertible
     /// to them when a normalization operation was declared.
     pub fn launch<'pool>(&'pool self, pool: &'pool mut Pool) -> Launcher<'pool> {
+        let main = &self.functions[self.entry_index];
+
         // Create empty bind assignments as a start, with respective layouts.
-        let binds = self
+        let binds = main
             .image_buffers
             .texture
             .iter()
@@ -1082,20 +1095,23 @@ impl Program {
         Launcher {
             program: self,
             pool,
+            main,
             binds,
             pool_plan: ImagePoolPlan::default(),
         }
     }
 
     pub fn lower_to(&self, capabilities: Capabilities) -> Result<run::Executable, LaunchError> {
-        let mut encoder = self.lower_to_impl(&capabilities, None)?;
+        let main = &self.functions[self.entry_index];
+
+        let mut encoder = self.lower_to_impl(&capabilities, main, None)?;
         encoder.finalize()?;
         let io_map = encoder.io_map();
 
         // Convert all textures to buffers.
         // FIXME: _All_ textures? No, some amount of textures might not be IO.
         // Currently this is true but no in general.
-        let image_io_buffers = self
+        let image_io_buffers = main
             .image_buffers
             .texture
             .iter()
@@ -1123,17 +1139,18 @@ impl Program {
     fn lower_to_impl(
         &self,
         capabilities: &Capabilities,
+        function: &FunctionLinked,
         pool_plan: Option<&ImagePoolPlan>,
     ) -> Result<Encoder, LaunchError> {
         let mut encoder = Encoder::default();
         encoder.enable_capabilities(capabilities);
 
-        encoder.set_buffer_plan(&self.image_buffers);
+        encoder.set_buffer_plan(&function.image_buffers);
         if let Some(pool_plan) = pool_plan {
             encoder.set_pool_plan(pool_plan);
         }
 
-        for high in &self.ops {
+        for high in &self.ops[function.ops.clone()] {
             let with_stack_frame = match high {
                 High::StackPush(_) | High::StackPop => false,
                 other => {
@@ -1278,7 +1295,7 @@ impl Launcher<'_> {
             return Err(LaunchError::InternalCommandError(line!()));
         }
 
-        let Texture(texture) = match self.program.image_buffers.by_register.get(reg) {
+        let Texture(texture) = match self.main.image_buffers.by_register.get(reg) {
             Some(assigned) => assigned.texture,
             None => return Err(LaunchError::InternalCommandError(line!())),
         };
@@ -1297,8 +1314,8 @@ impl Launcher<'_> {
     pub fn bind_remaining_outputs(mut self) -> Result<Self, LaunchError> {
         for high in &self.program.ops {
             if let High::Output { src: register, dst } = *high {
-                let assigned = &self.program.image_buffers.by_register[register.0];
-                let descriptor = &self.program.image_buffers.texture[assigned.texture.0];
+                let assigned = &self.main.image_buffers.by_register[register.0];
+                let descriptor = &self.main.image_buffers.texture[assigned.texture.0];
                 let key = self.pool_plan.choose_output(&mut *self.pool, descriptor);
                 self.pool_plan.plan.insert(dst, key);
             }
@@ -1331,9 +1348,10 @@ impl Launcher<'_> {
 
         let capabilities = Capabilities::from(&device);
 
-        let mut encoder = self
-            .program
-            .lower_to_impl(&capabilities, Some(&self.pool_plan))?;
+        let mut encoder =
+            self.program
+                .lower_to_impl(&capabilities, self.main, Some(&self.pool_plan))?;
+
         let mut image_io_buffers = self.binds;
         encoder.extract_buffers(&mut image_io_buffers, &mut self.pool)?;
 
