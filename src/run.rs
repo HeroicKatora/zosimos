@@ -343,6 +343,15 @@ impl core::fmt::Display for StartError {
 #[derive(Debug)]
 pub enum LaunchErrorKind {
     FromLine(u32),
+    MismatchedDescriptor {
+        register: Register,
+        expected: Descriptor,
+        supplied: Descriptor,
+    },
+    MissingKey {
+        register: Register,
+        descriptor: Descriptor,
+    },
 }
 
 #[derive(Debug)]
@@ -1019,8 +1028,13 @@ impl Executable {
             }
 
             if reference.descriptor != buffer.descriptor {
-                // FIXME: not quite such an 'unknown' error.
-                return Err(StartError::InternalCommandError(line!()));
+                return Err(StartError {
+                    kind: LaunchErrorKind::MismatchedDescriptor {
+                        register: Register(input),
+                        expected: reference.descriptor.clone(),
+                        supplied: buffer.descriptor.clone(),
+                    },
+                });
             }
 
             // Oh, this image is always already bound? Cool.
@@ -1028,9 +1042,13 @@ impl Executable {
                 continue;
             }
 
-            let key = match buffer.key {
-                None => return Err(StartError::InternalCommandError(line!())),
-                Some(key) => key,
+            let Some(key) = buffer.key else {
+                return Err(StartError {
+                    kind: LaunchErrorKind::MissingKey {
+                        register: Register(input),
+                        descriptor: buffer.descriptor.clone(),
+                    },
+                });
             };
 
             // FIXME: we could catch this much earlier.
