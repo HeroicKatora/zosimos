@@ -2245,7 +2245,9 @@ impl GenericDescriptor {
     /// optical colorspace to an arbitrary electrical color encoding. Then we might have the
     /// signature written in pseudo-code:
     ///
+    /// ```text
     ///     function <C: LinearizedColor>(arg0: {C; 256×256}, arg1: {C::Linear; 256×256})
+    /// ```
     ///
     /// Now if we rewrite with [C = sRGB] then we want the concrete [C::Linear=CIE-RGB-Wp-D70]
     /// correspondence. But if we tried [C = CYMK] we have nonsense. Here we allow this function to

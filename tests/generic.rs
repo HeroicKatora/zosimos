@@ -11,6 +11,8 @@ use stealth_paint::program::{Capabilities, Program};
 
 use self::util::{retire_with_one_image, run_executable_with_output};
 
+const BACKGROUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input/background.png");
+
 #[test]
 fn generic_palette() {
     env_logger::init();
@@ -65,7 +67,7 @@ fn generic_palette() {
     .expect("build generic inner function sequence");
 
     let fixed_palette_sig = fixed_palette.computed_signature();
-    let (main, output) = (move || {
+    let (main, output, img_input) = (move || {
         let mut commands = CommandBuffer::default();
         let converter = commands.function(fixed_palette_sig)?;
 
@@ -73,7 +75,6 @@ fn generic_palette() {
         let srgb = Descriptor::with_srgb_image(&target);
 
         let img_input = commands.input(srgb)?;
-
         let img_input_ty = commands.register_descriptor(img_input)?;
 
         let img_output = commands.invoke(
@@ -90,7 +91,7 @@ fn generic_palette() {
 
         let (output, _outformat) = commands.output(img_output).expect("Valid for output");
 
-        Ok::<_, CommandError>((commands, output))
+        Ok::<_, CommandError>((commands, output, img_input))
     })()
     .expect("build generic inner function sequence");
 
@@ -103,6 +104,13 @@ fn generic_palette() {
         devices.next().expect("the pool to contain a device")
     });
 
+    let background = image::open(BACKGROUND).expect("Background image opened");
+
+    let pool_background = {
+        let entry = pool.insert_srgb(&background);
+        entry.key()
+    };
+
     let executable = plan
         .lower_to(capabilities)
         .expect("No extras beyond device required");
@@ -110,7 +118,7 @@ fn generic_palette() {
     run_executable_with_output(
         &executable,
         &mut pool,
-        vec![],
+        vec![(img_input, pool_background)],
         retire_with_one_image(output),
     );
 }
