@@ -2049,7 +2049,7 @@ impl CommandBuffer {
                         }
 
                         let texture = realize_texture(register.0, &ops[register.0])?;
-                        image_io.push(CallBinding::Texture { register, texture });
+                        image_io.push(CallBinding::InTexture { register, texture });
                     }
 
                     for &register in results {
@@ -2060,7 +2060,7 @@ impl CommandBuffer {
                         }
 
                         let texture = realize_texture(register.0, &ops[register.0])?;
-                        image_io.push(CallBinding::Texture { register, texture });
+                        image_io.push(CallBinding::OutTexture { register, texture });
                     }
 
                     high_ops.push(High::Call {

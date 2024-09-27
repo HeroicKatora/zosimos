@@ -400,7 +400,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             // No validation for stack frame shuffling.
             // TODO: should we simulate stack height?
             Low::StackFrame(_) | Low::StackPop => {}
-            Low::Call {} => {
+            Low::Call { .. } => {
                 if self.is_in_command_encoder {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }

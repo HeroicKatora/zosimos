@@ -232,7 +232,7 @@ pub struct IoMap {
 pub(crate) struct Descriptors {
     bind_groups: Vec<wgpu::BindGroup>,
     bind_group_layouts: Vec<wgpu::BindGroupLayout>,
-    buffers: Vec<wgpu::Buffer>,
+    buffers: Vec<Arc<wgpu::Buffer>>,
     command_buffers: Vec<wgpu::CommandBuffer>,
     shaders: Vec<wgpu::ShaderModule>,
     pipeline_layouts: Vec<wgpu::PipelineLayout>,
@@ -465,7 +465,7 @@ impl Executable {
 
         for instr in &self.instructions[..] {
             match instr {
-                Low::BindGroupLayout(layout) => {
+                Low::BindGroupLayout(_layout) => {
                     /*
                     let _ = write!(
                         &mut cons,
@@ -587,7 +587,7 @@ impl Executable {
                     buffer_states.insert(buffers, 0);
                     buffers += 1;
                 }
-                Low::PipelineLayout(layout) => {
+                Low::PipelineLayout(_layout) => {
                     let _ = write!(
                         &mut cons,
                         " pipeline_layout_{0} [label=\"Pipeline Layout {0}\"];",
@@ -895,7 +895,7 @@ impl Executable {
                 Low::StackFrame(_) => {}
                 Low::StackPop => {}
 
-                Low::Call {} => {
+                Low::Call { .. } => {
                     todo!()
                 }
 
@@ -1472,7 +1472,7 @@ impl Host {
                 self.descriptors
                     .buffer_descriptors
                     .insert(buffer_idx, desc.clone());
-                self.descriptors.buffers.push(buffer);
+                self.descriptors.buffers.push(Arc::new(buffer));
                 Ok(())
             }
             Low::BufferInit(desc) => {
@@ -1489,7 +1489,7 @@ impl Host {
 
                 self.usage.buffer_mem += desc.u64_len();
                 let buffer = gpu.with_gpu(|gpu| gpu.device().create_buffer_init(&wgpu_desc));
-                self.descriptors.buffers.push(buffer);
+                self.descriptors.buffers.push(Arc::new(buffer));
                 Ok(())
             }
             Low::Shader(desc) => {
@@ -2151,6 +2151,36 @@ impl Host {
 
                 Ok(())
             }
+            Low::Call {
+                function: _,
+                io_buffers,
+            } => {
+                let mut new_io = vec![];
+
+                for argument in io_buffers {
+                    let buffer = self.descriptors.buffers[argument.buffer.0].clone();
+                    let layout = argument.descriptor.to_canvas();
+
+                    new_io.push(Image {
+                        data: ImageData::GpuBuffer {
+                            gpu: slotmap::DefaultKey::default(),
+                            layout,
+                            buffer,
+                        },
+                        descriptor: argument.descriptor.clone(),
+                        key: None,
+                    });
+                }
+
+                let stack_descriptors = core::mem::take(&mut self.descriptors);
+                let stack_io = core::mem::replace(&mut self.image_io_buffers, new_io);
+
+                // FIXME: alright also we need to activate this new stack frame. And then it
+                // resumes control at the next instruction after this (which will clean up the ABI
+                // pass of the buffer).
+                todo!();
+                Ok(())
+            }
             inner => {
                 return Err(StepError::BadInstruction(BadInstruction {
                     inner: format!("{:?}", inner),
@@ -2717,6 +2747,12 @@ impl Retire<'_> {
             let descriptor = match descriptors.buffer_descriptors.get(&idx) {
                 None => continue,
                 Some(descriptor) => descriptor,
+            };
+
+            // If the texture is still shared, we can not cache its contents as it may be
+            // overridden. It should not still be shared, but what can you do.
+            let Some(texture) = Arc::into_inner(texture) else {
+                continue;
             };
 
             let key = self.pool.insert_cacheable_buffer(descriptor, texture);

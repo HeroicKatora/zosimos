@@ -115,10 +115,13 @@ fn generic_palette() {
         .lower_to(capabilities)
         .expect("No extras beyond device required");
 
-    run_executable_with_output(
+    let generic = run_executable_with_output(
         &executable,
         &mut pool,
         vec![(img_input, pool_background)],
         retire_with_one_image(output),
     );
+
+    let image = pool.entry(generic).unwrap();
+    util::assert_reference(image.into(), "generic.crc.png");
 }

@@ -423,7 +423,10 @@ pub(crate) enum Low {
     },
 
     // FIXME: to fill out.
-    Call {},
+    Call {
+        function: Function,
+        io_buffers: Vec<CallImageArgument>,
+    },
 }
 
 /// Create a bind group.
@@ -450,16 +453,24 @@ pub(crate) enum BindingResource {
 
 #[derive(Debug)]
 pub(crate) enum CallBinding {
-    Texture {
+    /// Texture that is initialized on entry, and just copied.
+    InTexture {
         texture: Texture,
         register: Register,
     },
-    /* Do we want this? Would be necessary for buffer-valued registers but it is unclear if this
-     * will change the type system considerably anyways.
-    Buffer {
+    /// Texture that gets initialized by this call.
+    OutTexture {
+        texture: Texture,
         register: Register,
     },
-    */
+}
+
+/// FIXME: name... is it appropriate to use the same component `Call` for High and Low since this
+/// confuses any readers trying to match the structs that make up the attributes.
+#[derive(Debug)]
+pub(crate) struct CallImageArgument {
+    pub buffer: DeviceBuffer,
+    pub descriptor: Descriptor,
 }
 
 /// Describe a bind group.
@@ -1297,10 +1308,49 @@ impl Program {
                     encoder.push(Low::StackPop)?;
                 }
                 High::Call {
-                    function,
+                    function: fn_idx,
                     image_io_buffers,
                 } => {
                     let _ = (function, image_io_buffers);
+
+                    // We pass images as their encoded buffers. This is most generic.
+                    let mut io_buffers = vec![];
+
+                    let mut post_textures = vec![];
+                    for param in &image_io_buffers[..] {
+                        match param {
+                            &CallBinding::InTexture { texture, register } => {
+                                let regmap = encoder.allocate_register(register)?.clone();
+                                encoder.ensure_allocate_texture(texture)?;
+                                encoder.copy_staging_to_buffer(register)?;
+                                let descriptor = &function.image_buffers.texture[texture.0];
+                                io_buffers.push(CallImageArgument {
+                                    buffer: regmap.buffer,
+                                    descriptor: descriptor.clone(),
+                                });
+                            }
+                            &CallBinding::OutTexture { texture, register } => {
+                                let regmap = encoder.allocate_register(register)?.clone();
+                                encoder.ensure_allocate_texture(texture)?;
+                                let descriptor = &function.image_buffers.texture[texture.0];
+                                io_buffers.push(CallImageArgument {
+                                    buffer: regmap.buffer,
+                                    descriptor: descriptor.clone(),
+                                });
+                                post_textures.push(register);
+                            }
+                        }
+                    }
+
+                    encoder.push(Low::Call {
+                        function: *fn_idx,
+                        io_buffers,
+                    })?;
+
+                    // Retrieve arguments that were rendered to.
+                    for register in post_textures {
+                        encoder.copy_buffer_to_staging(register)?;
+                    }
                 }
             }
 
