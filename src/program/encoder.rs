@@ -407,6 +407,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 self.plan_gpu_effects_visible()?;
             }
+            Low::Return => {
+                if self.is_in_command_encoder {
+                    return Err(LaunchError::InternalCommandError(line!()));
+                }
+            }
         }
 
         let instruction = Instruction(self.instruction_pointer);

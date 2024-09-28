@@ -427,6 +427,7 @@ pub(crate) enum Low {
         function: Function,
         io_buffers: Vec<CallImageArgument>,
     },
+    Return,
 }
 
 /// Create a bind group.
@@ -575,8 +576,7 @@ pub(crate) enum BufferInitContent {
 
 #[derive(Debug)]
 pub(crate) struct FunctionFrame {
-    range: core::ops::Range<usize>,
-    results: Vec<Texture>,
+    pub(crate) range: core::ops::Range<usize>,
 }
 
 #[derive(Debug)]
@@ -733,7 +733,10 @@ impl ImageDescriptor {
                 let stage_kind = parameter
                     .stage_kind()
                     // Unsupported format.
-                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+                    .ok_or_else(|| {
+                        eprintln!("{descriptor:?}");
+                        LaunchError::InternalCommandError(line!())
+                    })?;
 
                 staging = Some(StagingDescriptor {
                     stage_kind,
@@ -1137,9 +1140,34 @@ impl Program {
     pub fn lower_to(&self, capabilities: Capabilities) -> Result<run::Executable, LaunchError> {
         let main = &self.functions[self.entry_index];
 
+        let mut instructions = vec![];
+        let mut functions = HashMap::new();
+
         let mut encoder = self.lower_to_impl(&capabilities, main, None)?;
         encoder.finalize()?;
         let io_map = encoder.io_map();
+        instructions.extend(encoder.instructions);
+        functions.insert(
+            Function(self.entry_index),
+            FunctionFrame {
+                range: 0..instructions.len(),
+            },
+        );
+
+        for (idx, ops) in self.functions.iter().enumerate() {
+            if idx == self.entry_index {
+                continue;
+            }
+
+            let mut encoder = self.lower_to_impl(&capabilities, ops, None)?;
+            encoder.finalize()?;
+
+            let start = instructions.len();
+            instructions.extend(encoder.instructions);
+            let end = instructions.len();
+
+            functions.insert(Function(idx), FunctionFrame { range: start..end });
+        }
 
         // Convert all textures to buffers.
         // FIXME: _All_ textures? No, some amount of textures might not be IO.
@@ -1152,14 +1180,15 @@ impl Program {
             .collect();
 
         Ok(run::Executable {
-            instructions: encoder.instructions.into(),
+            entry_point: Function(self.entry_index),
+            instructions: instructions.into(),
             info: Arc::new(run::ProgramInfo {
                 buffer_by_op: encoder.buffer_by_op,
                 texture_by_op: encoder.texture_by_op,
                 shader_by_op: encoder.shader_by_op,
                 pipeline_by_op: encoder.pipeline_by_op,
                 skip_by_op: encoder.skip_by_op,
-                functions: Default::default(),
+                functions,
             }),
             binary_data: encoder.binary_data,
             descriptors: run::Descriptors::default(),
@@ -1359,6 +1388,8 @@ impl Program {
             }
         }
 
+        encoder.push(Low::Return)?;
+
         Ok(encoder)
     }
 }
@@ -1437,18 +1468,23 @@ impl Launcher<'_> {
         // This is part of validation layer but cheap and we always do it.
         encoder.finalize()?;
         let io_map = encoder.io_map();
+        let instructions: Arc<[_]> = encoder.instructions.into();
+        let all_range = 0..instructions.len();
 
         let init = run::InitialState {
             // TODO: shared with lower_to. Find a better way to reap the `encoder` for its
             // resources and descriptors.
-            instructions: encoder.instructions.into(),
+            instructions,
+            entry_point: Function(0),
             info: Arc::new(run::ProgramInfo {
                 buffer_by_op: encoder.buffer_by_op,
                 texture_by_op: encoder.texture_by_op,
                 shader_by_op: encoder.shader_by_op,
                 pipeline_by_op: encoder.pipeline_by_op,
                 skip_by_op: encoder.skip_by_op,
-                functions: Default::default(),
+                functions: vec![(Function(0), FunctionFrame { range: all_range })]
+                    .into_iter()
+                    .collect(),
             }),
             device,
             queue,

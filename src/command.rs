@@ -1540,14 +1540,15 @@ impl CommandBuffer {
         let mut high_ops = vec![];
 
         let mut monomorphic = Monomorphizing {
-            stack: vec![CommandMonomorphization {
-                link_idx: 0,
-                command: self,
-                tys: Cow::Borrowed(tys),
-            }],
+            stack: vec![],
             monomorphic: HashMap::new(),
             commands: Some(self).into_iter().chain(functions).collect(),
         };
+
+        monomorphic.push_function(LinkedMonomorphicSignature {
+            link_idx: 0,
+            tys: Cow::Borrowed(tys).into_owned(),
+        });
 
         impl Monomorphizing<'_> {
             /// Assign a program function index to a specific generic instantiation.

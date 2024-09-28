@@ -38,7 +38,7 @@ fn generic_palette() {
         let img_input = commands.input_generic(in_a)?;
 
         let img_idx = commands.bilinear(
-            Descriptor::with_texel(Texel::new_u8(SampleParts::Rgb), 2048, 2048).unwrap(),
+            Descriptor::with_texel(Texel::new_u8(SampleParts::RgbA), 2048, 2048).unwrap(),
             Bilinear {
                 u_min: [0.0, 0.0, 0.0, 0.0],
                 u_max: [0.0, 0.0, 0.0, 0.0],

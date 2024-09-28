@@ -35,7 +35,16 @@ pub struct Executable {
     /// Input/Output buffers used for execution.
     pub(crate) image_io_buffers: Vec<Image>,
     /// The map from registers to the index in image data.
+    /// FIXME: this makes us a little inflexible for multiple entry points. I'd like singular entry
+    /// point to not become too engrained in thinking and design, avoiding what went wrong with
+    /// SPIR-V. On the other hand, elf does not have any such ideas either. Anyways the whole
+    /// program info could also be rebuildable from other parts and in particular `ProgramInfo` is
+    /// designed for one entry point, too. Its buffer recovery can not work with a function called
+    /// multiple times.
     pub(crate) io_map: Arc<IoMap>,
+    /// The main function to start execution at. This is the function for which ll the other
+    /// descriptors and the io_map will apply.
+    pub(crate) entry_point: program::Function,
     /// The capabilities required from devices to execute this.
     pub(crate) capabilities: Capabilities,
 }
@@ -48,7 +57,7 @@ pub(crate) struct ProgramInfo {
     /// When event `val` is already achieved, op `key` becomes irrelevant.
     /// TODO: some instruction results supply multiple events.
     pub(crate) skip_by_op: HashMap<program::Instruction, program::Event>,
-    pub(crate) functions: HashMap<usize, program::FunctionFrame>,
+    pub(crate) functions: HashMap<program::Function, program::FunctionFrame>,
 }
 
 /// Configures devices and input/output buffers for an executable.
@@ -98,6 +107,7 @@ pub(crate) struct Host {
     /// Variable information during execution.
     pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
     pub(crate) descriptors: Descriptors,
+    pub(crate) call_stack: Vec<Descriptors>,
     pub(crate) debug_stack: Vec<Frame>,
     pub(crate) usage: ResourcesUsed,
 
@@ -196,6 +206,7 @@ pub(crate) struct Frame {
 }
 
 pub(crate) struct InitialState {
+    pub(crate) entry_point: program::Function,
     pub(crate) instructions: Arc<[Low]>,
     pub(crate) info: Arc<ProgramInfo>,
     pub(crate) device: Device,
@@ -968,7 +979,7 @@ impl Executable {
             gpu: env.gpu.into(),
             gpu_key: env.gpu_key,
             host: Host {
-                machine: Machine::new(Arc::clone(&self.instructions)),
+                machine: Machine::new(self),
                 descriptors: Descriptors {
                     image_io_buffers: env.buffers,
                     ..Descriptors::default()
@@ -977,6 +988,7 @@ impl Executable {
                 binary_data: self.binary_data.clone(),
                 io_map: self.io_map.clone(),
                 info: self.info.clone(),
+                call_stack: vec![],
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
                 delayed_submits: 0,
@@ -995,7 +1007,7 @@ impl Executable {
             gpu: env.gpu.into(),
             gpu_key: env.gpu_key,
             host: Host {
-                machine: Machine::new(Arc::clone(&self.instructions)),
+                machine: Machine::new(&self),
                 descriptors: Descriptors {
                     image_io_buffers: env.buffers,
                     ..self.descriptors
@@ -1004,6 +1016,7 @@ impl Executable {
                 binary_data: self.binary_data,
                 io_map: self.io_map.clone(),
                 info: self.info.clone(),
+                call_stack: vec![],
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
                 delayed_submits: 0,
@@ -1261,11 +1274,13 @@ impl Execution {
     pub(crate) fn new(init: InitialState) -> Self {
         eprintln!("Start capture");
         init.device.start_capture();
+
+        let range = init.info.functions[&init.entry_point].range.clone();
         Execution {
             gpu: Gpu::new(init.device, init.queue).into(),
             gpu_key: None,
             host: Host {
-                machine: Machine::new(init.instructions),
+                machine: Machine::with_instructions(init.instructions, range),
                 descriptors: Descriptors {
                     image_io_buffers: init.image_io_buffers,
                     ..Descriptors::default()
@@ -1274,6 +1289,7 @@ impl Execution {
                 binary_data: init.binary_data,
                 io_map: Arc::new(init.io_map),
                 info: init.info,
+                call_stack: vec![],
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
                 delayed_submits: 0,
@@ -2158,11 +2174,12 @@ impl Host {
                 Ok(())
             }
             Low::Call {
-                function: _,
+                function,
                 io_buffers,
             } => {
-                let mut new_io = vec![];
+                let function = *function;
 
+                let mut new_io = vec![];
                 for argument in io_buffers {
                     let buffer = self.descriptors.buffers[argument.buffer.0].clone();
                     let layout = argument.descriptor.to_canvas();
@@ -2180,11 +2197,31 @@ impl Host {
 
                 let stack_descriptors = core::mem::take(&mut self.descriptors);
                 self.descriptors.image_io_buffers = new_io;
+                self.call_stack.push(stack_descriptors);
 
-                // FIXME: alright also we need to activate this new stack frame. And then it
-                // resumes control at the next instruction after this (which will clean up the ABI
-                // pass of the buffer).
-                todo!();
+                // alright also we need to activate this new stack frame. And then it resumes
+                // control at the next instruction after this (which will clean up the ABI pass of
+                // the buffer).
+                let instruction_range = self.info.functions[&function].range.clone();
+                eprintln!("Called into {:?} at {:?}", function, &self.machine.instruction_pointer);
+                self.machine.instruction_pointer.push(instruction_range);
+
+                Ok(())
+            }
+            Low::Return => {
+                // A bit questionable. We do not return from the entry point function.. That'll at
+                // least preserve correctness if it is called recursively. (Although we do not have
+                // any form of jump at the moment of writing so that is a bug).
+                if self.machine.instruction_pointer.len() > 1 {
+                    self.machine.instruction_pointer.pop();
+
+                    // Drop existing descriptors, replace with previous call frame.
+                    self.descriptors = self
+                        .call_stack
+                        .pop()
+                        .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
+                }
+
                 Ok(())
             }
             inner => {
@@ -2461,9 +2498,17 @@ impl Descriptors {
 }
 
 impl Machine {
-    pub(crate) fn new(instructions: Arc<[Low]>) -> Self {
+    pub(crate) fn new(exec: &Executable) -> Self {
+        let range = exec.info.functions[&exec.entry_point].range.clone();
+        Machine::with_instructions(exec.instructions.clone(), range)
+    }
+
+    pub(crate) fn with_instructions(
+        instructions: Arc<[Low]>,
+        entry: core::ops::Range<usize>,
+    ) -> Self {
         Machine {
-            instruction_pointer: vec![0..instructions.len()],
+            instruction_pointer: vec![entry],
             instructions,
         }
     }
