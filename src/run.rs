@@ -97,7 +97,6 @@ pub(crate) struct Host {
 
     /// Variable information during execution.
     pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
-    pub(crate) image_io_buffers: Vec<Image>,
     pub(crate) descriptors: Descriptors,
     pub(crate) debug_stack: Vec<Frame>,
     pub(crate) usage: ResourcesUsed,
@@ -230,6 +229,7 @@ pub struct IoMap {
 
 #[derive(Default)]
 pub(crate) struct Descriptors {
+    pub(crate) image_io_buffers: Vec<Image>,
     bind_groups: Vec<wgpu::BindGroup>,
     bind_group_layouts: Vec<wgpu::BindGroupLayout>,
     buffers: Vec<Arc<wgpu::Buffer>>,
@@ -969,9 +969,11 @@ impl Executable {
             gpu_key: env.gpu_key,
             host: Host {
                 machine: Machine::new(Arc::clone(&self.instructions)),
-                descriptors: Descriptors::default(),
+                descriptors: Descriptors {
+                    image_io_buffers: env.buffers,
+                    ..Descriptors::default()
+                },
                 command_encoder: None,
-                image_io_buffers: env.buffers,
                 binary_data: self.binary_data.clone(),
                 io_map: self.io_map.clone(),
                 info: self.info.clone(),
@@ -994,9 +996,11 @@ impl Executable {
             gpu_key: env.gpu_key,
             host: Host {
                 machine: Machine::new(Arc::clone(&self.instructions)),
-                descriptors: self.descriptors,
+                descriptors: Descriptors {
+                    image_io_buffers: env.buffers,
+                    ..self.descriptors
+                },
                 command_encoder: None,
-                image_io_buffers: env.buffers,
                 binary_data: self.binary_data,
                 io_map: self.io_map.clone(),
                 info: self.info.clone(),
@@ -1262,8 +1266,10 @@ impl Execution {
             gpu_key: None,
             host: Host {
                 machine: Machine::new(init.instructions),
-                descriptors: Descriptors::default(),
-                image_io_buffers: init.image_io_buffers,
+                descriptors: Descriptors {
+                    image_io_buffers: init.image_io_buffers,
+                    ..Descriptors::default()
+                },
                 command_encoder: None,
                 binary_data: init.binary_data,
                 io_map: Arc::new(init.io_map),
@@ -1586,7 +1592,7 @@ impl Host {
                 Ok(())
             }
             Low::RenderView(source_image) => {
-                let texture = match &mut self.image_io_buffers[source_image.0].data {
+                let texture = match &mut self.descriptors.image_io_buffers[source_image.0].data {
                     ImageData::GpuTexture {
                         texture,
                         // FIXME: validate layout? What for?
@@ -1774,7 +1780,7 @@ impl Host {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let source = match self.image_io_buffers.get(source_image.0) {
+                let source = match self.descriptors.image_io_buffers.get(source_image.0) {
                     None => return Err(StepError::InvalidInstruction(line!())),
                     Some(source) => &source.data,
                 };
@@ -1813,7 +1819,7 @@ impl Host {
                 let bytes_per_texel = target_layout.texel_stride;
                 let _bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
-                let image = &mut self.image_io_buffers[source_image.0].data;
+                let image = &mut self.descriptors.image_io_buffers[source_image.0].data;
 
                 if let ImageData::GpuTexture {
                     texture,
@@ -2047,7 +2053,7 @@ impl Host {
                 let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
                 let buffer = &self.descriptors.buffers[source_buffer.0];
-                let image = &mut self.image_io_buffers[target_image.0].data;
+                let image = &mut self.descriptors.image_io_buffers[target_image.0].data;
 
                 if let ImageData::GpuTexture {
                     texture,
@@ -2173,7 +2179,7 @@ impl Host {
                 }
 
                 let stack_descriptors = core::mem::take(&mut self.descriptors);
-                let stack_io = core::mem::replace(&mut self.image_io_buffers, new_io);
+                self.descriptors.image_io_buffers = new_io;
 
                 // FIXME: alright also we need to activate this new stack frame. And then it
                 // resumes control at the next instruction after this (which will clean up the ABI
@@ -2620,7 +2626,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchInput,
             })?;
 
-        let image = &mut self.execution.host.image_io_buffers[index];
+        let image = &mut self.execution.host.descriptors.image_io_buffers[index];
         let descriptor = image.data.layout().clone();
 
         let mut pool_image;
@@ -2654,7 +2660,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        let image = &mut self.execution.host.image_io_buffers[index];
+        let image = &mut self.execution.host.descriptors.image_io_buffers[index];
         let descriptor = image.data.layout().clone();
 
         let mut pool_image;
@@ -2687,7 +2693,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        let image = &mut self.execution.host.image_io_buffers[index];
+        let image = &mut self.execution.host.descriptors.image_io_buffers[index];
         let descriptor = image.data.layout().clone();
 
         let mut pool_image;
@@ -2718,7 +2724,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        Ok(self.execution.host.image_io_buffers[index].key)
+        Ok(self.execution.host.descriptors.image_io_buffers[index].key)
     }
 
     /// Retain temporary buffers that had been allocated during execution.
