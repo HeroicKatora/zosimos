@@ -1142,11 +1142,13 @@ impl Program {
 
         let mut instructions = vec![];
         let mut functions = HashMap::new();
+        let mut binary_data = vec![];
 
         let mut encoder = self.lower_to_impl(&capabilities, main, None)?;
         encoder.finalize()?;
         let io_map = encoder.io_map();
         instructions.extend(encoder.instructions);
+        binary_data.extend(encoder.binary_data);
         functions.insert(
             Function(self.entry_index),
             FunctionFrame {
@@ -1161,6 +1163,13 @@ impl Program {
 
             let mut encoder = self.lower_to_impl(&capabilities, ops, None)?;
             encoder.finalize()?;
+
+            let reloc_base = binary_data.len();
+            binary_data.extend(encoder.binary_data);
+
+            for op in &mut encoder.instructions {
+                Self::relocate_binary(reloc_base, op)?;
+            }
 
             let start = instructions.len();
             instructions.extend(encoder.instructions);
@@ -1190,7 +1199,7 @@ impl Program {
                 skip_by_op: encoder.skip_by_op,
                 functions,
             }),
-            binary_data: encoder.binary_data,
+            binary_data,
             descriptors: run::Descriptors::default(),
             image_io_buffers,
             capabilities,
@@ -1391,6 +1400,61 @@ impl Program {
         encoder.push(Low::Return)?;
 
         Ok(encoder)
+    }
+
+    fn relocate_binary(base: usize, op: &mut Low) -> Result<(), LaunchError> {
+        match op {
+            Low::BufferInit(range) => {
+                match &mut range.content {
+                    BufferInitContent::Owned(_) => {}
+                    BufferInitContent::Defer { start, end } => {
+                        *start = start
+                            .checked_add(base)
+                            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+                        *end = end
+                            .checked_add(base)
+                            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+                    }
+                }
+
+                Ok(())
+            }
+
+            Low::BindGroup(_)
+            | Low::BindGroupLayout(_)
+            | Low::Buffer(_)
+            | Low::PipelineLayout(_)
+            | Low::Sampler(_)
+            | Low::Shader(_)
+            | Low::Texture(_)
+            | Low::TextureView(_)
+            | Low::RenderView(_)
+            | Low::RenderPipeline(_)
+            | Low::BeginCommands
+            | Low::BeginRenderPass(_)
+            | Low::EndCommands
+            | Low::EndRenderPass
+            | Low::SetPipeline(_)
+            | Low::SetBindGroup { .. }
+            | Low::SetVertexBuffer { .. }
+            | Low::DrawOnce { .. }
+            | Low::DrawIndexedZero { .. }
+            | Low::SetPushConstants { .. }
+            | Low::RunTopCommand
+            | Low::RunBotToTop(_)
+            | Low::WriteImageToBuffer { .. }
+            | Low::WriteImageToTexture { .. }
+            | Low::CopyBufferToTexture { .. }
+            | Low::CopyTextureToBuffer { .. }
+            | Low::CopyBufferToBuffer { .. }
+            | Low::ReadBuffer { .. }
+            | Low::StackFrame(_)
+            | Low::StackPop
+            | Low::AssertBuffer { .. }
+            | Low::AssertTexture { .. }
+            | Low::Call { .. }
+            | Low::Return => Ok(()),
+        }
     }
 }
 

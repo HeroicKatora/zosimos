@@ -2203,7 +2203,6 @@ impl Host {
                 // control at the next instruction after this (which will clean up the ABI pass of
                 // the buffer).
                 let instruction_range = self.info.functions[&function].range.clone();
-                eprintln!("Called into {:?} at {:?}", function, &self.machine.instruction_pointer);
                 self.machine.instruction_pointer.push(instruction_range);
 
                 Ok(())
