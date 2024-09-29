@@ -213,7 +213,7 @@ pub(crate) struct InitialState {
     pub(crate) queue: Queue,
     pub(crate) image_io_buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
-    pub(crate) io_map: IoMap,
+    pub(crate) io_map: Arc<IoMap>,
 }
 
 /// An image owned by the execution state but compatible with extracting it.
@@ -228,7 +228,7 @@ pub(crate) struct Image {
     pub(crate) key: Option<PoolKey>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct IoMap {
     /// Map input registers to their index in `buffers`.
     pub(crate) inputs: HashMap<Register, usize>,
@@ -1180,7 +1180,6 @@ impl Environment<'_> {
         match pool_img.data() {
             ImageData::Host(_) | ImageData::GpuTexture { .. } | ImageData::GpuBuffer { .. } => {}
             _ => {
-                eprintln!("Bad binding: {:?}", reg);
                 return Err(StartError::InternalCommandError(line!()));
             }
         }
@@ -1218,7 +1217,6 @@ impl Environment<'_> {
         match pool_img.data() {
             ImageData::GpuTexture { .. } => {}
             _ => {
-                eprintln!("Bad binding: {:?}", reg);
                 return Err(StartError::InternalCommandError(line!()));
             }
         }
@@ -1272,7 +1270,6 @@ impl Environment<'_> {
 
 impl Execution {
     pub(crate) fn new(init: InitialState) -> Self {
-        eprintln!("Start capture");
         init.device.start_capture();
 
         let range = init.info.functions[&init.entry_point].range.clone();
@@ -1287,7 +1284,7 @@ impl Execution {
                 },
                 command_encoder: None,
                 binary_data: init.binary_data,
-                io_map: Arc::new(init.io_map),
+                io_map: init.io_map,
                 info: init.info,
                 call_stack: vec![],
                 debug_stack: vec![],
@@ -1444,7 +1441,6 @@ impl Host {
                 // resource it was meant to create / grab this resource from the environment.
                 // Otherwise, the index-tracking of other resources gets messed up as the encoder
                 // relies on this being essentially a stack machine.
-                let _ = self.machine.next_instruction()?;
                 return Ok(());
             }
         }
@@ -2178,13 +2174,31 @@ impl Host {
                 io_buffers,
             } => {
                 let function = *function;
+                let fn_info = &self.info.functions[&function];
 
-                let mut new_io = vec![];
+                let mut new_io: Vec<_> = fn_info.io.iter().map(Image::with_late_bound).collect();
+
                 for argument in io_buffers {
                     let buffer = self.descriptors.buffers[argument.buffer.0].clone();
                     let layout = argument.descriptor.to_canvas();
 
-                    new_io.push(Image {
+                    let io_texture = if let Some(idx) = fn_info.io_map.inputs.get(&argument.in_io) {
+                        *idx
+                    } else if let Some(idx) = fn_info.io_map.outputs.get(&argument.in_io) {
+                        *idx
+                    } else {
+                        return Err(StepError::InvalidInstruction(line!()));
+                    };
+
+                    let matches_descriptor = new_io
+                        .get(io_texture)
+                        .map_or(false, |expected| expected.descriptor == argument.descriptor);
+
+                    if !matches_descriptor {
+                        return Err(StepError::InvalidInstruction(line!()));
+                    }
+
+                    new_io[io_texture] = Image {
                         data: ImageData::GpuBuffer {
                             gpu: slotmap::DefaultKey::default(),
                             layout,
@@ -2192,7 +2206,7 @@ impl Host {
                         },
                         descriptor: argument.descriptor.clone(),
                         key: None,
-                    });
+                    };
                 }
 
                 let stack_descriptors = core::mem::take(&mut self.descriptors);
@@ -2202,7 +2216,7 @@ impl Host {
                 // alright also we need to activate this new stack frame. And then it resumes
                 // control at the next instruction after this (which will clean up the ABI pass of
                 // the buffer).
-                let instruction_range = self.info.functions[&function].range.clone();
+                let instruction_range = fn_info.range.clone();
                 self.machine.instruction_pointer.push(instruction_range);
 
                 Ok(())
@@ -2498,6 +2512,7 @@ impl Descriptors {
 
 impl Machine {
     pub(crate) fn new(exec: &Executable) -> Self {
+        // eprintln!("{:#?}", exec.instructions);
         let range = exec.info.functions[&exec.entry_point].range.clone();
         Machine::with_instructions(exec.instructions.clone(), range)
     }

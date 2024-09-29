@@ -617,6 +617,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // FIXME: We are conflating `texture` and the index in the execution's vector of IO
         // buffers. That is, we have an entry there even when the register/texture in question has
         // no input or output behavior.
+        //
         // That's a shame because, for example, we could leave images in the pool when they do not
         // get used in the pipeline.
         if self.trace_pool_plan {

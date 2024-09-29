@@ -1692,6 +1692,9 @@ impl CommandBuffer {
 
         let mut reg_to_texture: HashMap<Register, Texture> = HashMap::default();
 
+        let mut signature_in: Vec<Register> = vec![];
+        let mut signature_out: Vec<Register> = vec![];
+
         let mut realize_texture = |idx, op: &Op| {
             let liveness = first_use[idx]..last_use[idx];
 
@@ -1725,9 +1728,11 @@ impl CommandBuffer {
                     let descriptor = desc.monomorphize(tys);
                     high_ops.push(High::Input(Register(idx), descriptor));
                     reg_to_texture.insert(Register(idx), texture);
+                    signature_in.push(Register(idx));
                 }
                 &Op::Output { src } => {
                     let _texture = realize_texture(idx, op)?;
+                    signature_out.push(Register(idx));
 
                     high_ops.push(High::Output {
                         src,
@@ -2083,9 +2088,14 @@ impl CommandBuffer {
 
         let end = high_ops.len();
 
+        // The registers which callers must fill. This must match the order that CallBinding is
+        // passed at call sites, i.e. be consistent with the signature.
+        let signature_registers = signature_in.into_iter().chain(signature_out).collect();
+
         Ok(FunctionLinked {
             ops: start..end,
             image_buffers,
+            signature_registers,
         })
     }
 
