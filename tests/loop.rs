@@ -3,9 +3,9 @@
 #[path = "util.rs"]
 mod util;
 
-use stealth_paint::command::{self, CommandBuffer};
-use stealth_paint::pool::Pool;
-use stealth_paint::program::{Capabilities, Program};
+use zosimos::command::{self, CommandBuffer};
+use zosimos::pool::Pool;
+use zosimos::program::{Capabilities, Program};
 
 use self::util::{retire_with_one_image, run_executable_with_output};
 

@@ -4,11 +4,11 @@ use image::GenericImageView;
 use std::hash::Hasher;
 use std::path::Path;
 
-use stealth_paint::command::{CommandBuffer, Register};
-use stealth_paint::pool::PoolImage;
-use stealth_paint::pool::{Pool, PoolKey};
-use stealth_paint::program::Capabilities;
-use stealth_paint::run::{Executable, Retire};
+use zosimos::command::{CommandBuffer, Register};
+use zosimos::pool::PoolImage;
+use zosimos::pool::{Pool, PoolKey};
+use zosimos::program::Capabilities;
+use zosimos::run::{Executable, Retire};
 
 const CRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/reference");
 const DEBUG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/debug");

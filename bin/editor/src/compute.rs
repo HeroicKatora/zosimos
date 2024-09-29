@@ -4,8 +4,8 @@ use std::sync::Arc;
 use crate::surface::Surface;
 use arc_swap::ArcSwapAny;
 
-use stealth_paint::command::CommandBuffer;
-use stealth_paint::pool::{GpuKey, Pool};
+use zosimos::command::CommandBuffer;
+use zosimos::pool::{GpuKey, Pool};
 
 /// A compute graph.
 pub struct Compute {

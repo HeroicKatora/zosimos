@@ -1,11 +1,11 @@
 use crate::compute::{Compute, ComputeTailCommands};
 use crate::winit::{Window, WindowSurface, WindowedSurface};
 
-use stealth_paint::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
-use stealth_paint::command;
-use stealth_paint::pool::{GpuKey, Pool, PoolKey};
-use stealth_paint::program::{Capabilities, CompileError, LaunchError, Program};
-use stealth_paint::run::{Executable, StepLimits};
+use zosimos::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
+use zosimos::command;
+use zosimos::pool::{GpuKey, Pool, PoolKey};
+use zosimos::program::{Capabilities, CompileError, LaunchError, Program};
+use zosimos::run::{Executable, StepLimits};
 
 use wgpu::{Adapter, Instance, SurfaceConfiguration};
 

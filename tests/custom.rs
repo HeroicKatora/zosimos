@@ -2,10 +2,10 @@
 #[path = "util.rs"]
 mod util;
 
-use stealth_paint::buffer::{self, Descriptor};
-use stealth_paint::command::{self, CommandBuffer, ShaderCommand};
-use stealth_paint::pool::Pool;
-use stealth_paint::program::Program;
+use zosimos::buffer::{self, Descriptor};
+use zosimos::command::{self, CommandBuffer, ShaderCommand};
+use zosimos::pool::Pool;
+use zosimos::program::Program;
 
 use self::util::{retire_with_one_image, run_once_with_output};
 

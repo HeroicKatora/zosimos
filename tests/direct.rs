@@ -1,7 +1,7 @@
 //! This test ensures that the direct `Program::launch` interface can be used.
-use stealth_paint::buffer::Descriptor;
-use stealth_paint::command::{CommandBuffer, Rectangle};
-use stealth_paint::pool::{Pool, PoolKey};
+use zosimos::buffer::Descriptor;
+use zosimos::command::{CommandBuffer, Rectangle};
+use zosimos::pool::{Pool, PoolKey};
 
 #[path = "util.rs"]
 mod util;

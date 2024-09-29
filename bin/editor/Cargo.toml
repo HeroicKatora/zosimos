@@ -1,5 +1,5 @@
 [package]
-name = "stealth-paint-editor"
+name = "zosimos-editor"
 version = "0.0.0"
 authors = ["Andreas Molzer <andreas.molzer@gmx.de>"]
 edition = "2021"
@@ -12,11 +12,11 @@ resolver = "2"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "stealth-paint-editor"
+name = "zosimos-editor"
 path = "src/main.rs"
 
 
-[dependencies.stealth-paint]
+[dependencies.zosimos]
 path = "../../"
 
 [dependencies.arc-swap]

@@ -2,12 +2,10 @@
 #[path = "util.rs"]
 mod util;
 
-use stealth_paint::buffer::{ColorChannel, Descriptor, SampleParts, Texel};
-use stealth_paint::command::{
-    self, Bilinear, CommandBuffer, CommandError, GenericDeclaration, Palette,
-};
-use stealth_paint::pool::Pool;
-use stealth_paint::program::{Capabilities, Program};
+use zosimos::buffer::{ColorChannel, Descriptor, SampleParts, Texel};
+use zosimos::command::{self, Bilinear, CommandBuffer, CommandError, GenericDeclaration, Palette};
+use zosimos::pool::Pool;
+use zosimos::program::{Capabilities, Program};
 
 use self::util::{retire_with_one_image, run_executable_with_output};
 
