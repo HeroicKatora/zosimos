@@ -23,6 +23,20 @@ use encoder::{Encoder, RegisterMap};
 /// launch.
 pub struct Program {
     pub(crate) ops: Vec<High>,
+    /// The different functions.
+    pub(crate) functions: Vec<FunctionLinked>,
+    /// The entry point into the program, the function by which to layout the required input and
+    /// the output buffer plans.
+    pub(crate) entry_index: usize,
+    /// Annotates which function allocates a cacheable texture.
+    pub(crate) texture_by_op: HashMap<usize, TextureDescriptor>,
+    /// Annotates which function allocates a cacheable buffer.
+    pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
+}
+
+pub(crate) struct FunctionLinked {
+    /// The sequence in `ops` that belongs to this function.
+    pub(crate) ops: core::ops::Range<usize>,
     /// Assigns resources to each image based on liveness.
     /// This translates the SSA form into a mutable mapping where each image can be represented by
     /// a texture and a buffer. The difference is that the texture is assigned based on the _exact_
@@ -35,10 +49,17 @@ pub struct Program {
     /// The encoder can make use of this mapping as intermediate resources for transfer between
     /// different images or from host to graphic device etc.
     pub(crate) image_buffers: ImageBufferPlan,
-    /// Annotates which function allocates a cacheable texture.
-    pub(crate) texture_by_op: HashMap<usize, TextureDescriptor>,
-    /// Annotates which function allocates a cacheable buffer.
-    pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
+    /// The register IDs that a caller will target when issuing a `Call` against the function.
+    ///
+    /// Utilized to validate that such calls are valid, as well as to match the arguments with
+    /// their register. The register is then the stable form of reference until runtime where it is
+    /// mapped to a concrete IO slot of the function, based on information from the encoder. We're
+    /// assigning multiple purposes to the intermediate layers but the register is pretty clean.
+    /// Just slightly slow.
+    ///
+    /// NOTE: this is in signature order. Not in register sort order, hence the vector instead of a
+    /// set representation.
+    pub(crate) signature_registers: Vec<Register>,
 }
 
 /// A high-level, device independent, translation of ops.
@@ -76,7 +97,9 @@ pub(crate) enum High {
     /// Add an additional texture operand to the next operation.
     PushOperand(Texture),
     /// Call a function on the currently prepared operands.
-    Construct { dst: Target, fn_: Function },
+    Construct { dst: Target, fn_: Initializer },
+    /// Create all the state for a texture, without doing anything in it.
+    Uninit { dst: Target },
     /// Last phase marking a register as done.
     /// This is emitted after the Command defining the register has been translated.
     Done(Register),
@@ -86,6 +109,11 @@ pub(crate) enum High {
     StackPush(Frame),
     /// Pop a high-level function marker.
     StackPop,
+    Call {
+        function: Function,
+        /// Initial IO state of the callee.
+        image_io_buffers: Arc<[CallBinding]>,
+    },
 }
 
 /// The target image texture of a paint operation (pipeline).
@@ -105,7 +133,7 @@ pub(crate) enum Target {
 ///
 /// A single command might be translated to multiple functions.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Function {
+pub(crate) enum Initializer {
     /// Execute a shader on an target rectangle.
     ///
     /// The UV coordinates and position is determined by vertex shader parameters computed from a
@@ -223,6 +251,13 @@ pub struct DeviceTexture(pub(crate) usize);
 /// Identifies one layout based buffer in the render pipeline, by an index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Buffer(pub(crate) usize);
+
+/// Identifies one sequence of instructions that operate on the same stack.
+///
+/// Arguments and results are passed by the initial state of the stack, including a portion of IO
+/// buffers that can be textures and pre-allocated buffers from the GPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Function(pub(crate) usize);
 
 /// Identifies one descriptor based resource in the render pipeline, by an index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -389,7 +424,6 @@ pub(crate) enum Low {
 
     StackFrame(run::Frame),
     StackPop,
-
     AssertBuffer {
         buffer: DeviceBuffer,
         info: String,
@@ -398,6 +432,12 @@ pub(crate) enum Low {
         buffer: DeviceBuffer,
         info: String,
     },
+
+    Call {
+        function: Function,
+        io_buffers: Vec<CallImageArgument>,
+    },
+    Return,
 }
 
 /// Create a bind group.
@@ -420,6 +460,39 @@ pub(crate) enum BindingResource {
     },
     Sampler(usize),
     TextureView(usize),
+}
+
+#[derive(Debug)]
+pub(crate) enum CallBinding {
+    /// Texture that is initialized on entry, and just copied.
+    InTexture {
+        texture: Texture,
+        register: Register,
+    },
+    /// Texture that gets initialized by this call.
+    OutTexture {
+        texture: Texture,
+        register: Register,
+    },
+}
+
+/// FIXME: name... is it appropriate to use the same component `Call` for High and Low since this
+/// confuses any readers trying to match the structs that make up the attributes.
+#[derive(Debug)]
+pub(crate) struct CallImageArgument {
+    pub buffer: DeviceBuffer,
+    pub descriptor: Descriptor,
+    /// FIXME: using `Texture` with multiple uses hurts here. See the complaint of this assignment
+    /// in `program.rs`. But here it is even slightly worse as we're requiring there to *be* a
+    /// `Texture` for all arguments even those which do not realistically are textures.
+    ///
+    /// Also we had a bug where we tried passing the `Texture` but as it was allocated at the
+    /// caller which is the wrong index. (This does not necessarily crash). In the current system
+    /// the `Texture` assignment requires a full lowering of the callee, only after which the
+    /// texture assignment is finalized. However this requires either the call-graph to be acyclic
+    /// or that we fixup the assignment by an indirection. We choose the indirection storing only
+    /// the target register and using the later io_map.
+    pub in_io: Register,
 }
 
 /// Describe a bind group.
@@ -520,6 +593,14 @@ pub(crate) enum BufferInitContent {
         start: usize,
         end: usize,
     },
+}
+
+#[derive(Debug)]
+pub(crate) struct FunctionFrame {
+    pub(crate) range: core::ops::Range<usize>,
+    /// The IO descriptors that must be defined in the call, as `image_io_buffers`.
+    pub(crate) io: Arc<[Descriptor]>,
+    pub(crate) io_map: Arc<run::IoMap>,
 }
 
 #[derive(Debug)]
@@ -676,7 +757,10 @@ impl ImageDescriptor {
                 let stage_kind = parameter
                     .stage_kind()
                     // Unsupported format.
-                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+                    .ok_or_else(|| {
+                        eprintln!("{descriptor:?}");
+                        LaunchError::InternalCommandError(line!())
+                    })?;
 
                 staging = Some(StagingDescriptor {
                     stage_kind,
@@ -853,6 +937,7 @@ pub struct MismatchError {}
 pub struct Launcher<'program> {
     program: &'program Program,
     pool: &'program mut Pool,
+    main: &'program FunctionLinked,
     /// The host image data for each texture (if any).
     /// Otherwise this a placeholder image.
     binds: Vec<run::Image>,
@@ -1057,8 +1142,10 @@ impl Program {
     /// Required input and output image descriptors must match those declared, or be convertible
     /// to them when a normalization operation was declared.
     pub fn launch<'pool>(&'pool self, pool: &'pool mut Pool) -> Launcher<'pool> {
+        let main = &self.functions[self.entry_index];
+
         // Create empty bind assignments as a start, with respective layouts.
-        let binds = self
+        let binds = main
             .image_buffers
             .texture
             .iter()
@@ -1068,20 +1155,77 @@ impl Program {
         Launcher {
             program: self,
             pool,
+            main,
             binds,
             pool_plan: ImagePoolPlan::default(),
         }
     }
 
     pub fn lower_to(&self, capabilities: Capabilities) -> Result<run::Executable, LaunchError> {
-        let mut encoder = self.lower_to_impl(&capabilities, None)?;
+        let main = &self.functions[self.entry_index];
+
+        let mut instructions = vec![];
+        let mut functions = HashMap::new();
+        let mut binary_data = vec![];
+        let mut skip_by_op = HashMap::new();
+
+        let mut encoder = self.lower_to_impl(&capabilities, main, None)?;
         encoder.finalize()?;
-        let io_map = encoder.io_map();
+        let io_map: Arc<run::IoMap> = encoder.io_map().into();
+        instructions.extend(encoder.instructions);
+        binary_data.extend(encoder.binary_data);
+        skip_by_op.extend(encoder.skip_by_op);
+
+        functions.insert(
+            Function(self.entry_index),
+            FunctionFrame {
+                range: 0..instructions.len(),
+                io: Arc::from(main.image_buffers.texture.to_vec()),
+                io_map: io_map.clone(),
+            },
+        );
+
+        for (idx, ops) in self.functions.iter().enumerate() {
+            if idx == self.entry_index {
+                continue;
+            }
+
+            let mut encoder = self.lower_to_impl(&capabilities, ops, None)?;
+            encoder.finalize()?;
+            let io_map = encoder.io_map().into();
+
+            let reloc_base = binary_data.len();
+            binary_data.extend(encoder.binary_data);
+
+            for op in &mut encoder.instructions {
+                Self::relocate_binary(reloc_base, op)?;
+            }
+
+            let start = instructions.len();
+            instructions.extend(encoder.instructions);
+            let end = instructions.len();
+
+            skip_by_op.extend(
+                encoder
+                    .skip_by_op
+                    .into_iter()
+                    .map(|(inst, event)| (Instruction(inst.0 + start), event)),
+            );
+
+            functions.insert(
+                Function(idx),
+                FunctionFrame {
+                    range: start..end,
+                    io: Arc::from(ops.image_buffers.texture.to_vec()),
+                    io_map,
+                },
+            );
+        }
 
         // Convert all textures to buffers.
         // FIXME: _All_ textures? No, some amount of textures might not be IO.
         // Currently this is true but no in general.
-        let image_io_buffers = self
+        let image_io_buffers = main
             .image_buffers
             .texture
             .iter()
@@ -1089,15 +1233,17 @@ impl Program {
             .collect();
 
         Ok(run::Executable {
-            instructions: encoder.instructions.into(),
+            entry_point: Function(self.entry_index),
+            instructions: instructions.into(),
             info: Arc::new(run::ProgramInfo {
                 buffer_by_op: encoder.buffer_by_op,
                 texture_by_op: encoder.texture_by_op,
                 shader_by_op: encoder.shader_by_op,
                 pipeline_by_op: encoder.pipeline_by_op,
-                skip_by_op: encoder.skip_by_op,
+                skip_by_op,
+                functions,
             }),
-            binary_data: encoder.binary_data,
+            binary_data,
             descriptors: run::Descriptors::default(),
             image_io_buffers,
             capabilities,
@@ -1108,17 +1254,18 @@ impl Program {
     fn lower_to_impl(
         &self,
         capabilities: &Capabilities,
+        function: &FunctionLinked,
         pool_plan: Option<&ImagePoolPlan>,
     ) -> Result<Encoder, LaunchError> {
         let mut encoder = Encoder::default();
         encoder.enable_capabilities(capabilities);
 
-        encoder.set_buffer_plan(&self.image_buffers);
+        encoder.set_buffer_plan(&function.image_buffers);
         if let Some(pool_plan) = pool_plan {
             encoder.set_pool_plan(pool_plan);
         }
 
-        for high in &self.ops {
+        for high in &self.ops[function.ops.clone()] {
             let with_stack_frame = match high {
                 High::StackPush(_) | High::StackPop => false,
                 other => {
@@ -1156,6 +1303,13 @@ impl Program {
                 &High::PushOperand(texture) => {
                     encoder.copy_staging_to_texture(texture)?;
                     encoder.push_operand(texture)?;
+                }
+                &High::Uninit { dst } => {
+                    encoder.ensure_allocate_texture(match dst {
+                        Target::Discard(texture) | Target::Load(texture) => texture,
+                    })?;
+
+                    // Nothing more to do.
                 }
                 High::Construct { dst, fn_ } => {
                     let dst_texture = match dst {
@@ -1235,6 +1389,55 @@ impl Program {
                 High::StackPop => {
                     encoder.push(Low::StackPop)?;
                 }
+                High::Call {
+                    function: fn_idx,
+                    image_io_buffers,
+                } => {
+                    // We pass images as their encoded buffers. This is most generic.
+                    let mut io_buffers = vec![];
+                    let mut post_textures = vec![];
+
+                    let signature = &self.functions[fn_idx.0].signature_registers;
+
+                    for (&in_io, param) in signature.iter().zip(&image_io_buffers[..]) {
+                        match param {
+                            &CallBinding::InTexture { texture, register } => {
+                                let regmap = encoder.allocate_register(register)?.clone();
+                                encoder.ensure_allocate_texture(texture)?;
+                                encoder.copy_staging_to_buffer(register)?;
+                                let descriptor = &function.image_buffers.texture[texture.0];
+
+                                io_buffers.push(CallImageArgument {
+                                    buffer: regmap.buffer,
+                                    descriptor: descriptor.clone(),
+                                    in_io,
+                                });
+                            }
+                            &CallBinding::OutTexture { texture, register } => {
+                                let regmap = encoder.allocate_register(register)?.clone();
+                                encoder.ensure_allocate_texture(texture)?;
+                                let descriptor = &function.image_buffers.texture[texture.0];
+                                post_textures.push(register);
+
+                                io_buffers.push(CallImageArgument {
+                                    buffer: regmap.buffer,
+                                    descriptor: descriptor.clone(),
+                                    in_io,
+                                });
+                            }
+                        }
+                    }
+
+                    encoder.push(Low::Call {
+                        function: *fn_idx,
+                        io_buffers,
+                    })?;
+
+                    // Retrieve arguments that were rendered to.
+                    for register in post_textures {
+                        encoder.copy_buffer_to_staging(register)?;
+                    }
+                }
             }
 
             if with_stack_frame {
@@ -1242,7 +1445,64 @@ impl Program {
             }
         }
 
+        encoder.push(Low::Return)?;
+
         Ok(encoder)
+    }
+
+    fn relocate_binary(base: usize, op: &mut Low) -> Result<(), LaunchError> {
+        match op {
+            Low::BufferInit(range) => {
+                match &mut range.content {
+                    BufferInitContent::Owned(_) => {}
+                    BufferInitContent::Defer { start, end } => {
+                        *start = start
+                            .checked_add(base)
+                            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+                        *end = end
+                            .checked_add(base)
+                            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+                    }
+                }
+
+                Ok(())
+            }
+
+            Low::BindGroup(_)
+            | Low::BindGroupLayout(_)
+            | Low::Buffer(_)
+            | Low::PipelineLayout(_)
+            | Low::Sampler(_)
+            | Low::Shader(_)
+            | Low::Texture(_)
+            | Low::TextureView(_)
+            | Low::RenderView(_)
+            | Low::RenderPipeline(_)
+            | Low::BeginCommands
+            | Low::BeginRenderPass(_)
+            | Low::EndCommands
+            | Low::EndRenderPass
+            | Low::SetPipeline(_)
+            | Low::SetBindGroup { .. }
+            | Low::SetVertexBuffer { .. }
+            | Low::DrawOnce { .. }
+            | Low::DrawIndexedZero { .. }
+            | Low::SetPushConstants { .. }
+            | Low::RunTopCommand
+            | Low::RunBotToTop(_)
+            | Low::WriteImageToBuffer { .. }
+            | Low::WriteImageToTexture { .. }
+            | Low::CopyBufferToTexture { .. }
+            | Low::CopyTextureToBuffer { .. }
+            | Low::CopyBufferToBuffer { .. }
+            | Low::ReadBuffer { .. }
+            | Low::StackFrame(_)
+            | Low::StackPop
+            | Low::AssertBuffer { .. }
+            | Low::AssertTexture { .. }
+            | Low::Call { .. }
+            | Low::Return => Ok(()),
+        }
     }
 }
 
@@ -1256,7 +1516,7 @@ impl Launcher<'_> {
             return Err(LaunchError::InternalCommandError(line!()));
         }
 
-        let Texture(texture) = match self.program.image_buffers.by_register.get(reg) {
+        let Texture(texture) = match self.main.image_buffers.by_register.get(reg) {
             Some(assigned) => assigned.texture,
             None => return Err(LaunchError::InternalCommandError(line!())),
         };
@@ -1275,8 +1535,8 @@ impl Launcher<'_> {
     pub fn bind_remaining_outputs(mut self) -> Result<Self, LaunchError> {
         for high in &self.program.ops {
             if let High::Output { src: register, dst } = *high {
-                let assigned = &self.program.image_buffers.by_register[register.0];
-                let descriptor = &self.program.image_buffers.texture[assigned.texture.0];
+                let assigned = &self.main.image_buffers.by_register[register.0];
+                let descriptor = &self.main.image_buffers.texture[assigned.texture.0];
                 let key = self.pool_plan.choose_output(&mut *self.pool, descriptor);
                 self.pool_plan.plan.insert(dst, key);
             }
@@ -1309,27 +1569,45 @@ impl Launcher<'_> {
 
         let capabilities = Capabilities::from(&device);
 
-        let mut encoder = self
-            .program
-            .lower_to_impl(&capabilities, Some(&self.pool_plan))?;
+        let mut encoder =
+            self.program
+                .lower_to_impl(&capabilities, self.main, Some(&self.pool_plan))?;
+
         let mut image_io_buffers = self.binds;
         encoder.extract_buffers(&mut image_io_buffers, &mut self.pool)?;
+        let io_descriptors: Vec<_> = image_io_buffers
+            .iter()
+            .map(|img| img.descriptor.clone())
+            .collect();
 
         // Unbalanced operands shouldn't happen.
         // This is part of validation layer but cheap and we always do it.
         encoder.finalize()?;
-        let io_map = encoder.io_map();
+        let io_map: Arc<run::IoMap> = encoder.io_map().into();
+        let instructions: Arc<[_]> = encoder.instructions.into();
+        let all_range = 0..instructions.len();
 
         let init = run::InitialState {
             // TODO: shared with lower_to. Find a better way to reap the `encoder` for its
             // resources and descriptors.
-            instructions: encoder.instructions.into(),
+            instructions,
+            entry_point: Function(0),
             info: Arc::new(run::ProgramInfo {
                 buffer_by_op: encoder.buffer_by_op,
                 texture_by_op: encoder.texture_by_op,
                 shader_by_op: encoder.shader_by_op,
                 pipeline_by_op: encoder.pipeline_by_op,
                 skip_by_op: encoder.skip_by_op,
+                functions: vec![(
+                    Function(0),
+                    FunctionFrame {
+                        range: all_range,
+                        io: Arc::from(io_descriptors),
+                        io_map: io_map.clone(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
             }),
             device,
             queue,

@@ -21,7 +21,7 @@ pub struct ByteLayout {
 }
 
 /// Describes an image semantically.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Descriptor {
     /// The byte and physical layout of the buffer.
     pub layout: ByteLayout,
@@ -40,7 +40,7 @@ pub struct Descriptor {
 ///
 /// This can only make sense with internal knowledge about how we remap color representations into
 /// the texture during the Staging phase of loading a color image.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum ChannelPosition {
     First = 0,
@@ -105,11 +105,13 @@ impl Descriptor {
         let color = Color::Scalars {
             transfer: Transfer::Linear,
         };
+
         let this = Descriptor {
             color,
             layout,
             texel,
         };
+
         let _ = this.try_to_canvas()?;
         Some(this)
     }

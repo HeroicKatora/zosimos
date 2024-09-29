@@ -6,8 +6,8 @@ use crate::buffer::{BufferLayout, ByteLayout, ChannelPosition, Descriptor, Texel
 use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
-    CompileError, Frame, Function, High, ImageBufferAssignment, ImageBufferPlan, ImageDescriptor,
-    Program, QuadTarget, Target, Texture,
+    CallBinding, CompileError, Frame, Function, FunctionLinked, High, ImageBufferAssignment,
+    ImageBufferPlan, ImageDescriptor, Initializer, Program, QuadTarget, Target, Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
@@ -18,8 +18,10 @@ use crate::shaders::{self, FragmentShader, PaintOnTopKind, ShaderInvocation};
 use image_canvas::color::{Color, ColorChannel, Whitepoint};
 use image_canvas::layout::{SampleParts, Texel};
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// A reference to one particular value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -45,12 +47,45 @@ pub struct Register(pub(crate) usize);
 #[derive(Default)]
 pub struct CommandBuffer {
     ops: Vec<Op>,
+    vars: Vec<TyVarBounds>,
+    symbols: Vec<CommandSignature>,
+    tys: Vec<GenericDescriptor>,
+}
+
+/// Refers to a generic argument declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GenericVar(pub(crate) usize);
+
+/// Refers to the descriptor introduced by a generic argument or a derived var.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DescriptorVar(pub(crate) usize);
+
+/// Refers to the function introduced by its signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FunctionVar(pub(crate) usize);
+
+pub struct CommandSignature {
+    vars: Vec<TyVarBounds>,
+    input: Vec<GenericDescriptor>,
+    output: Vec<GenericDescriptor>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenericDescriptor {
+    size: Generic<(u32, u32)>,
+    chroma: Generic<(Texel, Color)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Generic<T> {
+    Concrete(T),
+    Generic(GenericVar),
 }
 
 #[derive(Clone, Debug)]
 enum Op {
     /// i := in()
-    Input { desc: Descriptor },
+    Input { desc: GenericDescriptor },
     /// out(src)
     ///
     /// WIP: and is_cpu_type(desc)
@@ -64,13 +99,16 @@ enum Op {
     Render { src: Register },
     /// i := op()
     /// where type(i) = desc
-    Construct { desc: Descriptor, op: ConstructOp },
+    Construct {
+        desc: GenericDescriptor,
+        op: ConstructOp,
+    },
     /// i := unary(src)
     /// where type(i) =? Op[type(src)]
     Unary {
         src: Register,
         op: UnaryOp,
-        desc: Descriptor,
+        desc: GenericDescriptor,
     },
     /// i := binary(lhs, rhs)
     /// where type(i) =? Op[type(lhs), type(rhs)]
@@ -78,21 +116,55 @@ enum Op {
         lhs: Register,
         rhs: Register,
         op: BinaryOp,
-        desc: Descriptor,
+        desc: GenericDescriptor,
     },
     Dynamic {
         call: OperandKind,
         /// The planned shader invocation.
         command: ShaderInvocation,
-        desc: Descriptor,
+        desc: GenericDescriptor,
+    },
+    Invoke {
+        function: FunctionVar,
+        arguments: Vec<Register>,
+        results: Vec<Register>,
+        generics: Vec<GenericDescriptor>,
+    },
+    /// The specific return value of a function.
+    InvokedResult {
+        /// Where is this register initialized? Must be after its definition.
+        invocation: Register,
+        /// The result's type monomorphized as called.
+        desc: GenericDescriptor,
     },
 }
+
+#[derive(Clone)]
+struct TyVarBounds {}
+
+/// Declare a fresh generic declaration parameter.
+pub struct GenericDeclaration<'lt> {
+    pub bounds: &'lt [GenericBound],
+}
+
+/// Declare a new descriptor type based on a generic bound.
+pub struct DescriptorDerivation {
+    pub base: DescriptorVar,
+    pub size: Option<(u32, u32)>,
+}
+
+pub enum GenericBound {}
 
 #[derive(Clone, Debug)]
 enum OperandKind {
     Construct,
     Unary(Register),
     Binary { lhs: Register, rhs: Register },
+}
+
+pub struct InvocationArguments<'lt> {
+    pub generics: &'lt [DescriptorVar],
+    pub arguments: &'lt [Register],
 }
 
 #[derive(Clone, Debug)]
@@ -432,12 +504,34 @@ pub struct CommandError {
     inner: CommandErrorKind,
 }
 
+/// Generic instantiation that is todo by the linker.
+struct CommandMonomorphization<'lt> {
+    /// The name of the buffer in the linker.
+    link_idx: usize,
+    command: &'lt CommandBuffer,
+    tys: Cow<'lt, [Descriptor]>,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct LinkedMonomorphicSignature {
+    /// The function, by its Linker symbol index.
+    link_idx: usize,
+    tys: Vec<Descriptor>,
+}
+
+struct Monomorphizing<'lt> {
+    stack: Vec<CommandMonomorphization<'lt>>,
+    monomorphic: HashMap<LinkedMonomorphicSignature, Function>,
+    commands: Vec<&'lt CommandBuffer>,
+}
+
 #[derive(Debug)]
 // `Debug` is our use. Until we get better errors.
 #[allow(unused)]
 enum CommandErrorKind {
-    BadDescriptor(Descriptor),
-    ConflictingTypes(Descriptor, Descriptor),
+    BadDescriptor(GenericDescriptor, &'static str),
+    ConcreteDescriptorRequired,
+    ConflictingTypes(GenericDescriptor, GenericDescriptor),
     GenericTypeError,
     Other,
     Unimplemented,
@@ -470,16 +564,183 @@ impl CommandBuffer {
     pub fn input(&mut self, desc: Descriptor) -> Result<Register, CommandError> {
         if !desc.is_consistent() {
             return Err(CommandError {
-                inner: CommandErrorKind::BadDescriptor(desc),
+                inner: CommandErrorKind::BadDescriptor(desc.into(), "inconsistent input declared"),
             });
         }
+
+        Ok(self.push(Op::Input { desc: desc.into() }))
+    }
+
+    /// Declare an input that depends on a generic descriptor parameter.
+    ///
+    /// See [`Self::generic`].
+    pub fn input_generic(&mut self, var: DescriptorVar) -> Result<Register, CommandError> {
+        let Some(desc) = self.tys.get(var.0).cloned() else {
+            return Err(CommandError::BAD_REGISTER);
+        };
 
         Ok(self.push(Op::Input { desc }))
     }
 
+    /// Declare a generic parameter.
+    ///
+    /// All generic parameters need to be filled with matching concrete variables when the function
+    /// is instantiated at a later point.
+    pub fn generic(&mut self, generic: GenericDeclaration) -> DescriptorVar {
+        for item in generic.bounds {
+            match *item {}
+        }
+
+        let bounds = TyVarBounds {};
+        let tyvar = GenericVar(self.vars.len());
+        self.vars.push(bounds);
+
+        let descriptor = DescriptorVar(self.tys.len());
+        self.tys.push(GenericDescriptor {
+            size: Generic::Generic(tyvar),
+            chroma: Generic::Generic(tyvar),
+        });
+
+        descriptor
+    }
+
+    pub fn derive_descriptor(
+        &mut self,
+        var: DescriptorDerivation,
+    ) -> Result<DescriptorVar, CommandError> {
+        let DescriptorDerivation { base, size } = var;
+        let Some(from) = self.tys.get(base.0).cloned() else {
+            return Err(CommandError::BAD_REGISTER);
+        };
+
+        let desc = GenericDescriptor {
+            size: size.map_or(from.size, Generic::Concrete),
+            chroma: from.chroma,
+        };
+
+        let descriptor = DescriptorVar(self.tys.len());
+        self.tys.push(desc);
+
+        Ok(descriptor)
+    }
+
+    pub fn register_descriptor(
+        &mut self,
+        register: Register,
+    ) -> Result<DescriptorVar, CommandError> {
+        let generic = self.describe_reg(register)?;
+
+        let descriptor = DescriptorVar(self.tys.len());
+        self.tys.push(generic.clone());
+
+        Ok(descriptor)
+    }
+
+    /// Calculate the signature based on generics, inputs, outputs.
+    pub fn computed_signature(&self) -> CommandSignature {
+        CommandSignature {
+            vars: self.vars.clone(),
+            input: self
+                .ops
+                .iter()
+                .filter_map(|op| {
+                    if let Op::Input { desc } = op {
+                        Some(desc.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            output: self
+                .ops
+                .iter()
+                .filter_map(|op| {
+                    if let &Op::Output { src } = op {
+                        Some(
+                            self.describe_reg(src)
+                                .expect("Validated when creating output")
+                                .clone(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// Declare a function that is later linked in.
+    pub fn function(&mut self, signature: CommandSignature) -> Result<FunctionVar, CommandError> {
+        let symbol = FunctionVar(self.symbols.len());
+        self.symbols.push(signature);
+        Ok(symbol)
+    }
+
+    /// Declare an invocation of a separate, possibly generic, function.
+    pub fn invoke(
+        &mut self,
+        function: FunctionVar,
+        invoke: InvocationArguments,
+    ) -> Result<Vec<Register>, CommandError> {
+        let signature = self
+            .symbols
+            .get(function.0)
+            .ok_or(CommandError::BAD_REGISTER)?;
+
+        if signature.input.len() != invoke.arguments.len() {
+            return Err(CommandError::INVALID_CALL);
+        }
+
+        if signature.vars.len() != invoke.generics.len() {
+            return Err(CommandError::INVALID_CALL);
+        }
+
+        let generics: Vec<_> = invoke
+            .generics
+            .iter()
+            .map(|&DescriptorVar(idx)| self.tys.get(idx).cloned())
+            .collect::<Option<_>>()
+            .ok_or(CommandError::BAD_REGISTER)?;
+
+        for (tyvar, tyarg) in signature.vars.iter().zip(invoke.generics) {
+            // FIXME: fully validate generics. We need to know specifics about a type variable, in
+            // particular its locally known bounds, and a system to query these bounds. We just
+            // incidentally do not yet have any such bounds.
+            let _ = (tyvar, tyarg);
+        }
+
+        for (param, arg) in signature.input.iter().zip(invoke.arguments) {
+            let expected = param.rewrite(&generics);
+            let arg_ty = self.describe_reg(*arg)?;
+
+            if expected != *arg_ty {
+                return Err(CommandError::INVALID_CALL);
+            }
+        }
+
+        let invocation = Register(self.ops.len() + signature.output.len());
+
+        let mut results = vec![];
+        for (_result_idx, output) in signature.output.iter().enumerate() {
+            results.push(Register(self.ops.len()));
+            let desc = output.rewrite(&generics);
+
+            self.ops.push(Op::InvokedResult { invocation, desc });
+        }
+
+        self.ops.push(Op::Invoke {
+            function,
+            arguments: invoke.arguments.to_vec(),
+            results: results.clone(),
+            generics,
+        });
+
+        Ok(results)
+    }
+
     /// Declare an image as input.
     ///
-    /// Returns its register if the image has a valid descriptor, otherwise returns an error.
+    /// Returns its register if the image has a valid descriptor, otherwise panics.
     pub fn input_from(&mut self, img: PoolImage) -> Register {
         let descriptor = img.descriptor();
         self.input(descriptor)
@@ -499,6 +760,9 @@ impl CommandBuffer {
     /// Create an image with different color encoding.
     ///
     /// This goes through linear RGB, not ICC, and requires the two models to have same whitepoint.
+    ///
+    /// Note that this is not a generic operation. It selects the conversion based on the input
+    /// type which requires it to have a concrete descriptor.
     pub fn color_convert(
         &mut self,
         src: Register,
@@ -507,6 +771,10 @@ impl CommandBuffer {
     ) -> Result<Register, CommandError> {
         let desc_src = self.describe_reg(src)?;
         let conversion;
+
+        let desc_src = desc_src.as_concrete().ok_or(CommandError {
+            inner: CommandErrorKind::ConcreteDescriptorRequired,
+        })?;
 
         // Pretend that all colors with the same whitepoint will be mapped from encoded to
         // linear RGB when loading, and re-encoded in target format when storing them. This is
@@ -588,7 +856,10 @@ impl CommandBuffer {
             }
             _ => {
                 return Err(CommandError {
-                    inner: CommandErrorKind::BadDescriptor(desc_src.clone()),
+                    inner: CommandErrorKind::BadDescriptor(
+                        desc_src.clone().into(),
+                        "No conversion",
+                    ),
                 })
             }
         }
@@ -608,7 +879,8 @@ impl CommandBuffer {
                 color,
                 layout,
                 texel,
-            },
+            }
+            .into(),
         };
 
         Ok(self.push(op))
@@ -628,6 +900,10 @@ impl CommandBuffer {
         let texel_color;
         let source_wp;
         let (to_xyz_matrix, from_xyz_matrix);
+
+        let desc_src = desc_src.as_concrete().ok_or(CommandError {
+            inner: CommandErrorKind::ConcreteDescriptorRequired,
+        })?;
 
         match desc_src.color {
             Color::Rgb {
@@ -650,7 +926,10 @@ impl CommandBuffer {
             // Forward compatibility.
             _ => {
                 return Err(CommandError {
-                    inner: CommandErrorKind::BadDescriptor(desc_src.clone()),
+                    inner: CommandErrorKind::BadDescriptor(
+                        desc_src.clone().into(),
+                        "non-rgb chromatic adaptation",
+                    ),
                 })
             }
         };
@@ -669,7 +948,7 @@ impl CommandBuffer {
                 from_xyz_matrix,
                 method,
             }),
-            desc,
+            desc: desc.into(),
         };
 
         Ok(self.push(op))
@@ -685,18 +964,26 @@ impl CommandBuffer {
         let desc_below = self.describe_reg(below)?;
         let desc_above = self.describe_reg(above)?;
 
-        if desc_above.texel != desc_below.texel {
+        if desc_above.descriptor_chroma() != desc_below.descriptor_chroma() {
             return Err(CommandError {
                 inner: CommandErrorKind::ConflictingTypes(desc_below.clone(), desc_above.clone()),
             });
         }
 
+        let desc_above = desc_above.as_concrete().ok_or(CommandError {
+            inner: CommandErrorKind::ConcreteDescriptorRequired,
+        })?;
+
         if Rectangle::with_layout(&desc_above.layout) != rect {
             return Err(CommandError::OTHER);
         }
 
-        if !Rectangle::with_layout(&desc_below.layout).contains(rect) {
-            return Err(CommandError::OTHER);
+        // This is pretty much lint status, actually. Nothing intensely bad happens if we paint
+        // outside the image, we could just paint less of it.
+        if let Some(concrete) = desc_below.as_concrete() {
+            if !Rectangle::with_layout(&concrete.layout).contains(rect) {
+                return Err(CommandError::OTHER);
+            }
         }
 
         let op = Op::Binary {
@@ -717,20 +1004,25 @@ impl CommandBuffer {
         src: Register,
         channel: ColorChannel,
     ) -> Result<Register, CommandError> {
-        let desc = self.describe_reg(src)?;
-        let texel = desc
+        let desc_src = self.describe_reg(src)?;
+
+        let desc_src = desc_src.as_concrete().ok_or(CommandError {
+            inner: CommandErrorKind::ConcreteDescriptorRequired,
+        })?;
+
+        let texel = desc_src
             .texel
             .channel_texel(channel)
             .ok_or(CommandError::OTHER)?;
 
         let layout = ByteLayout {
             texel_stride: texel.bits.bytes(),
-            width: desc.layout.width,
-            height: desc.layout.height,
-            row_stride: (texel.bits.bytes() as u64) * u64::from(desc.layout.width),
+            width: desc_src.layout.width,
+            height: desc_src.layout.height,
+            row_stride: (texel.bits.bytes() as u64) * u64::from(desc_src.layout.width),
         };
 
-        let color = desc.color.clone();
+        let color = desc_src.color.clone();
 
         // Check that we can actually extract that channel.
         // This could be unimplemented if the position of a particular channel is not yet a stable
@@ -746,7 +1038,8 @@ impl CommandBuffer {
                 color,
                 layout,
                 texel,
-            },
+            }
+            .into(),
         };
 
         Ok(self.push(op))
@@ -761,26 +1054,70 @@ impl CommandBuffer {
     /// One important use of this method is to add or removed the color interpretation of an image.
     /// This can be necessary when it has been algorithmically created or when one wants to
     /// intentionally ignore such meaning.
-    pub fn transmute(&mut self, src: Register, into: Descriptor) -> Result<Register, CommandError> {
-        let desc = self.describe_reg(src)?;
+    pub fn transmute(
+        &mut self,
+        src: Register,
+        target: Descriptor,
+    ) -> Result<Register, CommandError> {
+        self.transmute_generic(src, target.into())
+    }
 
+    /// Reinterpret the bytes of an image as another type.
+    ///
+    /// Like [`Self::transmute`] except the target can be a generic. Note however that it must be
+    /// provable that the texels contain the same number of bytes and align in their storage layout
+    /// (see [`SampleBits::bytes`]). This requires both texel types to be concrete or to be the
+    /// exact same generic.
+    ///
+    /// Other methods for demonstrating this as a bound might be added at a later point but are
+    /// essentially a form of dependent typing, so don't count too much on it.
+    pub fn transmute_generic(
+        &mut self,
+        src: Register,
+        into: GenericDescriptor,
+    ) -> Result<Register, CommandError> {
+        let source = self.describe_reg(src)?;
         let supposed_type = into;
 
-        if desc.layout != supposed_type.layout {
+        if source.size() != supposed_type.size() {
             return Err(CommandError {
-                inner: CommandErrorKind::BadDescriptor(supposed_type),
+                inner: CommandErrorKind::BadDescriptor(
+                    supposed_type,
+                    "invalid transmute with mismatched size",
+                ),
             });
         }
 
-        if desc.texel.bits.bytes() != supposed_type.texel.bits.bytes() {
+        // Predict if monomorphize will only do correct transmutes. A transmute re-interprets the
+        // buffer containing bit data in storage layout.
+        fn can_transmute(source: Generic<(Texel, Color)>, target: Generic<(Texel, Color)>) -> bool {
+            match (source, target) {
+                (Generic::Generic(vsource), Generic::Generic(vtarget)) => vsource == vtarget,
+                (Generic::Concrete((source, _)), Generic::Concrete((target, _))) => {
+                    source.bits.bytes() == target.bits.bytes()
+                }
+                _ => false,
+            }
+        }
+
+        if !can_transmute(
+            source.descriptor_chroma(),
+            supposed_type.descriptor_chroma(),
+        ) {
             return Err(CommandError {
-                inner: CommandErrorKind::ConflictingTypes(desc.clone(), supposed_type),
+                inner: CommandErrorKind::ConflictingTypes(source.clone(), supposed_type),
             });
         }
 
-        if !supposed_type.is_consistent() {
+        if !supposed_type
+            .as_concrete()
+            .map_or(true, |descriptor| descriptor.is_consistent())
+        {
             return Err(CommandError {
-                inner: CommandErrorKind::BadDescriptor(supposed_type),
+                inner: CommandErrorKind::BadDescriptor(
+                    supposed_type,
+                    "invalid transmute with inconsistent result",
+                ),
             });
         }
 
@@ -798,6 +1135,9 @@ impl CommandBuffer {
     /// This performs an implicit conversion of the overlaid data to the color channels which is
     /// performed as if by transmutation. However, contrary to the transmutation we will _only_
     /// allow the sample parts to be changed arbitrarily.
+    ///
+    /// To perform a mix of two images with differing texels or colors, as if by rendering rather
+    /// than as if by transmute, use `mix` [FIXME: not yet implemented].
     pub fn inject(
         &mut self,
         below: Register,
@@ -805,15 +1145,33 @@ impl CommandBuffer {
         above: Register,
     ) -> Result<Register, CommandError> {
         let desc_below = self.describe_reg(below)?;
-        let expected_texel = desc_below
-            .texel
+        let desc_above = self.describe_reg(above)?.clone();
+
+        let Generic::Concrete((below_texel, below_color)) = desc_below.descriptor_chroma() else {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(
+                    desc_below.clone(),
+                    "inject into non-concrete texel",
+                ),
+            });
+        };
+
+        let Generic::Concrete((above_texel, above_color)) = desc_above.descriptor_chroma() else {
+            return Err(CommandError {
+                inner: CommandErrorKind::BadDescriptor(
+                    desc_above.clone(),
+                    "inject from non-concrete texel",
+                ),
+            });
+        };
+
+        let expected_texel = below_texel
             .channel_texel(channel)
             .ok_or(CommandError::OTHER)?;
-        let mut desc_above = self.describe_reg(above)?.clone();
 
-        if desc_above.texel.parts.num_components() != expected_texel.parts.num_components() {
-            let wanted = Descriptor {
-                texel: expected_texel,
+        if above_texel.parts.num_components() != expected_texel.parts.num_components() {
+            let wanted = GenericDescriptor {
+                chroma: Generic::Concrete((expected_texel, below_color)),
                 ..desc_below.clone()
             };
 
@@ -822,9 +1180,11 @@ impl CommandBuffer {
             });
         }
 
-        // Override the sample part interpretation.
-        let from_channels = desc_above.texel.clone();
-        desc_above.texel.parts = expected_texel.parts;
+        let from_channels = above_texel.clone();
+        // Override the sample part interpretation for comparison. We ignore this and compare
+        // everything else. This is because we change specifically the parts by this operation.
+        let mut above_texel = above_texel;
+        above_texel.parts = expected_texel.parts;
 
         // FIXME: should we do parsing instead of validation?
         // Some type like ChannelPosition but for multiple.
@@ -832,9 +1192,9 @@ impl CommandBuffer {
             return Err(CommandError::OTHER);
         }
 
-        if expected_texel != desc_above.texel {
-            let wanted = Descriptor {
-                texel: expected_texel,
+        if (&expected_texel, &below_color) != (&above_texel, &above_color) {
+            let wanted = GenericDescriptor {
+                chroma: Generic::Concrete((expected_texel, below_color)),
                 ..desc_below.clone()
             };
 
@@ -866,7 +1226,7 @@ impl CommandBuffer {
         config: Palette,
         indices: Register,
     ) -> Result<Register, CommandError> {
-        let desc = self.describe_reg(palette)?;
+        let color_desc = self.describe_reg(palette)?;
         let idx_desc = self.describe_reg(indices)?;
 
         // FIXME: check that channels are actually in indices' color type.
@@ -885,12 +1245,10 @@ impl CommandBuffer {
         };
 
         // Compute the target layout (and that we can represent it).
-        let target_layout = Descriptor::with_texel(
-            desc.texel.clone(),
-            idx_desc.layout.width,
-            idx_desc.layout.height,
-        )
-        .ok_or(CommandError::OTHER)?;
+        let target_layout = GenericDescriptor {
+            chroma: color_desc.descriptor_chroma(),
+            ..idx_desc.clone()
+        };
 
         let op = Op::Binary {
             lhs: palette,
@@ -901,10 +1259,7 @@ impl CommandBuffer {
                 base_x: config.width_base,
                 base_y: config.height_base,
             }),
-            desc: Descriptor {
-                layout: target_layout.layout,
-                ..desc.clone()
-            },
+            desc: target_layout,
         };
 
         Ok(self.push(op))
@@ -948,18 +1303,24 @@ impl CommandBuffer {
     pub fn solid(&mut self, describe: Descriptor, data: &[u8]) -> Result<Register, CommandError> {
         if !describe.is_consistent() {
             return Err(CommandError {
-                inner: CommandErrorKind::BadDescriptor(describe),
+                inner: CommandErrorKind::BadDescriptor(
+                    describe.into(),
+                    "inconsistent constant color image created",
+                ),
             });
         }
 
         if data.len() != usize::from(describe.layout.texel_stride) {
             return Err(CommandError {
-                inner: CommandErrorKind::BadDescriptor(describe),
+                inner: CommandErrorKind::BadDescriptor(
+                    describe.into(),
+                    "inconsistent color description",
+                ),
             });
         }
 
         Ok(self.push(Op::Construct {
-            desc: describe,
+            desc: describe.into(),
             op: ConstructOp::Solid(data.to_owned()),
         }))
     }
@@ -977,18 +1338,21 @@ impl CommandBuffer {
     ) -> Result<Register, CommandError> {
         if !describe.is_consistent() {
             return Err(CommandError {
-                inner: CommandErrorKind::BadDescriptor(describe),
+                inner: CommandErrorKind::BadDescriptor(describe.into(), "inconsistent normal2d"),
             });
         }
 
         if describe.texel.parts != SampleParts::Luma && describe.texel.parts != SampleParts::LumaA {
             return Err(CommandError {
-                inner: CommandErrorKind::BadDescriptor(describe),
+                inner: CommandErrorKind::BadDescriptor(
+                    describe.into(),
+                    "normal2d for non-LumA texel",
+                ),
             });
         }
 
         Ok(self.push(Op::Construct {
-            desc: describe,
+            desc: describe.into(),
             op: ConstructOp::DistributionNormal(distribution),
         }))
     }
@@ -1004,12 +1368,15 @@ impl CommandBuffer {
     ) -> Result<Register, CommandError> {
         if !describe.is_consistent() {
             return Err(CommandError {
-                inner: CommandErrorKind::BadDescriptor(describe),
+                inner: CommandErrorKind::BadDescriptor(
+                    describe.into(),
+                    "inconsistent descriptor for fractal noise",
+                ),
             });
         }
 
         Ok(self.push(Op::Construct {
-            desc: describe,
+            desc: describe.into(),
             op: ConstructOp::DistributionNoise(distribution),
         }))
     }
@@ -1027,12 +1394,15 @@ impl CommandBuffer {
     ) -> Result<Register, CommandError> {
         if !describe.is_consistent() {
             return Err(CommandError {
-                inner: CommandErrorKind::BadDescriptor(describe),
+                inner: CommandErrorKind::BadDescriptor(
+                    describe.into(),
+                    "inconsistent descriptor for bilinear",
+                ),
             });
         }
 
         Ok(self.push(Op::Construct {
-            desc: describe,
+            desc: describe.into(),
             op: ConstructOp::Bilinear(distribution),
         }))
     }
@@ -1048,7 +1418,7 @@ impl CommandBuffer {
         let lhs = self.describe_reg(below)?.clone();
         let rhs = self.describe_reg(above)?.clone();
 
-        if lhs.texel != rhs.texel {
+        if lhs.descriptor_chroma() != rhs.descriptor_chroma() {
             return Err(CommandError::TYPE_ERR);
         }
 
@@ -1109,7 +1479,7 @@ impl CommandBuffer {
     /// Declare an output.
     ///
     /// Outputs MUST later be bound from the pool during launch.
-    pub fn output(&mut self, src: Register) -> Result<(Register, Descriptor), CommandError> {
+    pub fn output(&mut self, src: Register) -> Result<(Register, GenericDescriptor), CommandError> {
         let outformat = self.describe_reg(src)?.clone();
         // Ignore this, it doesn't really produce a register.
         let register = self.push(Op::Output { src });
@@ -1124,6 +1494,10 @@ impl CommandBuffer {
     pub fn render(&mut self, src: Register) -> Result<(Register, Descriptor), CommandError> {
         let outformat = self.describe_reg(src)?.clone();
 
+        let outformat = outformat.as_concrete().ok_or(CommandError {
+            inner: CommandErrorKind::ConcreteDescriptorRequired,
+        })?;
+
         // FIXME: this is too conservative! We need to ensure that our internal assumption about
         // the texture descriptor is compatible with available wgpu formats (and yields the same
         // result).
@@ -1137,16 +1511,120 @@ impl CommandBuffer {
     }
 
     pub fn compile(&self) -> Result<Program, CompileError> {
-        let steps = self.ops.len();
+        self.link(&[], &[], &[])
+    }
+
+    /// An unergonomic interface for linking a collection of different command buffers to a
+    /// program. The `functions` are all buffers besides `self` that are linked. `links` describes
+    /// the relation between them. For each buffer (`self` at 0 then incremented across the array)
+    /// a list match all function declarations in that buffer to the command supplying the
+    /// definition. The generic signature must match each declaration it is linked to.
+    ///
+    /// FIXME: higher level interface here. We should be able to configured links with pairs of a
+    /// `FunctionVar` and a higher-level wrapper around a `CommandBuffer` index. Also it makes not
+    /// much sense to treat the `self` special except as a defaulted entry point and for the
+    /// `compile` helper that does not require any linkage.
+    pub fn link(
+        &self,
+        tys: &[Descriptor],
+        functions: &[CommandBuffer],
+        links: &[&[usize]],
+    ) -> Result<Program, CompileError> {
+        // We can default to 'no links', which is fine..
+        if functions.len() + 1 < links.len() {
+            eprintln!("Bad link listings count");
+            // Error: more links than functions..
+            return Err(CompileError::NotYetImplemented);
+        }
+
+        let mut high_ops = vec![];
+
+        let mut monomorphic = Monomorphizing {
+            stack: vec![],
+            monomorphic: HashMap::new(),
+            commands: Some(self).into_iter().chain(functions).collect(),
+        };
+
+        monomorphic.push_function(LinkedMonomorphicSignature {
+            link_idx: 0,
+            tys: Cow::Borrowed(tys).into_owned(),
+        });
+
+        impl Monomorphizing<'_> {
+            /// Assign a program function index to a specific generic instantiation.
+            ///
+            /// Remembers to process the monomorphization later if it was not instantiated yet.
+            pub fn push_function(&mut self, sig: LinkedMonomorphicSignature) -> Function {
+                let idx = self.monomorphic.len();
+
+                let stack = &mut self.stack;
+                let command = &self.commands[sig.link_idx];
+
+                *self.monomorphic.entry(sig).or_insert_with_key(|key| {
+                    stack.push(CommandMonomorphization {
+                        link_idx: key.link_idx,
+                        command,
+                        tys: Cow::Owned(key.tys.to_vec()),
+                    });
+
+                    Function(idx)
+                })
+            }
+        }
+
+        let mut functions = vec![];
+        while let Some(top) = monomorphic.stack.pop() {
+            let CommandMonomorphization {
+                link_idx,
+                command,
+                tys,
+            } = top;
+
+            let links = links.get(link_idx).copied().unwrap_or_default();
+            let linked = Self::link_in(command, tys, &mut high_ops, &mut monomorphic, links)?;
+            // FIXME: expand further requested generic instantiations.
+            functions.push(linked);
+        }
+
+        Ok(Program {
+            ops: high_ops,
+            functions,
+            entry_index: 0,
+            buffer_by_op: HashMap::default(),
+            texture_by_op: HashMap::default(),
+        })
+    }
+
+    fn link_in(
+        command: &Self,
+        tys: Cow<'_, [Descriptor]>,
+        high_ops: &mut Vec<High>,
+        mono: &mut Monomorphizing,
+        functions: &[usize],
+    ) -> Result<FunctionLinked, CompileError> {
+        if functions.len() != command.symbols.len() {
+            eprintln!("Bad linked parameter count");
+            return Err(CompileError::NotYetImplemented);
+        }
+
+        if tys.len() != command.vars.len() {
+            eprintln!("Bad type generic count");
+            return Err(CompileError::NotYetImplemented);
+        }
+
+        let ops = &command.ops;
+        let steps = ops.len();
+        let tys = tys.as_ref();
+        let start = high_ops.len();
 
         let mut last_use = vec![0; steps];
         let mut first_use = vec![steps; steps];
 
-        let mut high_ops = vec![];
+        let mut image_buffers = ImageBufferPlan::default();
 
         // Liveness analysis.
-        for (back_idx, op) in self.ops.iter().rev().enumerate() {
-            let idx = self.ops.len() - 1 - back_idx;
+        for (back_idx, op) in ops.iter().rev().enumerate() {
+            let idx = ops.len() - 1 - back_idx;
             match op {
                 Op::Input { .. }
                 | Op::Construct { .. }
@@ -1190,15 +1668,38 @@ impl CommandBuffer {
                     last_use[lhs] = last_use[lhs].max(idx);
                     first_use[lhs] = first_use[lhs].min(idx);
                 }
+                Op::Invoke {
+                    function: _,
+                    arguments: args,
+                    results: _,
+                    generics: _,
+                } => {
+                    for &Register(arg) in args {
+                        last_use[arg] = last_use[arg].max(idx);
+                        first_use[arg] = first_use[arg].min(idx);
+                    }
+                }
+                // Not a use of the return value itself.
+                &Op::InvokedResult {
+                    invocation: Register(invocation),
+                    ..
+                } => {
+                    last_use[invocation] = last_use[invocation].max(idx);
+                    first_use[invocation] = first_use[invocation].min(idx);
+                }
             }
         }
 
-        let mut image_buffers = ImageBufferPlan::default();
         let mut reg_to_texture: HashMap<Register, Texture> = HashMap::default();
 
-        for (idx, op) in self.ops.iter().enumerate() {
+        let mut signature_in: Vec<Register> = vec![];
+        let mut signature_out: Vec<Register> = vec![];
+
+        let mut realize_texture = |idx, op: &Op| {
             let liveness = first_use[idx]..last_use[idx];
-            let descriptor = self
+
+            // FIXME: not all our High ops actually allocate textures..
+            let descriptor = command
                 .describe_reg(if let Op::Output { src } = op {
                     *src
                 } else if let Op::Render { src } = op {
@@ -1208,36 +1709,55 @@ impl CommandBuffer {
                 })
                 .expect("A non-output register");
 
-            let ImageBufferAssignment { buffer: _, texture } =
-                image_buffers.allocate_for(descriptor, liveness);
+            let descriptor = descriptor.monomorphize(tys);
 
+            let ImageBufferAssignment { buffer: _, texture } =
+                image_buffers.allocate_for(&descriptor, liveness);
+
+            Ok(texture)
+        };
+
+        for (idx, op) in ops.iter().enumerate() {
             high_ops.push(High::StackPush(Frame {
                 name: format!("Command: {:#?}", op),
             }));
 
             match op {
                 Op::Input { desc } => {
-                    high_ops.push(High::Input(Register(idx), desc.clone()));
+                    let texture = realize_texture(idx, op)?;
+                    let descriptor = desc.monomorphize(tys);
+                    high_ops.push(High::Input(Register(idx), descriptor));
                     reg_to_texture.insert(Register(idx), texture);
+                    signature_in.push(Register(idx));
                 }
                 &Op::Output { src } => {
+                    let _texture = realize_texture(idx, op)?;
+                    signature_out.push(Register(idx));
+
                     high_ops.push(High::Output {
                         src,
                         dst: Register(idx),
                     });
                 }
                 &Op::Render { src } => {
+                    let _texture = realize_texture(idx, op)?;
+
                     high_ops.push(High::Render {
                         src,
                         dst: Register(idx),
                     });
                 }
-                Op::Construct { desc: _, op } => {
-                    match op {
+                Op::Construct {
+                    desc: _,
+                    op: construct_op,
+                } => {
+                    let texture = realize_texture(idx, op)?;
+
+                    match construct_op {
                         &ConstructOp::DistributionNormal(ref distribution) => {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     shader: FragmentShader::Normal2d(distribution.clone()),
                                 },
                             })
@@ -1245,14 +1765,14 @@ impl CommandBuffer {
                         ConstructOp::DistributionNoise(ref noise_params) => {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     shader: FragmentShader::FractalNoise(noise_params.clone()),
                                 },
                             })
                         }
                         ConstructOp::Bilinear(bilinear) => high_ops.push(High::Construct {
                             dst: Target::Discard(texture),
-                            fn_: Function::PaintFullScreen {
+                            fn_: Initializer::PaintFullScreen {
                                 shader: FragmentShader::Bilinear(bilinear.clone()),
                             },
                         }),
@@ -1261,15 +1781,21 @@ impl CommandBuffer {
 
                     reg_to_texture.insert(Register(idx), texture);
                 }
-                Op::Unary { desc: _, src, op } => {
-                    match op {
+                Op::Unary {
+                    desc: _,
+                    src,
+                    op: unary_op,
+                } => {
+                    let texture = realize_texture(idx, op)?;
+
+                    match unary_op {
                         &UnaryOp::Crop(region) => {
                             let target =
                                 Rectangle::with_width_height(region.width(), region.height());
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintToSelection {
+                                fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[src],
                                     selection: region,
                                     target: target.into(),
@@ -1293,7 +1819,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     shader: FragmentShader::LinearColorMatrix(
                                         shaders::LinearColorTransform {
                                             matrix: matrix.into(),
@@ -1320,7 +1846,7 @@ impl CommandBuffer {
                             // ephemeral intermediate attachment?
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     shader: color.to_shader(),
                                 },
                             });
@@ -1330,7 +1856,7 @@ impl CommandBuffer {
 
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     // This will grab the right channel, that is all of them.
                                     // The actual conversion is done in de-staging of the result.
                                     // TODO: evaluate if this is the right way to do it. We could
@@ -1346,7 +1872,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen { shader },
+                                fn_: Initializer::PaintFullScreen { shader },
                             })
                         }
                         UnaryOp::Transmute => high_ops.push(High::Copy {
@@ -1361,19 +1887,24 @@ impl CommandBuffer {
                     desc: _,
                     lhs,
                     rhs,
-                    op,
+                    op: binary_op,
                 } => {
-                    let lower_region = Rectangle::from(self.describe_reg(*lhs).unwrap());
-                    let upper_region = Rectangle::from(self.describe_reg(*rhs).unwrap());
+                    let texture = realize_texture(idx, op)?;
 
-                    match op {
+                    let lhs_descriptor = command.describe_reg(*lhs).unwrap().monomorphize(tys);
+                    let rhs_descriptor = command.describe_reg(*rhs).unwrap().monomorphize(tys);
+
+                    let lower_region = Rectangle::from(&lhs_descriptor);
+                    let upper_region = Rectangle::from(&rhs_descriptor);
+
+                    match binary_op {
                         BinaryOp::Affine(affine) => {
                             let affine_matrix = RowMatrix::new(affine.transformation);
 
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintToSelection {
+                                fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[lhs],
                                     selection: lower_region,
                                     target: lower_region.into(),
@@ -1385,7 +1916,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
                             high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
-                                fn_: Function::PaintToSelection {
+                                fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[rhs],
                                     selection: upper_region,
                                     target: QuadTarget::from(upper_region).affine(&affine_matrix),
@@ -1405,7 +1936,7 @@ impl CommandBuffer {
 
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     shader: FragmentShader::Inject(shaders::inject::Shader {
                                         mix: channel.into_vec4(),
                                         color: from_channels.channel_weight_vec4().unwrap(),
@@ -1417,7 +1948,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Function::PaintToSelection {
+                                fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[lhs],
                                     selection: lower_region,
                                     target: lower_region.into(),
@@ -1429,7 +1960,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
                             high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
-                                fn_: Function::PaintToSelection {
+                                fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[rhs],
                                     selection: upper_region,
                                     target: (*placement).into(),
@@ -1444,7 +1975,7 @@ impl CommandBuffer {
 
                             high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
-                                fn_: Function::PaintFullScreen {
+                                fn_: Initializer::PaintFullScreen {
                                     shader: FragmentShader::Palette(shader.clone()),
                                 },
                             });
@@ -1454,6 +1985,7 @@ impl CommandBuffer {
                     reg_to_texture.insert(Register(idx), texture);
                 }
                 Op::Dynamic { call, command, .. } => {
+                    let texture = realize_texture(idx, op)?;
                     let (op_unary, op_binary, arguments);
 
                     match call {
@@ -1479,14 +2011,73 @@ impl CommandBuffer {
 
                     high_ops.push(High::Construct {
                         dst: Target::Discard(texture),
-                        fn_: Function::PaintFullScreen {
+                        fn_: Initializer::PaintFullScreen {
                             shader: FragmentShader::Dynamic(command.clone()),
                         },
                     })
                 }
+                Op::InvokedResult { .. } => {
+                    let texture = realize_texture(idx, op)?;
+
+                    high_ops.push(High::Uninit {
+                        dst: Target::Discard(texture),
+                    });
+
+                    reg_to_texture.insert(Register(idx), texture);
+                }
+                Op::Invoke {
+                    function,
+                    arguments,
+                    results,
+                    generics,
+                } => {
+                    let monomorphic_tys: Vec<_> = generics
+                        .iter()
+                        .map(|gen| gen.monomorphize(tys))
+                        .collect::<_>();
+
+                    let &FunctionVar(function_idx) = function;
+                    let link_idx = *functions
+                        .get(function_idx)
+                        .ok_or(CompileError::NotYetImplemented)?;
+
+                    let function = mono.push_function(LinkedMonomorphicSignature {
+                        link_idx,
+                        tys: monomorphic_tys,
+                    });
+
+                    let mut image_io = vec![];
+
+                    for &register in arguments {
+                        // Arguments must precede the function and already be laid out.
+                        if register.0 >= idx {
+                            return Err(CompileError::NotYetImplemented);
+                        }
+
+                        let texture = realize_texture(register.0, &ops[register.0])?;
+                        image_io.push(CallBinding::InTexture { register, texture });
+                    }
+
+                    for &register in results {
+                        // Results must precede the function and already be laid out. They are not
+                        // initialized but initialized on return.
+                        if register.0 >= idx {
+                            return Err(CompileError::NotYetImplemented);
+                        }
+
+                        let texture = realize_texture(register.0, &ops[register.0])?;
+                        image_io.push(CallBinding::OutTexture { register, texture });
+                    }
+
+                    high_ops.push(High::Call {
+                        function,
+                        image_io_buffers: Arc::from(image_io),
+                    });
+                }
                 // In case we add a new case.
                 #[allow(unreachable_patterns)]
                 _ => {
+                    eprintln!("Unimplemented operation");
                     return Err(CompileError::NotYetImplemented);
                 }
             }
@@ -1495,27 +2086,38 @@ impl CommandBuffer {
             high_ops.push(High::StackPop);
         }
 
-        Ok(Program {
-            ops: high_ops,
+        let end = high_ops.len();
+
+        // The registers which callers must fill. This must match the order that CallBinding is
+        // passed at call sites, i.e. be consistent with the signature.
+        let signature_registers = signature_in.into_iter().chain(signature_out).collect();
+
+        Ok(FunctionLinked {
+            ops: start..end,
             image_buffers,
-            buffer_by_op: HashMap::default(),
-            texture_by_op: HashMap::default(),
+            signature_registers,
         })
     }
 
     /// Get the descriptor for a register.
-    fn describe_reg(&self, Register(reg): Register) -> Result<&Descriptor, CommandError> {
+    fn describe_reg(&self, Register(reg): Register) -> Result<&GenericDescriptor, CommandError> {
         match self.ops.get(reg) {
             None | Some(Op::Output { .. }) | Some(Op::Render { .. }) => {
                 Err(CommandError::BAD_REGISTER)
             }
-            Some(Op::Input { desc })
+            Some(Op::Invoke { .. }) => {
+                // This does not describe results directly.
+                Err(CommandError::BAD_REGISTER)
+            }
+            Some(Op::InvokedResult { desc, .. })
+            | Some(Op::Input { desc })
             | Some(Op::Construct { desc, .. })
             | Some(Op::Unary { desc, .. })
             | Some(Op::Binary { desc, .. })
             | Some(Op::Dynamic { desc, .. }) => Ok(desc),
         }
     }
+
     fn push(&mut self, op: Op) -> Register {
         let reg = Register(self.ops.len());
         self.ops.push(op);
@@ -1559,7 +2161,7 @@ impl CommandBuffer {
                 },
                 num_args: 0,
             },
-            desc,
+            desc: desc.into(),
         })
     }
 
@@ -1571,6 +2173,138 @@ impl CommandBuffer {
     /// Record a _binary operator_.
     pub fn binary_dynamic(&mut self, _: Register, _: Register, _: &dyn ShaderCommand) -> Register {
         todo!()
+    }
+}
+
+impl CommandSignature {
+    pub fn is_declaration_of(&self, actual: &CommandSignature) -> bool {
+        if self.vars.len() != actual.vars.len() {
+            return false;
+        }
+
+        for (decl, actual) in self.vars.iter().zip(&actual.vars) {
+            if !decl.contains_bounds(actual) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+impl GenericDescriptor {
+    /// Query if this describes a monomorphic descriptor.
+    ///
+    /// At the moment this means a fully constrained descriptor where both size and chroma are
+    /// defined. It's a bit odd that this would be an overlapping property with having been
+    /// constructed from an actually concrete defined descriptor. If we had a non-deterministic
+    /// layout algorithm (i.e. multiple permissible layouts for one combination of size/chroma)
+    /// then this might inadvertently throw away some of this information. But for now this
+    /// information is compile time only, the actual dependence of operational semantics on layout
+    /// information is evaluated at runtime. (FIXME: I will have regretted writing this).
+    pub fn as_concrete(&self) -> Option<Descriptor> {
+        let Generic::Concrete((w, h)) = self.size else {
+            return None;
+        };
+
+        let Generic::Concrete((texel, color)) = &self.chroma else {
+            return None;
+        };
+
+        Descriptor::with_texel(texel.clone(), w, h).map(|mut desc| {
+            desc.color = color.clone();
+            desc
+        })
+    }
+
+    /// FIXME: fallible. If we change the texel from something small to something very large we can
+    /// exceed the allocation limits that are necessary to express the layout.
+    pub fn with_chroma(&self, texel: Texel, color: Color) -> Self {
+        GenericDescriptor {
+            chroma: Generic::Concrete((texel, color)),
+            ..self.clone()
+        }
+    }
+
+    pub fn monomorphize(&self, decl: &[Descriptor]) -> Descriptor {
+        let (w, h) = match &self.size {
+            Generic::Concrete(descriptor) => descriptor.clone(),
+            Generic::Generic(idx) => decl[idx.0].size(),
+        };
+
+        let (texel, color) = match &self.chroma {
+            Generic::Concrete(tuple) => tuple.clone(),
+            Generic::Generic(idx) => {
+                let from = &decl[idx.0];
+                (from.texel.clone(), from.color.clone())
+            }
+        };
+
+        Descriptor::with_texel(texel, w, h)
+            .map(|mut desc| {
+                desc.color = color;
+                desc
+            })
+            .expect("changing texel and color to something that does not fit memory")
+    }
+
+    /// Apply an outer variable definition, replacing generics by at least as concrete terms.
+    ///
+    /// Does not verify any bounds of the rewrites! Which we'll need to do if we had associated
+    /// constants and the rewrite was looking into paths and impls. Consider a trait (similar to
+    /// the Rust type system) / type family such as `LinearizedColor` that associates the linear
+    /// optical colorspace to an arbitrary electrical color encoding. Then we might have the
+    /// signature written in pseudo-code:
+    ///
+    /// ```text
+    ///     function <C: LinearizedColor>(arg0: {C; 256×256}, arg1: {C::Linear; 256×256})
+    /// ```
+    ///
+    /// Now if we rewrite with [C = sRGB] then we want the concrete [C::Linear=CIE-RGB-Wp-D70]
+    /// correspondence. But if we tried [C = CYMK] we have nonsense. Here we allow this function to
+    /// panic, a check must happen earlier.
+    pub fn rewrite(&self, decl: &[GenericDescriptor]) -> Self {
+        GenericDescriptor {
+            size: match &self.size {
+                &Generic::Concrete(size) => Generic::Concrete(size),
+                Generic::Generic(idx) => decl[idx.0].size.clone(),
+            },
+            chroma: match &self.chroma {
+                Generic::Concrete(chroma) => Generic::Concrete(chroma.clone()),
+                Generic::Generic(idx) => decl[idx.0].chroma.clone(),
+            },
+        }
+    }
+
+    pub fn size(&self) -> Generic<(u32, u32)> {
+        self.size.clone()
+    }
+
+    pub fn descriptor_chroma(&self) -> Generic<(Texel, Color)> {
+        self.chroma.clone()
+    }
+}
+
+impl From<Descriptor> for GenericDescriptor {
+    fn from(desc: Descriptor) -> Self {
+        let size = desc.size();
+        let chroma = (desc.texel.clone(), desc.color.clone());
+
+        GenericDescriptor {
+            size: Generic::Concrete(size),
+            chroma: Generic::Concrete(chroma),
+        }
+    }
+}
+
+impl TyVarBounds {
+    pub fn contains_bounds(&self, actual: &TyVarBounds) -> bool {
+        self.is_empty() && actual.is_empty()
+    }
+
+    fn is_empty(&self) -> bool {
+        // FIXME: if we collect the list.
+        true
     }
 }
 
@@ -1954,6 +2688,9 @@ impl CommandError {
     /// Specifies that a register reference was invalid.
     const BAD_REGISTER: Self = Self::OTHER;
 
+    /// Specifies that a register reference was invalid.
+    const INVALID_CALL: Self = Self::OTHER;
+
     /// This has not yet been implemented, sorry.
     ///
     /// Errors of this kind will be removed over the course of bringing the crate to a first stable
@@ -1968,7 +2705,7 @@ impl CommandError {
             self.inner,
             CommandErrorKind::GenericTypeError
                 | CommandErrorKind::ConflictingTypes(_, _)
-                | CommandErrorKind::BadDescriptor(_)
+                | CommandErrorKind::BadDescriptor(_, _)
         )
     }
 }
@@ -2017,5 +2754,5 @@ fn simple_program() {
     let (_, outformat) = commands.output(result).expect("Valid for output");
 
     let _ = commands.compile().expect("Could build command buffer");
-    assert_eq!(outformat.layout, expected);
+    assert_eq!(outformat.as_concrete().map(|x| x.layout), Some(expected));
 }

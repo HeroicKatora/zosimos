@@ -1,4 +1,4 @@
-use core::{future::Future, iter::once, marker::Unpin, pin::Pin};
+use core::{future::Future, iter::once, marker::Unpin, ops::Range, pin::Pin};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -35,7 +35,16 @@ pub struct Executable {
     /// Input/Output buffers used for execution.
     pub(crate) image_io_buffers: Vec<Image>,
     /// The map from registers to the index in image data.
+    /// FIXME: this makes us a little inflexible for multiple entry points. I'd like singular entry
+    /// point to not become too engrained in thinking and design, avoiding what went wrong with
+    /// SPIR-V. On the other hand, elf does not have any such ideas either. Anyways the whole
+    /// program info could also be rebuildable from other parts and in particular `ProgramInfo` is
+    /// designed for one entry point, too. Its buffer recovery can not work with a function called
+    /// multiple times.
     pub(crate) io_map: Arc<IoMap>,
+    /// The main function to start execution at. This is the function for which ll the other
+    /// descriptors and the io_map will apply.
+    pub(crate) entry_point: program::Function,
     /// The capabilities required from devices to execute this.
     pub(crate) capabilities: Capabilities,
 }
@@ -48,6 +57,7 @@ pub(crate) struct ProgramInfo {
     /// When event `val` is already achieved, op `key` becomes irrelevant.
     /// TODO: some instruction results supply multiple events.
     pub(crate) skip_by_op: HashMap<program::Instruction, program::Event>,
+    pub(crate) functions: HashMap<program::Function, program::FunctionFrame>,
 }
 
 /// Configures devices and input/output buffers for an executable.
@@ -90,12 +100,14 @@ pub struct Execution {
 
 pub(crate) struct Host {
     pub(crate) machine: Machine,
-    pub(crate) descriptors: Descriptors,
-    pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
-    pub(crate) image_io_buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
     pub(crate) io_map: Arc<IoMap>,
     pub(crate) info: Arc<ProgramInfo>,
+
+    /// Variable information during execution.
+    pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
+    pub(crate) descriptors: Descriptors,
+    pub(crate) call_stack: Vec<Descriptors>,
     pub(crate) debug_stack: Vec<Frame>,
     pub(crate) usage: ResourcesUsed,
 
@@ -194,13 +206,14 @@ pub(crate) struct Frame {
 }
 
 pub(crate) struct InitialState {
+    pub(crate) entry_point: program::Function,
     pub(crate) instructions: Arc<[Low]>,
     pub(crate) info: Arc<ProgramInfo>,
     pub(crate) device: Device,
     pub(crate) queue: Queue,
     pub(crate) image_io_buffers: Vec<Image>,
     pub(crate) binary_data: Vec<u8>,
-    pub(crate) io_map: IoMap,
+    pub(crate) io_map: Arc<IoMap>,
 }
 
 /// An image owned by the execution state but compatible with extracting it.
@@ -215,7 +228,7 @@ pub(crate) struct Image {
     pub(crate) key: Option<PoolKey>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct IoMap {
     /// Map input registers to their index in `buffers`.
     pub(crate) inputs: HashMap<Register, usize>,
@@ -227,9 +240,10 @@ pub struct IoMap {
 
 #[derive(Default)]
 pub(crate) struct Descriptors {
+    pub(crate) image_io_buffers: Vec<Image>,
     bind_groups: Vec<wgpu::BindGroup>,
     bind_group_layouts: Vec<wgpu::BindGroupLayout>,
-    buffers: Vec<wgpu::Buffer>,
+    buffers: Vec<Arc<wgpu::Buffer>>,
     command_buffers: Vec<wgpu::CommandBuffer>,
     shaders: Vec<wgpu::ShaderModule>,
     pipeline_layouts: Vec<wgpu::PipelineLayout>,
@@ -323,7 +337,7 @@ pub struct Retire<'pool> {
 
 pub(crate) struct Machine {
     instructions: Arc<[Low]>,
-    instruction_pointer: usize,
+    instruction_pointer: Vec<Range<usize>>,
 }
 
 #[derive(Debug)]
@@ -340,6 +354,15 @@ impl core::fmt::Display for StartError {
 #[derive(Debug)]
 pub enum LaunchErrorKind {
     FromLine(u32),
+    MismatchedDescriptor {
+        register: Register,
+        expected: Descriptor,
+        supplied: Descriptor,
+    },
+    MissingKey {
+        register: Register,
+        descriptor: Descriptor,
+    },
 }
 
 #[derive(Debug)]
@@ -453,7 +476,7 @@ impl Executable {
 
         for instr in &self.instructions[..] {
             match instr {
-                Low::BindGroupLayout(layout) => {
+                Low::BindGroupLayout(_layout) => {
                     /*
                     let _ = write!(
                         &mut cons,
@@ -575,7 +598,7 @@ impl Executable {
                     buffer_states.insert(buffers, 0);
                     buffers += 1;
                 }
-                Low::PipelineLayout(layout) => {
+                Low::PipelineLayout(_layout) => {
                     let _ = write!(
                         &mut cons,
                         " pipeline_layout_{0} [label=\"Pipeline Layout {0}\"];",
@@ -883,6 +906,10 @@ impl Executable {
                 Low::StackFrame(_) => {}
                 Low::StackPop => {}
 
+                Low::Call { .. } => {
+                    todo!()
+                }
+
                 _ => {}
             }
         }
@@ -952,13 +979,16 @@ impl Executable {
             gpu: env.gpu.into(),
             gpu_key: env.gpu_key,
             host: Host {
-                machine: Machine::new(Arc::clone(&self.instructions)),
-                descriptors: Descriptors::default(),
+                machine: Machine::new(self),
+                descriptors: Descriptors {
+                    image_io_buffers: env.buffers,
+                    ..Descriptors::default()
+                },
                 command_encoder: None,
-                image_io_buffers: env.buffers,
                 binary_data: self.binary_data.clone(),
                 io_map: self.io_map.clone(),
                 info: self.info.clone(),
+                call_stack: vec![],
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
                 delayed_submits: 0,
@@ -977,13 +1007,16 @@ impl Executable {
             gpu: env.gpu.into(),
             gpu_key: env.gpu_key,
             host: Host {
-                machine: Machine::new(Arc::clone(&self.instructions)),
-                descriptors: self.descriptors,
+                machine: Machine::new(&self),
+                descriptors: Descriptors {
+                    image_io_buffers: env.buffers,
+                    ..self.descriptors
+                },
                 command_encoder: None,
-                image_io_buffers: env.buffers,
                 binary_data: self.binary_data,
                 io_map: self.io_map.clone(),
                 info: self.info.clone(),
+                call_stack: vec![],
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
                 delayed_submits: 0,
@@ -1012,8 +1045,13 @@ impl Executable {
             }
 
             if reference.descriptor != buffer.descriptor {
-                // FIXME: not quite such an 'unknown' error.
-                return Err(StartError::InternalCommandError(line!()));
+                return Err(StartError {
+                    kind: LaunchErrorKind::MismatchedDescriptor {
+                        register: Register(input),
+                        expected: reference.descriptor.clone(),
+                        supplied: buffer.descriptor.clone(),
+                    },
+                });
             }
 
             // Oh, this image is always already bound? Cool.
@@ -1021,9 +1059,13 @@ impl Executable {
                 continue;
             }
 
-            let key = match buffer.key {
-                None => return Err(StartError::InternalCommandError(line!())),
-                Some(key) => key,
+            let Some(key) = buffer.key else {
+                return Err(StartError {
+                    kind: LaunchErrorKind::MissingKey {
+                        register: Register(input),
+                        descriptor: buffer.descriptor.clone(),
+                    },
+                });
             };
 
             // FIXME: we could catch this much earlier.
@@ -1138,7 +1180,6 @@ impl Environment<'_> {
         match pool_img.data() {
             ImageData::Host(_) | ImageData::GpuTexture { .. } | ImageData::GpuBuffer { .. } => {}
             _ => {
-                eprintln!("Bad binding: {:?}", reg);
                 return Err(StartError::InternalCommandError(line!()));
             }
         }
@@ -1176,7 +1217,6 @@ impl Environment<'_> {
         match pool_img.data() {
             ImageData::GpuTexture { .. } => {}
             _ => {
-                eprintln!("Bad binding: {:?}", reg);
                 return Err(StartError::InternalCommandError(line!()));
             }
         }
@@ -1230,19 +1270,23 @@ impl Environment<'_> {
 
 impl Execution {
     pub(crate) fn new(init: InitialState) -> Self {
-        eprintln!("Start capture");
         init.device.start_capture();
+
+        let range = init.info.functions[&init.entry_point].range.clone();
         Execution {
             gpu: Gpu::new(init.device, init.queue).into(),
             gpu_key: None,
             host: Host {
-                machine: Machine::new(init.instructions),
-                descriptors: Descriptors::default(),
-                image_io_buffers: init.image_io_buffers,
+                machine: Machine::with_instructions(init.instructions, range),
+                descriptors: Descriptors {
+                    image_io_buffers: init.image_io_buffers,
+                    ..Descriptors::default()
+                },
                 command_encoder: None,
                 binary_data: init.binary_data,
-                io_map: Arc::new(init.io_map),
+                io_map: init.io_map,
                 info: init.info,
+                call_stack: vec![],
                 debug_stack: vec![],
                 usage: ResourcesUsed::default(),
                 delayed_submits: 0,
@@ -1266,7 +1310,12 @@ impl Execution {
 
     /// Do a number of limited steps.
     pub fn step_to(&mut self, limits: StepLimits) -> Result<SyncPoint<'_>, StepError> {
-        let instruction_pointer = self.host.machine.instruction_pointer;
+        let instruction_pointer = self
+            .host
+            .machine
+            .instruction_pointer
+            .last()
+            .map_or(usize::MAX, |range| range.start);
 
         #[cfg(not(target_arch = "wasm32"))]
         let host_start = std::time::Instant::now();
@@ -1385,22 +1434,20 @@ impl Host {
             stack: Some(&mut self.debug_stack),
         };
 
-        let inst = self.machine.instruction_pointer;
-
-        if let Some(event) = self.info.skip_by_op.get(&program::Instruction(inst)) {
+        let (inst, low) = self.machine.next_instruction()?;
+        if let Some(event) = self.info.skip_by_op.get(&inst) {
             if self.descriptors.precomputed.contains_key(event) {
                 // FIXME: Incorrect in general. We need to simulate the creation of whatever
                 // resource it was meant to create / grab this resource from the environment.
                 // Otherwise, the index-tracking of other resources gets messed up as the encoder
                 // relies on this being essentially a stack machine.
-                let _ = self.machine.next_instruction()?;
                 return Ok(());
             }
         }
 
         limits.instructions = limits.instructions.saturating_sub(1);
 
-        match self.machine.next_instruction()? {
+        match low {
             Low::BindGroupLayout(desc) => {
                 let mut entry_buffer = vec![];
                 let group = self
@@ -1429,7 +1476,7 @@ impl Host {
                     mapped_at_creation: false,
                 };
 
-                let buffer = if let Some(buffer) = cache.preallocated_buffers.remove(&inst) {
+                let buffer = if let Some(buffer) = cache.preallocated_buffers.remove(&inst.0) {
                     self.usage.buffer_reused += desc.u64_len();
                     buffer
                 } else {
@@ -1443,7 +1490,7 @@ impl Host {
                 self.descriptors
                     .buffer_descriptors
                     .insert(buffer_idx, desc.clone());
-                self.descriptors.buffers.push(buffer);
+                self.descriptors.buffers.push(Arc::new(buffer));
                 Ok(())
             }
             Low::BufferInit(desc) => {
@@ -1460,7 +1507,7 @@ impl Host {
 
                 self.usage.buffer_mem += desc.u64_len();
                 let buffer = gpu.with_gpu(|gpu| gpu.device().create_buffer_init(&wgpu_desc));
-                self.descriptors.buffers.push(buffer);
+                self.descriptors.buffers.push(Arc::new(buffer));
                 Ok(())
             }
             Low::Shader(desc) => {
@@ -1471,7 +1518,7 @@ impl Host {
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
 
-                    shader = if let Some(shader) = cache.precompiled_shader.remove(&inst) {
+                    shader = if let Some(shader) = cache.precompiled_shader.remove(&inst.0) {
                         self.usage.shaders_reused += 1;
                         shader
                     } else {
@@ -1484,7 +1531,7 @@ impl Host {
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),
                     };
 
-                    shader = if let Some(shader) = cache.precompiled_shader.remove(&inst) {
+                    shader = if let Some(shader) = cache.precompiled_shader.remove(&inst.0) {
                         self.usage.shaders_reused += 1;
                         shader
                     } else {
@@ -1557,7 +1604,7 @@ impl Host {
                 Ok(())
             }
             Low::RenderView(source_image) => {
-                let texture = match &mut self.image_io_buffers[source_image.0].data {
+                let texture = match &mut self.descriptors.image_io_buffers[source_image.0].data {
                     ImageData::GpuTexture {
                         texture,
                         // FIXME: validate layout? What for?
@@ -1613,7 +1660,7 @@ impl Host {
                     view_formats: &[desc.format],
                 };
 
-                let texture = if let Some(texture) = cache.preallocated_textures.remove(&inst) {
+                let texture = if let Some(texture) = cache.preallocated_textures.remove(&inst.0) {
                     self.usage.texture_reused += desc.u64_len();
                     texture
                 } else {
@@ -1636,7 +1683,7 @@ impl Host {
                 Ok(())
             }
             Low::RenderPipeline(desc) => {
-                let pipeline = if let Some(pipeline) = cache.precompiled_pipelines.remove(&inst) {
+                let pipeline = if let Some(pipeline) = cache.precompiled_pipelines.remove(&inst.0) {
                     self.usage.pipelines_reused += 1;
                     pipeline
                 } else {
@@ -1655,7 +1702,7 @@ impl Host {
                 // Pipelines are not cacheable (at least we don't assume so) from their descriptor
                 // alone which may refer to some arbitrary module instances and state that are not
                 // easily summarized. So, only cache this if the encoder generated a key for it.
-                if let Some(desc) = self.info.pipeline_by_op.get(&inst) {
+                if let Some(desc) = self.info.pipeline_by_op.get(&inst.0) {
                     self.descriptors
                         .pipeline_descriptors
                         .insert(pipeline_idx, desc.clone());
@@ -1745,7 +1792,7 @@ impl Host {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                let source = match self.image_io_buffers.get(source_image.0) {
+                let source = match self.descriptors.image_io_buffers.get(source_image.0) {
                     None => return Err(StepError::InvalidInstruction(line!())),
                     Some(source) => &source.data,
                 };
@@ -1784,7 +1831,7 @@ impl Host {
                 let bytes_per_texel = target_layout.texel_stride;
                 let _bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
-                let image = &mut self.image_io_buffers[source_image.0].data;
+                let image = &mut self.descriptors.image_io_buffers[source_image.0].data;
 
                 if let ImageData::GpuTexture {
                     texture,
@@ -2018,7 +2065,7 @@ impl Host {
                 let bytes_to_copy = (u32::from(bytes_per_texel) * width) as usize;
 
                 let buffer = &self.descriptors.buffers[source_buffer.0];
-                let image = &mut self.image_io_buffers[target_image.0].data;
+                let image = &mut self.descriptors.image_io_buffers[target_image.0].data;
 
                 if let ImageData::GpuTexture {
                     texture,
@@ -2118,6 +2165,74 @@ impl Host {
             Low::StackPop => {
                 if let Some(ref mut frames) = _dump_on_panic.stack {
                     let _ = frames.pop();
+                }
+
+                Ok(())
+            }
+            Low::Call {
+                function,
+                io_buffers,
+            } => {
+                let function = *function;
+                let fn_info = &self.info.functions[&function];
+
+                let mut new_io: Vec<_> = fn_info.io.iter().map(Image::with_late_bound).collect();
+
+                for argument in io_buffers {
+                    let buffer = self.descriptors.buffers[argument.buffer.0].clone();
+                    let layout = argument.descriptor.to_canvas();
+
+                    let io_texture = if let Some(idx) = fn_info.io_map.inputs.get(&argument.in_io) {
+                        *idx
+                    } else if let Some(idx) = fn_info.io_map.outputs.get(&argument.in_io) {
+                        *idx
+                    } else {
+                        return Err(StepError::InvalidInstruction(line!()));
+                    };
+
+                    let matches_descriptor = new_io
+                        .get(io_texture)
+                        .map_or(false, |expected| expected.descriptor == argument.descriptor);
+
+                    if !matches_descriptor {
+                        return Err(StepError::InvalidInstruction(line!()));
+                    }
+
+                    new_io[io_texture] = Image {
+                        data: ImageData::GpuBuffer {
+                            gpu: slotmap::DefaultKey::default(),
+                            layout,
+                            buffer,
+                        },
+                        descriptor: argument.descriptor.clone(),
+                        key: None,
+                    };
+                }
+
+                let stack_descriptors = core::mem::take(&mut self.descriptors);
+                self.descriptors.image_io_buffers = new_io;
+                self.call_stack.push(stack_descriptors);
+
+                // alright also we need to activate this new stack frame. And then it resumes
+                // control at the next instruction after this (which will clean up the ABI pass of
+                // the buffer).
+                let instruction_range = fn_info.range.clone();
+                self.machine.instruction_pointer.push(instruction_range);
+
+                Ok(())
+            }
+            Low::Return => {
+                // A bit questionable. We do not return from the entry point function.. That'll at
+                // least preserve correctness if it is called recursively. (Although we do not have
+                // any form of jump at the moment of writing so that is a bug).
+                if self.machine.instruction_pointer.len() > 1 {
+                    self.machine.instruction_pointer.pop();
+
+                    // Drop existing descriptors, replace with previous call frame.
+                    self.descriptors = self
+                        .call_stack
+                        .pop()
+                        .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                 }
 
                 Ok(())
@@ -2396,24 +2511,53 @@ impl Descriptors {
 }
 
 impl Machine {
-    pub(crate) fn new(instructions: Arc<[Low]>) -> Self {
+    pub(crate) fn new(exec: &Executable) -> Self {
+        // eprintln!("{:#?}", exec.instructions);
+        let range = exec.info.functions[&exec.entry_point].range.clone();
+        Machine::with_instructions(exec.instructions.clone(), range)
+    }
+
+    pub(crate) fn with_instructions(
+        instructions: Arc<[Low]>,
+        entry: core::ops::Range<usize>,
+    ) -> Self {
         Machine {
+            instruction_pointer: vec![entry],
             instructions,
-            instruction_pointer: 0,
         }
     }
 
     fn is_running(&self) -> bool {
-        self.instruction_pointer < self.instructions.len()
+        !self.instruction_pointer.is_empty()
     }
 
-    fn next_instruction(&mut self) -> Result<&Low, StepError> {
-        let instruction = self
+    fn next_instruction(&mut self) -> Result<(program::Instruction, &Low), StepError> {
+        let instruction = loop {
+            let ip = self
+                .instruction_pointer
+                .last_mut()
+                .ok_or(StepError::ProgramEnd)?;
+
+            // This is equivalent to flowing off the end of a function. Normally this must not
+            // happen without explicit return instructions, except at the end of a program. That
+            // is, if this occurs further instructions will not receive their expected values such
+            // as instead having broken or (logically) uninitialized buffer.
+            //
+            // The state being consumed immediately afterwards is okay though, which happens at the
+            // end of the program.
+            if let Some(instruction) = ip.next() {
+                break instruction;
+            }
+
+            let _ = self.instruction_pointer.pop();
+        };
+
+        let low = self
             .instructions
-            .get(self.instruction_pointer)
-            .ok_or(StepError::ProgramEnd)?;
-        self.instruction_pointer += 1;
-        Ok(instruction)
+            .get(instruction)
+            .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
+
+        Ok((program::Instruction(instruction), low))
     }
 
     fn render_pass<'pass>(
@@ -2422,7 +2566,7 @@ impl Machine {
         mut pass: wgpu::RenderPass<'pass>,
     ) -> Result<(), StepError> {
         loop {
-            let instruction = match self.next_instruction() {
+            let (_, instruction) = match self.next_instruction() {
                 Err(StepError {
                     inner: StepErrorKind::ProgramEnd,
                     ..
@@ -2541,7 +2685,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchInput,
             })?;
 
-        let image = &mut self.execution.host.image_io_buffers[index];
+        let image = &mut self.execution.host.descriptors.image_io_buffers[index];
         let descriptor = image.data.layout().clone();
 
         let mut pool_image;
@@ -2575,7 +2719,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        let image = &mut self.execution.host.image_io_buffers[index];
+        let image = &mut self.execution.host.descriptors.image_io_buffers[index];
         let descriptor = image.data.layout().clone();
 
         let mut pool_image;
@@ -2608,7 +2752,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        let image = &mut self.execution.host.image_io_buffers[index];
+        let image = &mut self.execution.host.descriptors.image_io_buffers[index];
         let descriptor = image.data.layout().clone();
 
         let mut pool_image;
@@ -2639,7 +2783,7 @@ impl Retire<'_> {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
 
-        Ok(self.execution.host.image_io_buffers[index].key)
+        Ok(self.execution.host.descriptors.image_io_buffers[index].key)
     }
 
     /// Retain temporary buffers that had been allocated during execution.
@@ -2668,6 +2812,12 @@ impl Retire<'_> {
             let descriptor = match descriptors.buffer_descriptors.get(&idx) {
                 None => continue,
                 Some(descriptor) => descriptor,
+            };
+
+            // If the texture is still shared, we can not cache its contents as it may be
+            // overridden. It should not still be shared, but what can you do.
+            let Some(texture) = Arc::into_inner(texture) else {
+                continue;
             };
 
             let key = self.pool.insert_cacheable_buffer(descriptor, texture);

@@ -16,6 +16,8 @@ default-features = false
 
 [dependencies.image-canvas]
 version = "0.4.2"
+git = "https://github.com/image-rs/canvas"
+rev = "cd28c93a73ca71a70f2a3919cb8faef369272259"
 
 [dependencies.log]
 version = "0.4"
