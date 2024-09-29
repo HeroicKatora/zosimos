@@ -1124,7 +1124,7 @@ impl Program {
     pub fn minimal_device_descriptor() -> wgpu::DeviceDescriptor<'static> {
         wgpu::DeviceDescriptor {
             label: None,
-            required_features: if std::env::var("STEALTH_PAINT_PASSTHROUGH").is_err() {
+            required_features: if std::env::var("ZOSIMOS_PASSTHROUGH").is_err() {
                 wgpu::Features::empty()
             } else {
                 wgpu::Features::SPIRV_SHADER_PASSTHROUGH

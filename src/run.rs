@@ -1512,7 +1512,7 @@ impl Host {
             }
             Low::Shader(desc) => {
                 let shader;
-                if std::env::var("STEALTH_PAINT_PASSTHROUGH").is_err() {
+                if std::env::var("ZOSIMOS_PASSTHROUGH").is_err() {
                     let wgpu_desc = wgpu::ShaderModuleDescriptor {
                         label: Some(desc.name),
                         source: wgpu::ShaderSource::SpirV(desc.source_spirv.as_ref().into()),

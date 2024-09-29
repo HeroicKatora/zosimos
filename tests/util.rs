@@ -32,7 +32,7 @@ pub fn assert_reference_image(image: image::DynamicImage, key: &str) {
     let output = Path::new(CRC).join(key);
     let debug_path = Path::new(DEBUG).join(key);
 
-    if std::env::var_os("STEALTH_PAINT_BLESS").is_some() {
+    if std::env::var_os("ZOSIMOS_BLESS").is_some() {
         eprintln!("{}: {:?}", key, image.color());
         std::fs::write(&output, format!("{}", crc)).expect("Failed to bless result");
         image

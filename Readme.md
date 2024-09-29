@@ -17,7 +17,7 @@ float-scaling, interpolation of vertex attributes across fragments etc.
 Run on the first time, then run:
 
 ```
-STEALTH_PAINT_BLESS=1 cargo test --release
+ZOSIMOS_BLESS=1 cargo test --release
 cargo test
 ```
 
@@ -31,21 +31,27 @@ Otherwise, see the documentation on: <http://docs.rs/>
 
 #### Medium term
 
+- [x] Functions in the `command` module, stack-based control flow.
+- [x] Generics in the `command` module, monomorphizing when lowering into a
+  `Program`.
 - [ ] Render Masks. Unsure if this is a separate type with constructor methods;
   probably. Can they be applied to inputs or on some operations? Clear in the
   mutable `High` IR but not for the SSA form that's user facing.
-- [ ] Rename; some memorable named based on a pun for magick, color, image,
-  Lucifer and witches, and parallel processing?
 - [ ] More operators based on a non-statically typed operator infrastructure
   including binary and unary operators just derived from their shader.
 
 #### Long term
 
 - [ ] Non-Linear control flow, scalar runtime values.
-- [ ] Functions in the `command` module, stack-based control flow.
-- [ ] Generics in the `command` module, monomorphizing when lowering into a
-  `Program`.
-
+- [ ] Support for bounds and capability requirements in function signatures.
+  For instance we should be able to determine, after monomorphizing, what
+  texture dimensions a program requires. Note a conflict that explicit
+  annotations could potentially solve: on the one hand the texture size should
+  be hidden from the user. Indeed, it is probably far more useful if we had a
+  form of staging buffers / automatically split operations across texture
+  windows as a method of handling outsized textures. On the other hand, absence
+  of emulation is very important for performance. This behaves a little like
+  CPU features except that required capabilities are non-binary.
 
 ## Project goals
 
