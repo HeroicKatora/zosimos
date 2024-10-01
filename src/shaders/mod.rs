@@ -10,6 +10,7 @@ pub mod fractal_noise;
 pub mod inject;
 pub mod oklab;
 pub mod palette;
+pub mod solid_rgb;
 pub mod srlab2;
 pub mod stage;
 
@@ -142,6 +143,7 @@ pub(crate) enum FragmentShader {
     Oklab(self::oklab::Shader),
     SrLab2(self::srlab2::Shader),
     Box3(self::box3::Shader),
+    SolidRgb(self::solid_rgb::Shader),
     Dynamic(ShaderInvocation),
 }
 
@@ -158,6 +160,7 @@ impl FragmentShader {
             FragmentShader::Oklab(oklab) => oklab,
             FragmentShader::SrLab2(srlab2) => srlab2,
             FragmentShader::Box3(box3) => box3,
+            FragmentShader::SolidRgb(color) => color,
             FragmentShader::Dynamic(dynamic) => dynamic,
         }
     }

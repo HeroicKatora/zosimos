@@ -174,8 +174,8 @@ pub(crate) enum ConstructOp {
     DistributionNormal(shaders::DistributionNormal2d),
     /// Fractal noise
     DistributionNoise(shaders::FractalNoise),
-    // TODO: can optimize this repr for the common case.
-    Solid(Vec<u8>),
+    /// A color to repeat on pixels.
+    Solid([f32; 4]),
 }
 
 #[derive(Clone, Debug)]
@@ -1299,8 +1299,14 @@ impl CommandBuffer {
         Err(CommandError::UNIMPLEMENTED)
     }
 
-    /// A solid color image, from a descriptor and a single texel.
-    pub fn solid(&mut self, describe: Descriptor, data: &[u8]) -> Result<Register, CommandError> {
+    /// A solid color image, from a descriptor and a single color.
+    ///
+    /// Repeats the color across all pixels, then transforms into equivalent texels.
+    pub fn solid_rgba(
+        &mut self,
+        describe: Descriptor,
+        color: [f32; 4],
+    ) -> Result<Register, CommandError> {
         if !describe.is_consistent() {
             return Err(CommandError {
                 inner: CommandErrorKind::BadDescriptor(
@@ -1310,7 +1316,7 @@ impl CommandBuffer {
             });
         }
 
-        if data.len() != usize::from(describe.layout.texel_stride) {
+        if color.len() != usize::from(describe.layout.texel_stride) {
             return Err(CommandError {
                 inner: CommandErrorKind::BadDescriptor(
                     describe.into(),
@@ -1321,7 +1327,7 @@ impl CommandBuffer {
 
         Ok(self.push(Op::Construct {
             desc: describe.into(),
-            op: ConstructOp::Solid(data.to_owned()),
+            op: ConstructOp::Solid(color.to_owned()),
         }))
     }
 
@@ -1776,7 +1782,12 @@ impl CommandBuffer {
                                 shader: FragmentShader::Bilinear(bilinear.clone()),
                             },
                         }),
-                        _ => return Err(CompileError::NotYetImplemented),
+                        &ConstructOp::Solid(color) => high_ops.push(High::Construct {
+                            dst: Target::Discard(texture),
+                            fn_: Initializer::PaintFullScreen {
+                                shader: FragmentShader::SolidRgb(color.into()),
+                            },
+                        }),
                     }
 
                     reg_to_texture.insert(Register(idx), texture);

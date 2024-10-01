@@ -76,6 +76,8 @@ fn integration() {
     run_srlab2(&mut pool);
 
     run_derivative(&mut pool, pool_background.clone());
+
+    run_solid(&mut pool);
 }
 
 fn run_blending(
@@ -612,4 +614,30 @@ fn run_derivative(pool: &mut Pool, (bg_key, background): (PoolKey, Descriptor)) 
         let reference = format!("derived_{:?}.png.crc", method);
         util::assert_reference(image_derived.into(), &reference);
     }
+}
+
+fn run_solid(pool: &mut Pool) {
+    let mut layout = image::DynamicImage::new_rgba8(400, 400);
+    let descriptor = Descriptor::with_srgb_image(&layout);
+
+    let mut commands = CommandBuffer::default();
+    let generated = commands
+        .solid_rgba(descriptor, [0.5, 0.5, 1.0, 1.0])
+        .unwrap();
+
+    let (output, _outformat) = commands.output(generated).expect("Valid for output");
+
+    let result = run_once_with_output(commands, pool, vec![], retire_with_one_image(output));
+
+    let image_generated = pool.entry(result).unwrap();
+
+    match layout {
+        image::DynamicImage::ImageRgba8(ref mut buffer) => {
+            let bytes = image_generated.as_bytes().expect("Not a byte image");
+            bytemuck::cast_slice_mut(&mut *buffer).copy_from_slice(bytes);
+        }
+        _ => unreachable!(),
+    }
+
+    util::assert_reference_image(layout, "solid.crc.png");
 }
