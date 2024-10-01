@@ -1723,10 +1723,10 @@ impl CommandBuffer {
             }));
 
             match op {
-                Op::Input { desc } => {
+                Op::Input { desc: _ } => {
+                    // This implicitly also persists the descriptor
                     let texture = realize_texture(idx, op)?;
-                    let descriptor = desc.monomorphize(tys);
-                    high_ops.push(High::Input(Register(idx), descriptor));
+                    high_ops.push(High::Input(Register(idx)));
                     reg_to_texture.insert(Register(idx), texture);
                     signature_in.push(Register(idx));
                 }

@@ -80,7 +80,7 @@ pub(crate) enum High {
     /// Assign a texture id to an input with given descriptor.
     /// This instructs the program to insert instructions that load the image from the input in the
     /// pool into the associated texture buffer.
-    Input(Register, Descriptor),
+    Input(Register),
     /// Designate the ith textures as output n, according to the position in sequence of outputs.
     Output {
         /// The source register/texture/buffers.
@@ -230,6 +230,12 @@ pub struct ImageBufferAssignment {
 
 /// Get the descriptors of a particular buffer plan.
 #[derive(Clone, Copy, Debug)]
+// We allow the byte layout to be unused, it's proof of work that there is one. This is in a sense
+// restricting the code to do sensible constructions. It'd be thinkable that there should be a form
+// of validation which later compares that layout to a real, achieved one. Especially with further
+// implementation of generic monomorphization this may become important again to catch some
+// hard-to-observe / hard-to-root-cause-analyze bugs.
+#[allow(dead_code)]
 pub struct ImageBufferDescriptors<'a> {
     pub(crate) descriptor: &'a Descriptor,
     pub(crate) layout: &'a ByteLayout,
@@ -1280,7 +1286,7 @@ impl Program {
                 &High::Done(_) => {
                     // TODO: should deallocate textures that aren't live anymore.
                 }
-                &High::Input(dst, _) => {
+                &High::Input(dst) => {
                     // Identify how we ingest this image.
                     // If it is a texture format that we support then we will allocate and upload
                     // it directly. If it is not then we will allocate a generic version capable of
@@ -1551,7 +1557,7 @@ impl Launcher<'_> {
 
         // For all inputs check that they have now been supplied.
         for high in &self.program.ops {
-            if let High::Input(register, _) = *high {
+            if let High::Input(register) = *high {
                 if self.pool_plan.get_texture(register).is_none() {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }

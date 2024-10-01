@@ -96,9 +96,6 @@ pub(crate) struct ImageMeta {
     /// Images with this set to `false` may be arbitrarily used as a temporary buffer for other
     /// operations, overwriting the contents at will.
     pub(crate) no_read: bool,
-    /// Should we permit writing to this image?
-    /// If not then the device can allocate/cache it differently.
-    pub(crate) no_write: bool,
 }
 
 /// TODO: figure out if we should expose this or a privacy wrapper.
@@ -278,7 +275,6 @@ impl Pool {
             Some(image) => image,
         };
 
-        eprintln!("Original data to upload: {:?}", image.data);
         match image.data {
             ImageData::GpuTexture { gpu, .. } if gpu == key => return Ok(()),
             ImageData::GpuBuffer { gpu, .. } if gpu == key => return Ok(()),
@@ -293,7 +289,6 @@ impl Pool {
         // commands that don't change (almost everything until lowering).
         let gpu = match self.devices.get_mut(key) {
             None => {
-                eprintln!("No GPU {:?}", key);
                 return Err(ImageUploadError::BadGpu);
             }
             Some(device) => device.clone(),
@@ -302,7 +297,6 @@ impl Pool {
         let aligned = match image.descriptor.to_aligned() {
             Some(aligned) => aligned,
             None => {
-                eprintln!("No aligned descriptor {:?}", image.descriptor);
                 return Err(ImageUploadError::BadDescriptor);
             }
         };
@@ -318,11 +312,9 @@ impl Pool {
 
         match &image.data {
             ImageData::GpuTexture { texture: _, .. } => {
-                eprintln!("No-op GPU texture");
                 buffer.unmap();
             }
             ImageData::GpuBuffer { buffer, .. } => {
-                eprintln!("No-op GPU buffer ");
                 buffer.unmap();
             }
             ImageData::Host(canvas) => {
@@ -767,12 +759,33 @@ impl PoolImageMut<'_> {
         self.image.data.host_allocate()
     }
 
-    /// Allocate a texture of data for the selected device.
-    pub(crate) fn texture_allocate(&mut self, GpuKey(gpu): GpuKey) {
-        if let Some(device) = self.devices.get(gpu) {
-            // FU: maybe add Buffer { } afterall
-            todo!()
-        }
+    /// Allocate a buffer for data on the selected device.
+    ///
+    /// The allocation is done as a *buffer* with the host-corresponding transfer layout. It is not
+    /// a texture. The buffer will have the corresponding flags to use as a copy source and
+    /// destination.
+    pub(crate) fn buffer_allocate(&mut self, GpuKey(key): GpuKey) -> Result<(), ImageUploadError> {
+        use core::convert::TryFrom;
+        let gpu = self.devices.get(key).ok_or(ImageUploadError::BadGpu)?;
+
+        let layout = self.layout();
+        let byte_len = layout.byte_len();
+        let byte_len = u64::try_from(byte_len).map_err(|_| ImageUploadError::BadDescriptor)?;
+
+        let buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+            size: byte_len,
+            mapped_at_creation: false,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            label: None,
+        });
+
+        self.image.data = ImageData::GpuBuffer {
+            layout: layout.clone(),
+            gpu: key,
+            buffer: Arc::new(buffer),
+        };
+
+        Ok(())
     }
 
     /// Make a copy of this host accessible image as a host allocated image.
@@ -910,7 +923,6 @@ impl Default for ImageMeta {
     fn default() -> Self {
         ImageMeta {
             no_read: false,
-            no_write: false,
         }
     }
 }
