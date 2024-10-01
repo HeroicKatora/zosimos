@@ -764,6 +764,8 @@ impl PoolImageMut<'_> {
     /// The allocation is done as a *buffer* with the host-corresponding transfer layout. It is not
     /// a texture. The buffer will have the corresponding flags to use as a copy source and
     /// destination.
+    ///
+    /// This replaces the current image with zeroed bytes.
     pub(crate) fn buffer_allocate(&mut self, GpuKey(key): GpuKey) -> Result<(), ImageUploadError> {
         use core::convert::TryFrom;
         let gpu = self.devices.get(key).ok_or(ImageUploadError::BadGpu)?;
@@ -921,9 +923,7 @@ impl<'pool> Iterator for IterMut<'pool> {
 
 impl Default for ImageMeta {
     fn default() -> Self {
-        ImageMeta {
-            no_read: false,
-        }
+        ImageMeta { no_read: false }
     }
 }
 

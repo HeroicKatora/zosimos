@@ -123,6 +123,7 @@ pub(crate) struct Host {
 }
 
 #[derive(Default, Debug)]
+#[allow(unused)]
 pub(crate) struct Debug {
     bind_groups: HashMap<usize, DebugInfo>,
     bind_group_layouts: HashMap<usize, DebugInfo>,
@@ -139,24 +140,28 @@ pub(crate) struct Debug {
 }
 
 #[derive(Default, Debug)]
+#[allow(unused)]
 pub(crate) struct DebugInfo {
     /// Information attached at runtime to this object, i.e. a special kind of name.
     assertion_data: Option<String>,
 }
 
 #[derive(Default, Debug)]
+#[allow(unused)]
 pub(crate) struct DebugBufferInfo {
     info: DebugInfo,
     init: TextureInitState,
 }
 
 #[derive(Default, Debug)]
+#[allow(unused)]
 pub(crate) struct DebugTextureInfo {
     info: DebugInfo,
     init: TextureInitState,
 }
 
 #[derive(Debug)]
+#[allow(unused)]
 pub(crate) struct DebugViewInfo {
     info: DebugInfo,
     init: Option<DeviceTexture>,
@@ -372,6 +377,8 @@ pub struct StepError {
 }
 
 #[derive(Debug)]
+// Okay, as long as debug works.
+#[allow(unused)]
 enum StepErrorKind {
     InvalidInstruction(u32),
     BadInstruction(BadInstruction),
@@ -456,7 +463,7 @@ impl Executable {
         let mut cons = String::new();
         let mut queue_graph = String::new();
 
-        let mut bind_group_layouts = 0;
+        let mut _bind_group_layouts = 0;
         let mut bind_groups = 0;
         let mut buffers = 0;
         let mut buffer_states = HashMap::new();
@@ -481,10 +488,10 @@ impl Executable {
                     let _ = write!(
                         &mut cons,
                         " bind_group_layout_{0} [label=\"Bind Group Layout {0}\"];",
-                        bind_group_layouts
+                        _bind_group_layouts
                     );
                     */
-                    bind_group_layouts += 1;
+                    _bind_group_layouts += 1;
                 }
                 Low::BindGroup(group) => {
                     let idx = bind_groups;
@@ -1947,7 +1954,7 @@ impl Host {
                 self.debug
                     .texture_use(target_texture, TextureInitState::WriteTo);
                 self.debug
-                    .buffer_use(source_buffer, TextureInitState::ReadFrom);
+                    .buffer_use(source_buffer, TextureInitState::UseRead);
 
                 let buffer = self.descriptors.buffer(source_buffer, source_layout)?;
                 let texture = self.descriptors.texture(target_texture)?;
@@ -1987,7 +1994,7 @@ impl Host {
                 };
 
                 self.debug
-                    .texture_use(source_texture, TextureInitState::ReadFrom);
+                    .texture_use(source_texture, TextureInitState::UseRead);
                 self.debug
                     .buffer_use(target_buffer, TextureInitState::WriteTo);
 
@@ -2025,7 +2032,7 @@ impl Host {
                 };
 
                 self.debug
-                    .buffer_use(source_buffer, TextureInitState::ReadFrom);
+                    .buffer_use(source_buffer, TextureInitState::UseRead);
                 self.debug
                     .buffer_use(target_buffer, TextureInitState::WriteTo);
 
@@ -2294,7 +2301,7 @@ impl Descriptors {
                 offset,
                 size,
             } => {
-                debug.buffer_use(DeviceBuffer(buffer_idx), TextureInitState::ReadFrom);
+                debug.buffer_use(DeviceBuffer(buffer_idx), TextureInitState::UseRead);
                 let buffer = self
                     .buffers
                     .get(buffer_idx)
@@ -2311,7 +2318,7 @@ impl Descriptors {
                 .ok_or_else(|| StepError::InvalidInstruction(line!()))
                 .map(wgpu::BindingResource::Sampler),
             TextureView(idx) => {
-                debug.view_use(idx, TextureInitState::ReadFrom);
+                debug.view_use(idx, TextureInitState::UseRead);
 
                 self.texture_views
                     .get(idx)
