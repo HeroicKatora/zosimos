@@ -40,7 +40,7 @@ members = [".", "bin/editor"]
 
 
 [build-dependencies]
-shaderc = "0.7"
+shaderc = "0.8"
 
 ## Local, Testing dependencies.
 
