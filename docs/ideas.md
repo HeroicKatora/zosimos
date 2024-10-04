@@ -18,13 +18,18 @@ target integrated with the editor and not in the main library component.
 ## Edge detection
 
 - <https://en.wikipedia.org/wiki/Edge_detection>
+  - Some algorithms already implemented
 - <https://en.wikipedia.org/wiki/Hough_transform>
+  - Parallel count into buckets relies on atomic writes to a target.
     - We probably want to parameterize that with an explicit result image. That
       is, in the algorithm a line incidence is recorded to buckets. There is no
       best method for defining buckets though and the grid-methods are inferior
       to more generic methods that have space-efficient representations of
       relatively sparse but deep target bucket coordinates (i.e. K-D tree based
       methods).
+    - The classic grid method guarantees we have some known box of parameter
+      buckets to consider. A "freeform" algorithm where each output box defines
+      its own parameter ranges to track would not allow this.
 
 ## Noise constructors
 

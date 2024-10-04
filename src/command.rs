@@ -119,7 +119,7 @@ enum Op {
         desc: GenericDescriptor,
     },
     Dynamic {
-        call: OperandKind,
+        call: OperandDynKind,
         /// The planned shader invocation.
         command: ShaderInvocation,
         desc: GenericDescriptor,
@@ -156,7 +156,7 @@ pub struct DescriptorDerivation {
 pub enum GenericBound {}
 
 #[derive(Clone, Debug)]
-enum OperandKind {
+enum OperandDynKind {
     Construct,
     Unary(Register),
     Binary { lhs: Register, rhs: Register },
@@ -186,6 +186,7 @@ pub(crate) enum UnaryOp {
     /// And color needs to be 'color compatible' with the prior T (see module).
     ColorConvert(ColorConversion),
     /// Op(T) = T[.color=select(channel, color)]
+    #[allow(dead_code)] // "See discussion in its usage. The selection happens in the shader."
     Extract { channel: ChannelPosition },
     /// Op(T) = T[.whitepoint=target]
     /// This is a partial method for CIE XYZ-ish color spaces. Note that ICC requires adaptation to
@@ -1635,7 +1636,7 @@ impl CommandBuffer {
                 Op::Input { .. }
                 | Op::Construct { .. }
                 | Op::Dynamic {
-                    call: OperandKind::Construct,
+                    call: OperandDynKind::Construct,
                     ..
                 } => {}
                 &Op::Output { src: Register(src) } => {
@@ -1650,7 +1651,7 @@ impl CommandBuffer {
                     src: Register(src), ..
                 }
                 | &Op::Dynamic {
-                    call: OperandKind::Unary(Register(src)),
+                    call: OperandDynKind::Unary(Register(src)),
                     ..
                 } => {
                     last_use[src] = last_use[src].max(idx);
@@ -1663,7 +1664,7 @@ impl CommandBuffer {
                 }
                 | &Op::Dynamic {
                     call:
-                        OperandKind::Binary {
+                        OperandDynKind::Binary {
                             lhs: Register(lhs),
                             rhs: Register(rhs),
                         },
@@ -2000,16 +2001,16 @@ impl CommandBuffer {
                     let (op_unary, op_binary, arguments);
 
                     match call {
-                        OperandKind::Construct => {
+                        OperandDynKind::Construct => {
                             arguments = &[][..];
                             reg_to_texture.insert(Register(idx), texture);
                         }
-                        OperandKind::Unary(reg) => {
+                        OperandDynKind::Unary(reg) => {
                             op_unary = [reg_to_texture[reg]];
                             arguments = &op_unary[..];
                             reg_to_texture.insert(Register(idx), texture);
                         }
-                        OperandKind::Binary { lhs, rhs } => {
+                        OperandDynKind::Binary { lhs, rhs } => {
                             op_binary = [reg_to_texture[lhs], reg_to_texture[rhs]];
                             arguments = &op_binary[..];
                             reg_to_texture.insert(Register(idx), texture);
@@ -2158,7 +2159,7 @@ impl CommandBuffer {
         });
 
         self.push(Op::Dynamic {
-            call: OperandKind::Construct,
+            call: OperandDynKind::Construct,
             // FIXME: maybe this conversion should be delayed.
             // In particular, converting source to SPIR-V may take some form of 'compiler' argument
             // that's only available during `compile` phase.
