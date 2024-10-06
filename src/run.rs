@@ -1346,6 +1346,10 @@ impl Execution {
 
             loop {
                 match host.step_inner(cache, gpu, &mut limits).await {
+                    Err(StepError {
+                        inner: StepErrorKind::ProgramEnd,
+                        ..
+                    }) => break,
                     Err(mut error) => {
                         // Add tracing information..
                         error.instruction_pointer = instruction_pointer;
@@ -1355,13 +1359,15 @@ impl Execution {
                 }
 
                 if limits.is_exhausted() {
-                    return Ok(());
+                    break;
                 }
 
                 if !host.machine.is_running() {
-                    return Ok(());
+                    break;
                 }
             }
+
+            Ok(())
         };
 
         // TODO: test the waters with one no-waker poll?

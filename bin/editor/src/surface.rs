@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::compute::{Compute, ComputeTailCommands};
 use crate::winit::{Window, WindowSurface, WindowedSurface};
 
@@ -53,8 +55,11 @@ struct Runtimes {
     normalizing: Option<NormalizingExe>,
 }
 
+/// Another compiled program, which puts the image onto the screen.
 struct NormalizingExe {
-    exe: Executable,
+    exe: Arc<Executable>,
+    in_descriptor: Descriptor,
+    out_descriptor: Descriptor,
     in_reg: command::Register,
     out_reg: command::Register,
 }
@@ -131,7 +136,6 @@ impl Surface {
         let (width, height) = window.inner_size();
 
         let config = SurfaceConfiguration {
-            //  FIXME: COPY_DST is not universal. Should fix `run.rs` so that RENDER_ATTACHMENT suffices.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: preferred_format,
             width,
@@ -306,6 +310,7 @@ impl Surface {
         // Ensure our cache does not grow infinitely.
         self.pool.clear_cache();
 
+        // FIXME: No. Async. Luckily this is straightforward.
         while running.is_running() {
             let limits = StepLimits::new().with_steps(usize::MAX);
             let mut step = running
@@ -419,13 +424,14 @@ impl Runtimes {
         // Capabilities to use for conversion.
         caps: Capabilities,
     ) -> Result<&mut NormalizingExe, NormalizingError> {
-        if self.normalizing.is_some() {
-            // FIXME: Polonius NLL.
-            return Ok(self.normalizing.as_mut().unwrap());
+        if let Some(normalize) = &self.normalizing {
+            if input == normalize.in_descriptor && surface == normalize.out_descriptor {
+                return Ok(self.normalizing.as_mut().unwrap());
+            }
         }
 
         let mut cmd = command::CommandBuffer::default();
-        let in_reg = cmd.input(input)?;
+        let in_reg = cmd.input(input.clone())?;
         let resized = cmd.resize(in_reg, surface.size())?;
         let converted = cmd.color_convert(resized, surface.color.clone(), surface.texel.clone())?;
         let (out_reg, _desc) = cmd.render(converted)?;
@@ -436,7 +442,9 @@ impl Runtimes {
         log::info!("{}", exe.dot());
 
         Ok(self.normalizing.get_or_insert(NormalizingExe {
-            exe,
+            exe: Arc::new(exe),
+            in_descriptor: input,
+            out_descriptor: surface,
             in_reg,
             out_reg,
         }))
