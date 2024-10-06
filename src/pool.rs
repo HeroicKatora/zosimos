@@ -1,5 +1,5 @@
 use core::{fmt, mem};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use slotmap::{DefaultKey, SlotMap};
@@ -96,6 +96,16 @@ pub(crate) struct ImageMeta {
     /// Images with this set to `false` may be arbitrarily used as a temporary buffer for other
     /// operations, overwriting the contents at will.
     pub(crate) no_read: bool,
+}
+
+/// A swap chain is a tripled-buffered set of keys between which matching image data is moved.
+pub struct SwapChain {
+    /// Buffers of this swap chain which are not filled.
+    pub empty: VecDeque<PoolKey>,
+    /// Buffers of this swap chain that are rendered.
+    pub full: VecDeque<PoolKey>,
+    /// Buffer of this swap chain in which to present.
+    pub present: PoolKey,
 }
 
 /// TODO: figure out if we should expose this or a privacy wrapper.
@@ -493,6 +503,40 @@ impl Pool {
         }
     }
 
+    /// Create a swap-chain for presenting to a texture in this pool.
+    ///
+    /// This reserves a number of extra pool images with matching descriptors and layout. The
+    /// presenting texture remains unchanged. A swap chain presents images by swapping the
+    /// `ImageData` of associated entries. The caller is responsible for maintaining the queues
+    /// returned via the `SwapChain` buffer and initializing the image data of them. Note the data
+    /// structures are not synchronized.
+    pub fn swap_chain(&mut self, present: PoolKey, extra: usize) -> SwapChain {
+        assert!(extra > 0, "At least one extra swap chain buffer required");
+        let image = self
+            .entry(present)
+            .expect("Invalid swap chain presenting image");
+
+        let descriptor = image.descriptor().clone();
+        let layout = image.layout().clone();
+
+        let mut empty = VecDeque::new();
+
+        for _ in 0..extra {
+            let layout = layout.clone();
+            let descriptor = descriptor.clone();
+            let created = self
+                .new_with_data(ImageData::LateBound(layout), descriptor)
+                .key();
+            empty.push_back(created);
+        }
+
+        SwapChain {
+            present,
+            empty,
+            full: VecDeque::new(),
+        }
+    }
+
     fn new_with_data(&mut self, data: ImageData, descriptor: Descriptor) -> PoolImageMut<'_> {
         let key = self.items.insert(Image {
             meta: ImageMeta::default(),
@@ -505,6 +549,50 @@ impl Pool {
             image: &mut self.items[key],
             devices: &self.devices,
         }
+    }
+}
+
+/// A SwapChain is created by [`Pool::swap_chain`].
+impl SwapChain {
+    /// Change the current presenting buffer.
+    ///
+    /// If: a new full buffer exists exchange the presenting image's data with that new buffer,
+    /// pushing it back to the empty set.
+    ///
+    /// This method guarantees that the presenting entry will remain filled with valid data.
+    ///
+    /// FIXME: in many instances the caller must perform some GPU work to prepare the next
+    /// presentable buffer. It could in some situations be faster to defer this work into
+    /// execution, i.e. after binding of buffers if doing so avoids the CPU synchronization point
+    /// that is introduced by calling this method. `wgpu` does some of the texture-based blocking
+    /// for us under the hood, so who knows how critical this is.
+    pub fn present(&mut self, pool: &mut Pool) {
+        let Some(next_key) = self.full.pop_front() else {
+            return;
+        };
+
+        assert!(
+            pool.entry(self.present).is_some(),
+            "Pool does not contain swap chain presentable buffer",
+        );
+
+        assert!(
+            pool.entry(next_key).is_some(),
+            "Pool does not contain swap chain filled buffer",
+        );
+
+        assert!(
+            next_key != self.present,
+            "Swap chain uses presentable buffer as filled buffer",
+        );
+
+        let [present, next] = pool
+            .items
+            .get_disjoint_mut([self.present.0, next_key.0])
+            .expect("Invalid pool deleted swap chain buffer");
+        core::mem::swap(&mut present.data, &mut next.data);
+
+        self.empty.push_back(next_key);
     }
 }
 
