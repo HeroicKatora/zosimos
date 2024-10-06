@@ -590,8 +590,8 @@ impl SwapChain {
             .items
             .get_disjoint_mut([self.present.0, next_key.0])
             .expect("Invalid pool deleted swap chain buffer");
-        core::mem::swap(&mut present.data, &mut next.data);
 
+        core::mem::swap(present, next);
         self.empty.push_back(next_key);
     }
 }

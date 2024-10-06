@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use crate::compute::{Compute, ComputeTailCommands};
-use crate::winit::{Window, WindowSurface, WindowedSurface};
+use crate::winit::{WindowSurface, WindowedSurface};
 
 use zosimos::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
 use zosimos::command;
-use zosimos::pool::{GpuKey, Pool, PoolKey};
+use zosimos::pool::{GpuKey, Pool, PoolKey, SwapChain};
 use zosimos::program::{Capabilities, CompileError, LaunchError, Program};
 use zosimos::run::{Executable, StepLimits};
 
@@ -44,7 +44,7 @@ struct NormalizingError {
 struct PoolEntry {
     gpu: Option<GpuKey>,
     key: Option<PoolKey>,
-    presentable: Option<PoolKey>,
+    presentable: PoolKey,
     descriptor: Descriptor,
 }
 
@@ -151,6 +151,8 @@ impl Surface {
             ..Descriptor::with_texel(texel, width, height).unwrap()
         };
 
+        let empty = image::DynamicImage::new_rgba16(0, 0);
+
         let mut that = Surface {
             adapter,
             config,
@@ -160,7 +162,7 @@ impl Surface {
             entry: PoolEntry {
                 gpu: None,
                 key: None,
-                presentable: None,
+                presentable: PoolKey::null(),
                 descriptor,
             },
             runtimes: Runtimes::default(),
@@ -172,10 +174,16 @@ impl Surface {
         let surface = that.pool.declare(that.descriptor());
         that.entry.key = Some(surface.key());
         that.reconfigure_surface().unwrap();
+        // Create a nul image to ''present'' while booting.
+        let presentable = that.pool.declare(Descriptor::with_srgb_image(&empty)).key();
+        that.entry.presentable = presentable;
 
         that
     }
 
+    /// Create a pool that shares the device with this surface.
+    ///
+    /// The pool can separately render textures which the surface's pool can then display.
     pub fn configure_pool(&mut self, pool: &mut Pool) -> GpuKey {
         log::info!("Surface reconfiguring pool device");
         let internal_key = self.reconfigure_gpu();
@@ -183,6 +191,11 @@ impl Surface {
         self.pool
             .share_device(internal_key, pool)
             .expect("maintained incorrect gpu key")
+    }
+
+    /// Create a swap chain in our pool, for the presented texture.
+    pub fn configure_swap_chain(&mut self, n: usize) -> SwapChain {
+        self.pool.swap_chain(self.entry.presentable, n)
     }
 
     pub(crate) fn reconfigure_compute(&mut self, compute: &Compute) {
@@ -208,18 +221,19 @@ impl Surface {
         }
     }
 
+    /// Get a new presentable image from the CPU host.
     pub fn set_image(&mut self, image: &image::DynamicImage) {
         log::info!("Uploading DynamicImage {:?} to GPU buffer", image.color());
         let gpu = self.reconfigure_gpu();
-        if let Some(key) = self.entry.presentable {
-            let mut entry = self.pool.entry(key).unwrap();
-            entry.set_srgb(&image);
-            self.pool.upload(key, gpu).unwrap();
-        } else {
-            let key = self.pool.insert_srgb(image).key();
-            self.entry.presentable = Some(key);
-            self.pool.upload(key, gpu).unwrap();
-        }
+        let key = self.entry.presentable;
+        let mut entry = self.pool.entry(key).unwrap();
+        entry.set_srgb(&image);
+        self.pool.upload(key, gpu).unwrap();
+    }
+
+    /// Get a new presentable image from the swap chain.
+    pub fn set_from_swap_chain(&mut self, chain: &mut SwapChain) {
+        chain.present(&mut self.pool)
     }
 
     pub fn get_current_texture(&mut self) -> Result<wgpu::SurfaceTexture, wgpu::SurfaceError> {
@@ -243,13 +257,7 @@ impl Surface {
             }
         };
 
-        let present = match self.entry.presentable {
-            Some(key) => key,
-            None => {
-                log::warn!("No image to paint from.");
-                return;
-            }
-        };
+        let present = self.entry.presentable;
 
         #[cfg(not(target_arch = "wasm32"))]
         let start = std::time::Instant::now();
@@ -350,8 +358,6 @@ impl Surface {
         let end = std::time::Instant::now();
         #[cfg(not(target_arch = "wasm32"))]
         log::warn!("Time finish {:?}", end.saturating_duration_since(start));
-        #[cfg(not(target_arch = "wasm32"))]
-        let start = end;
     }
 
     pub fn descriptor(&self) -> Descriptor {
