@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::compute::{Compute, ComputeTailCommands};
 use crate::winit::{WindowSurface, WindowedSurface};
 
 use zosimos::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
@@ -26,8 +25,6 @@ pub struct Surface {
     entry: PoolEntry,
     /// The runtime state from stealth paint.
     runtimes: Runtimes,
-    ///
-    commands: ComputeTailCommands,
 }
 
 #[derive(Debug)]
@@ -166,7 +163,6 @@ impl Surface {
                 descriptor,
             },
             runtimes: Runtimes::default(),
-            commands: ComputeTailCommands::default(),
         };
 
         let gpu = that.reconfigure_gpu();
@@ -196,10 +192,6 @@ impl Surface {
     /// Create a swap chain in our pool, for the presented texture.
     pub fn configure_swap_chain(&mut self, n: usize) -> SwapChain {
         self.pool.swap_chain(self.entry.presentable, n)
-    }
-
-    pub(crate) fn reconfigure_compute(&mut self, compute: &Compute) {
-        compute.acquire(&mut self.commands);
     }
 
     /// Change the base device.

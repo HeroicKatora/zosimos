@@ -52,7 +52,7 @@ pub trait ModalEditor {
     /// Issued to query if an exit is required.
     fn exit(&self) -> bool;
     /// Update the surface with changes to the compute instructions.
-    fn reconfigure_compute(&mut self, _: &mut Self::Surface, _: &Self::Compute);
+    fn reconfigure_compute(&mut self, _: &mut Self::Compute);
 }
 
 pub trait WindowedSurface {
@@ -87,69 +87,99 @@ impl Window {
             mut window,
         } = self;
 
-        let mut surface = None;
-        let mut modal = ModalContext::Main;
+        std::thread::scope(move |scope| {
+            let mut surface = None;
+            let mut modal = ModalContext::Main;
 
-        event_loop
-            .run(move |ev, app| {
-                log::info!("Window event: {:?}", ev);
-                let window = window.get_or_insert_with(|| {
-                    Arc::new(app.create_window(WindowAttributes::default()).unwrap())
-                });
-
-                let empty = WindowSurface {
-                    surface: None,
-                    window: window.clone(),
-                };
-
-                let (surface, compute) = surface.get_or_insert_with(|| {
-                    let mut preinit = Ed::Surface::from_window(empty);
-                    let compute = on_surface(&mut preinit);
-                    (preinit, compute)
-                });
-
-                log::info!("Window event: {:?}", ev);
-                match Self::input(&window, &modal, ev) {
-                    None => {}
-                    Some(ModalEvent::MainEventsCleared) => {
-                        ed.event(ModalEvent::MainEventsCleared, &mut modal);
-                        window.request_redraw();
-                    }
-                    Some(ModalEvent::Resized) => {
-                        surface.recreate();
-                        ed.lost(surface);
-                        ed.reconfigure_compute(surface, &compute);
-                    }
-                    Some(ModalEvent::RedrawRequested) => {
-                        ed.reconfigure_compute(surface, &compute);
-                        log::warn!("Redraw requested");
-
-                        ed.event(ModalEvent::RedrawRequested, &mut modal);
-                        match ed.redraw_request(surface) {
-                            Ok(()) => {}
-                            Err(RedrawError::Lost) => {
-                                surface.recreate();
-                                ed.lost(surface)
-                            }
-                            Err(RedrawError::Outdated) => {
-                                surface.recreate();
-                                ed.outdated(surface);
-                            }
-                        }
-                    }
-                    Some(ev) => {
-                        ed.event(ev, &mut modal);
-                    }
-                }
-
-                if ed.exit() {
-                    log::info!("Editor requested close, closing window");
-                    app.exit();
-                }
-            })
-            .unwrap();
+            event_loop
+                .run(move |ev, app| {
+                    Self::threaded_event_loop_callback::<Ed>(
+                        ev,
+                        app,
+                        &mut ed,
+                        &mut window,
+                        &mut surface,
+                        &mut modal,
+                        &mut on_surface,
+                        scope,
+                    )
+                })
+                .unwrap()
+        });
 
         std::process::exit(0);
+    }
+
+    // FIXME: turn these into a `App` struct and pass by `&mut self`?
+    fn threaded_event_loop_callback<Ed>(
+        ev: winit::event::Event<()>,
+        app: &winit::event_loop::ActiveEventLoop,
+        ed: &mut Ed,
+        window: &mut Option<Arc<winit::window::Window>>,
+        surface: &mut Option<(Ed::Surface, Ed::Compute)>,
+        modal: &mut ModalContext,
+        on_surface: &mut impl FnMut(&mut Ed::Surface) -> Ed::Compute,
+        // FIXME: generalize this so we can also use an async loop or on the web, the browser's
+        // executor here.
+        scope: &std::thread::Scope<'_, '_>,
+    ) where
+        Ed: ModalEditor + 'static,
+        Ed::Surface: WindowedSurface,
+    {
+        log::info!("Window event: {:?}", ev);
+        let window = window.get_or_insert_with(|| {
+            Arc::new(app.create_window(WindowAttributes::default()).unwrap())
+        });
+
+        let empty = WindowSurface {
+            surface: None,
+            window: window.clone(),
+        };
+
+        let (surface, compute) = surface.get_or_insert_with(|| {
+            let mut preinit = Ed::Surface::from_window(empty);
+            let compute = on_surface(&mut preinit);
+            (preinit, compute)
+        });
+
+        log::info!("Window event: {:?}", ev);
+        match Self::input(&window, &modal, ev) {
+            None => {}
+            Some(ModalEvent::MainEventsCleared) => {
+                ed.event(ModalEvent::MainEventsCleared, modal);
+                window.request_redraw();
+            }
+            Some(ModalEvent::Resized) => {
+                surface.recreate();
+                ed.lost(surface);
+                ed.reconfigure_compute(compute);
+            }
+            Some(ModalEvent::RedrawRequested) => {
+                ed.reconfigure_compute(compute);
+                log::warn!("Redraw requested");
+
+                ed.event(ModalEvent::RedrawRequested, modal);
+                match ed.redraw_request(surface) {
+                    Ok(()) => {}
+                    Err(RedrawError::Lost) => {
+                        surface.recreate();
+                        ed.lost(surface)
+                    }
+                    Err(RedrawError::Outdated) => {
+                        surface.recreate();
+                        ed.outdated(surface);
+                    }
+                }
+            }
+            Some(ev) => {
+                ed.event(ev, modal);
+            }
+        }
+
+        if ed.exit() {
+            log::info!("Editor requested close, closing window");
+            app.exit();
+        }
     }
 
     #[allow(unreachable_patterns)]
@@ -173,41 +203,41 @@ impl Window {
                 WindowEvent::HoveredFileCancelled => todo!(),
                 WindowEvent::Focused(_) => todo!(),
                 WindowEvent::KeyboardInput {
-                    device_id,
+                    device_id: _,
                     event: _,
-                    is_synthetic,
+                    is_synthetic: _,
                 } => todo!(),
                 WindowEvent::ModifiersChanged(_) => todo!(),
                 WindowEvent::CursorMoved {
-                    device_id,
-                    position,
+                    device_id: _,
+                    position: _,
                 } => todo!(),
-                WindowEvent::CursorEntered { device_id } => todo!(),
-                WindowEvent::CursorLeft { device_id } => todo!(),
+                WindowEvent::CursorEntered { device_id: _ } => todo!(),
+                WindowEvent::CursorLeft { device_id: _ } => todo!(),
                 WindowEvent::MouseWheel {
-                    device_id,
-                    delta,
-                    phase,
+                    device_id: _,
+                    delta: _,
+                    phase: _,
                 } => todo!(),
                 WindowEvent::MouseInput {
-                    device_id,
-                    state,
-                    button,
+                    device_id: _,
+                    state: _,
+                    button: _,
                 } => todo!(),
                 WindowEvent::TouchpadPressure {
-                    device_id,
-                    pressure,
-                    stage,
+                    device_id: _,
+                    pressure: _,
+                    stage: _,
                 } => todo!(),
                 WindowEvent::AxisMotion {
-                    device_id,
-                    axis,
-                    value,
+                    device_id: _,
+                    axis: _,
+                    value: _,
                 } => todo!(),
                 WindowEvent::Touch(_) => todo!(),
                 WindowEvent::ScaleFactorChanged {
-                    scale_factor,
-                    inner_size_writer,
+                    scale_factor: _,
+                    inner_size_writer: _,
                 } => todo!(),
                 WindowEvent::ThemeChanged(_) => todo!(),
             },

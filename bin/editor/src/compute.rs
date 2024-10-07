@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::surface::Surface;
 use arc_swap::ArcSwapAny;
 
-use zosimos::command::CommandBuffer;
+use zosimos::command::{CommandBuffer, Register};
 use zosimos::pool::{GpuKey, Pool, SwapChain};
 
 /// A compute graph.
@@ -13,11 +13,12 @@ pub struct Compute {
     pool: Pool,
     key: GpuKey,
     program: ArcSwapAny<Arc<Program>>,
+    dirty: bool,
     swap: SwapChain,
 }
 
 struct Program {
-    commands: Option<Arc<CommandBuffer>>,
+    commands: Option<Arc<ComputeCommands>>,
     have: u64,
 }
 
@@ -25,7 +26,12 @@ struct Program {
 #[derive(Default)]
 pub struct ComputeTailCommands {
     pub have: u64,
-    pub commands: Option<Arc<CommandBuffer>>,
+    pub commands: Option<Arc<ComputeCommands>>,
+}
+
+pub struct ComputeCommands {
+    pub buffer: CommandBuffer,
+    pub registers: Vec<Register>,
 }
 
 impl Compute {
@@ -47,19 +53,41 @@ impl Compute {
             pool,
             key,
             program,
+            dirty: false,
             swap,
         }
     }
 
-    pub fn acquire(&self, ctr: &mut ComputeTailCommands) -> bool {
+    pub fn acquire(&mut self, ctr: &mut ComputeTailCommands) -> bool {
         let load = self.program.load();
         let update = load.have != ctr.have;
+
+        if !update {
+            return false;
+        }
+
         ctr.commands = load.commands.clone();
+        self.dirty |= update;
         update
     }
 
     /// Spawn a task to maintain derivations.
-    pub fn run(&self) -> Box<dyn Future<Output = ()> + 'static> {
+    pub fn run(&mut self) -> Box<dyn Future<Output = ()> + 'static> {
+        let program = self.program.load().clone();
+        let Some(commands) = &program.commands else {
+            return Box::new(core::future::ready(()));
+        };
+
+        let Ok(program) = commands.buffer.compile() else {
+            return Box::new(core::future::ready(()));
+        };
+
+        let mut launcher = program.launch(&mut self.pool);
+        for &input in &commands.registers {
+            let _key = todo!();
+            launcher.bind(input, _key);
+        }
+
         todo!()
     }
 }

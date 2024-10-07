@@ -1,5 +1,5 @@
 //! The editor state itself, sans causal snapshot system.
-use crate::compute::Compute;
+use crate::compute::{Compute, ComputeTailCommands};
 use crate::surface::Surface;
 use crate::winit::{ModalContext, ModalEditor, ModalEvent, RedrawError};
 
@@ -7,6 +7,8 @@ use crate::winit::{ModalContext, ModalEditor, ModalEvent, RedrawError};
 pub struct Editor {
     close_requested: bool,
     num_frames: usize,
+    /// The state of the compute commands.
+    commands: ComputeTailCommands,
 }
 
 impl ModalEditor for Editor {
@@ -51,8 +53,8 @@ impl ModalEditor for Editor {
         }
     }
 
-    fn reconfigure_compute(&mut self, surface: &mut Self::Surface, compute: &Self::Compute) {
-        surface.reconfigure_compute(compute)
+    fn reconfigure_compute(&mut self, compute: &mut Self::Compute) {
+        compute.acquire(&mut self.commands);
     }
 }
 
