@@ -6,6 +6,7 @@
 use winit::{event::*, event_loop::EventLoop, window::WindowAttributes};
 
 use std::sync::Arc;
+use std::thread::Scope;
 
 pub struct Window {
     event_loop: EventLoop<()>,
@@ -55,6 +56,10 @@ pub trait ModalEditor {
     fn reconfigure_compute(&mut self, _: &mut Self::Compute);
 }
 
+pub trait ScopedCompute {
+    fn maybe_launch<'a>(&mut self, _: &'a Scope<'a, '_>);
+}
+
 pub trait WindowedSurface {
     fn from_window(window: WindowSurface) -> Self;
     fn recreate(&mut self);
@@ -81,6 +86,7 @@ impl Window {
     where
         Ed: ModalEditor + 'static,
         Ed::Surface: WindowedSurface,
+        Ed::Compute: ScopedCompute,
     {
         let Window {
             event_loop,
@@ -111,7 +117,7 @@ impl Window {
     }
 
     // FIXME: turn these into a `App` struct and pass by `&mut self`?
-    fn threaded_event_loop_callback<Ed>(
+    fn threaded_event_loop_callback<'scope, Ed>(
         ev: winit::event::Event<()>,
         app: &winit::event_loop::ActiveEventLoop,
         ed: &mut Ed,
@@ -121,10 +127,11 @@ impl Window {
         on_surface: &mut impl FnMut(&mut Ed::Surface) -> Ed::Compute,
         // FIXME: generalize this so we can also use an async loop or on the web, the browser's
         // executor here.
-        scope: &std::thread::Scope<'_, '_>,
+        scope: &'scope Scope<'scope, '_>,
     ) where
         Ed: ModalEditor + 'static,
         Ed::Surface: WindowedSurface,
+        Ed::Compute: ScopedCompute,
     {
         log::info!("Window event: {:?}", ev);
         let window = window.get_or_insert_with(|| {
@@ -155,6 +162,7 @@ impl Window {
                 ed.reconfigure_compute(compute);
             }
             Some(ModalEvent::RedrawRequested) => {
+                compute.maybe_launch(scope);
                 ed.reconfigure_compute(compute);
                 log::warn!("Redraw requested");
 

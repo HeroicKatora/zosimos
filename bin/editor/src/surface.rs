@@ -12,7 +12,7 @@ use wgpu::{Adapter, Instance, SurfaceConfiguration};
 
 pub struct Surface {
     /// The adapter for accessing devices.
-    adapter: Adapter,
+    adapter: Arc<Adapter>,
     /// Mirrored configuration of the surface.
     config: SurfaceConfiguration,
     /// The driver instance used for drawing.
@@ -151,7 +151,7 @@ impl Surface {
         let empty = image::DynamicImage::new_rgba16(0, 0);
 
         let mut that = Surface {
-            adapter,
+            adapter: Arc::new(adapter),
             config,
             inner,
             instance,
@@ -175,6 +175,10 @@ impl Surface {
         that.entry.presentable = presentable;
 
         that
+    }
+
+    pub fn adapter(&self) -> Arc<Adapter> {
+        self.adapter.clone()
     }
 
     /// Create a pool that shares the device with this surface.

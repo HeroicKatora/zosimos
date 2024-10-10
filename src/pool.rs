@@ -25,6 +25,16 @@ pub struct Pool {
     devices: SlotMap<DefaultKey, Gpu>,
 }
 
+/// Translate from one pool into another.
+///
+/// Within a pool, resources such as the GPU devices have identifiers assigned by the pool. We can
+/// efficiently move from one pool to another only if we fix these identifiers during the move.
+#[derive(Default)]
+pub struct PoolBridge {
+    lhs_to_rhs: HashMap<GpuKey, GpuKey>,
+    rhs_to_lhs: HashMap<GpuKey, GpuKey>,
+}
+
 #[derive(Clone)]
 pub struct Gpu {
     inner: Arc<(wgpu::Device, wgpu::Queue)>,
@@ -192,7 +202,7 @@ impl Pool {
         Ok(GpuKey(gpu_key))
     }
 
-    pub fn share_device(&mut self, key: GpuKey, other: &mut Pool) -> Option<GpuKey> {
+    pub fn share_device(&self, key: GpuKey, other: &mut Pool) -> Option<GpuKey> {
         let gpu = self.devices.get(key.0)?.clone();
         let gpu_key = other.devices.insert(gpu);
         Some(GpuKey(gpu_key))
@@ -888,7 +898,7 @@ impl PoolImageMut<'_> {
 
     /// TODO: figure out if assert/panicking is ergonomic enough for making it pub.
     /// FIXME: ignores reference to GPU or others to this pool's other resources.
-    pub(crate) fn swap(&mut self, image: &mut ImageData) {
+    pub(crate) fn swap_image(&mut self, image: &mut ImageData) {
         assert_eq!(self.image.data.layout(), image.layout());
         // FIXME: When we are doing this should we temporarily assign a 'dangling' key
         // (DefaultKey::null) as the gpu is only fixed later in `finish`. In particular, if
@@ -902,7 +912,7 @@ impl PoolImageMut<'_> {
     /// Otherwise try to perform a copy. Returns if the transaction succeeded.
     pub(crate) fn trade(&mut self, image: &mut ImageData) -> bool {
         if self.meta().no_read {
-            self.swap(image);
+            self.swap_image(image);
             return true;
         }
 
@@ -928,6 +938,58 @@ impl PoolImageMut<'_> {
             ImageData::GpuTexture { .. } => false,
             ImageData::LateBound(_) => false,
         }
+    }
+}
+
+impl PoolBridge {
+    /// See [Pool::share_device], but also track that mapping in the bridge.
+    pub fn share_device(&mut self, lhs: &Pool, key: GpuKey, rhs: &mut Pool) -> Option<GpuKey> {
+        let rhs_key = lhs.share_device(key, rhs);
+
+        if let Some(rhs_key) = rhs_key {
+            self.add_translated_gpu(key, rhs_key);
+        }
+
+        rhs_key
+    }
+
+    pub fn add_translated_gpu(&mut self, lhs: GpuKey, rhs: GpuKey) {
+        assert!(!self.lhs_to_rhs.contains_key(&lhs));
+        assert!(!self.rhs_to_lhs.contains_key(&rhs));
+
+        self.lhs_to_rhs.insert(lhs, rhs);
+        self.rhs_to_lhs.insert(rhs, lhs);
+    }
+
+    /// Swap two images between two pools.
+    ///
+    /// Afterwards, the keys will refer to the other image data, with an updated descriptor.
+    pub fn swap_image(&self, lhs: PoolImageMut<'_>, rhs: PoolImageMut<'_>) {
+        fn is_gpu(data: &ImageData, map: &HashMap<GpuKey, GpuKey>) -> bool {
+            match data {
+                ImageData::GpuTexture { gpu, .. } | ImageData::GpuBuffer { gpu, .. } => {
+                    map.contains_key(&GpuKey(*gpu))
+                }
+                ImageData::Host(_) | ImageData::LateBound(_) => true,
+            }
+        }
+
+        fn replace_gpu(data: &mut ImageData, map: &HashMap<GpuKey, GpuKey>) {
+            match data {
+                ImageData::GpuTexture { gpu, .. } | ImageData::GpuBuffer { gpu, .. } => {
+                    *gpu = map[&GpuKey(*gpu)].0
+                }
+                ImageData::Host(_) | ImageData::LateBound(_) => {}
+            }
+        }
+
+        assert!(is_gpu(&lhs.image.data, &self.lhs_to_rhs));
+        assert!(is_gpu(&rhs.image.data, &self.rhs_to_lhs));
+
+        replace_gpu(&mut lhs.image.data, &self.lhs_to_rhs);
+        replace_gpu(&mut rhs.image.data, &self.rhs_to_lhs);
+
+        mem::swap(lhs.image, rhs.image);
     }
 }
 

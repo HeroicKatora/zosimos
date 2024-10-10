@@ -1102,7 +1102,7 @@ impl Executable {
             if let Some(key) = env.buffers[output].key {
                 let mut pool_img = env.pool.entry(key).unwrap();
                 let buffer = &mut env.buffers[output];
-                pool_img.swap(&mut buffer.data);
+                pool_img.swap_image(&mut buffer.data);
             } else {
                 env.buffers[output].data.host_allocate();
             }
@@ -1112,7 +1112,7 @@ impl Executable {
             if let Some(key) = env.buffers[render].key {
                 let mut pool_img = env.pool.entry(key).unwrap();
                 let buffer = &mut env.buffers[render];
-                pool_img.swap(&mut buffer.data);
+                pool_img.swap_image(&mut buffer.data);
             } else {
                 todo!();
             }
@@ -2697,23 +2697,7 @@ impl Retire<'_> {
             .ok_or(RetireError {
                 inner: RetireErrorKind::NoSuchInput,
             })?;
-
-        let image = &mut self.execution.host.descriptors.image_io_buffers[index];
-        let descriptor = image.data.layout().clone();
-
-        let mut pool_image;
-        let pool = &mut self.pool;
-        match image.key.filter(|key| pool.entry(*key).is_some()) {
-            Some(key) => pool_image = self.pool.entry(key).unwrap(),
-            None => {
-                let descriptor = Descriptor::from(&descriptor);
-                pool_image = self.pool.declare(descriptor);
-            }
-        };
-
-        pool_image.swap(&mut image.data);
-
-        Ok(pool_image.into())
+        self.retire_image(index)
     }
 
     /// Move the output image corresponding to `reg` into the pool.
@@ -2731,23 +2715,7 @@ impl Retire<'_> {
             .ok_or(RetireError {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
-
-        let image = &mut self.execution.host.descriptors.image_io_buffers[index];
-        let descriptor = image.data.layout().clone();
-
-        let mut pool_image;
-        let pool = &mut self.pool;
-        match image.key.filter(|key| pool.entry(*key).is_some()) {
-            Some(key) => pool_image = self.pool.entry(key).unwrap(),
-            None => {
-                let descriptor = Descriptor::from(&descriptor);
-                pool_image = self.pool.declare(descriptor);
-            }
-        };
-
-        pool_image.swap(&mut image.data);
-
-        Ok(pool_image.into())
+        self.retire_image(index)
     }
 
     /// Move the render target corresponding to `reg` into the pool.
@@ -2764,7 +2732,10 @@ impl Retire<'_> {
             .ok_or(RetireError {
                 inner: RetireErrorKind::NoSuchOutput,
             })?;
+        self.retire_image(index)
+    }
 
+    pub(crate) fn retire_image(&mut self, index: usize) -> Result<PoolImage<'_>, RetireError> {
         let image = &mut self.execution.host.descriptors.image_io_buffers[index];
         let descriptor = image.data.layout().clone();
 
@@ -2778,7 +2749,7 @@ impl Retire<'_> {
             }
         };
 
-        pool_image.swap(&mut image.data);
+        pool_image.swap_image(&mut image.data);
 
         Ok(pool_image.into())
     }
@@ -2960,14 +2931,6 @@ impl SyncPoint<'_> {
                 };*/
                 Ok(())
             }
-        }
-    }
-}
-
-impl Drop for SyncPoint<'_> {
-    fn drop(&mut self) {
-        if self.future.is_some() {
-            let _ = self.block_on();
         }
     }
 }
