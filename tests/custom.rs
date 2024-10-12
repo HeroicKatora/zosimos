@@ -81,5 +81,5 @@ fn mandelbrot() {
     let result = run_once_with_output(commands, &mut pool, vec![], retire_with_one_image(output));
 
     let image = pool.entry(result).unwrap();
-    util::assert_reference(image.into(), "mandelbrot.png.crc");
+    util::assert_reference(image.into(), "mandelbrot.crc.png");
 }

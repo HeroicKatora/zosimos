@@ -91,5 +91,5 @@ fn run_blending(
     let mut retire = execution.retire_gracefully(pool);
 
     let image = retire.output(output).expect("A valid image output");
-    util::assert_reference(image, "composed.png.crc");
+    util::assert_reference(image, "composed.crc.png");
 }

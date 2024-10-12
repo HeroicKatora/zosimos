@@ -91,5 +91,5 @@ fn integration() {
     }
 
     let image = pool.entry(result).unwrap();
-    util::assert_reference(image.into(), "composed.png.crc");
+    util::assert_reference(image.into(), "composed.crc.png");
 }

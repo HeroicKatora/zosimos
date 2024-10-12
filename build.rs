@@ -151,7 +151,7 @@ fn main() -> Result<(), BuildError> {
         },
     ];
 
-    let mut compiler = Compiler::new().unwrap();
+    let compiler = Compiler::new().unwrap();
     let mut str_source = String::new();
 
     let target_dir = env::var_os("OUT_DIR").unwrap();

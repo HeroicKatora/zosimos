@@ -116,7 +116,7 @@ fn run_blending(
     );
 
     let image = pool.entry(result).unwrap();
-    util::assert_reference(image.into(), "composed.png.crc");
+    util::assert_reference(image.into(), "composed.crc.png");
 }
 
 fn run_affine(
@@ -162,7 +162,7 @@ fn run_affine(
     );
 
     let image_affine = pool.entry(result).unwrap();
-    util::assert_reference(image_affine.into(), "affine.png.crc");
+    util::assert_reference(image_affine.into(), "affine.crc.png");
 }
 
 fn run_adaptation(pool: &mut Pool, (bg_key, background): (PoolKey, Descriptor)) {
@@ -192,7 +192,7 @@ fn run_adaptation(pool: &mut Pool, (bg_key, background): (PoolKey, Descriptor)) 
     );
 
     let image_adapted = pool.entry(result).unwrap();
-    util::assert_reference(image_adapted.into(), "adapted.png.crc");
+    util::assert_reference(image_adapted.into(), "adapted.crc.png");
 }
 
 fn run_conversion(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {
@@ -220,7 +220,7 @@ fn run_conversion(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descri
     );
 
     let image_converted = pool.entry(result).unwrap();
-    util::assert_reference(image_converted.into(), "convert_bt709.png.crc");
+    util::assert_reference(image_converted.into(), "convert_bt709.crc.png");
 }
 
 fn run_distribution(pool: &mut Pool) {
@@ -249,7 +249,7 @@ fn run_distribution(pool: &mut Pool) {
         _ => unreachable!(),
     }
 
-    util::assert_reference_image(layout, "distribution_normal2d.png.crc");
+    util::assert_reference_image(layout, "distribution_normal2d.crc.png");
 }
 
 fn run_distribution_normal1d(pool: &mut Pool) {
@@ -278,7 +278,7 @@ fn run_distribution_normal1d(pool: &mut Pool) {
         _ => unreachable!(),
     }
 
-    util::assert_reference_image(layout, "distribution_normal1d.png.crc");
+    util::assert_reference_image(layout, "distribution_normal1d.crc.png");
 }
 
 fn run_distribution_u8(pool: &mut Pool) {
@@ -307,7 +307,7 @@ fn run_distribution_u8(pool: &mut Pool) {
         _ => unreachable!(),
     }
 
-    util::assert_reference_image(layout, "distribution_u8.png.crc");
+    util::assert_reference_image(layout, "distribution_u8.crc.png");
 }
 
 fn run_fractal_noise(pool: &mut Pool) {
@@ -333,7 +333,7 @@ fn run_fractal_noise(pool: &mut Pool) {
         _ => unreachable!(),
     }
 
-    util::assert_reference_image(layout, "distribution_fractal2d.png.crc");
+    util::assert_reference_image(layout, "distribution_fractal2d.crc.png");
 }
 
 fn run_transmute(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {
@@ -370,7 +370,7 @@ fn run_transmute(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descrip
     let bg_image = pool.entry(orig_key).unwrap();
     assert_eq!(layout.as_bytes(), bg_image.as_bytes().unwrap());
 
-    util::assert_reference_image(layout, "transmute.png.crc");
+    util::assert_reference_image(layout, "transmute.crc.png");
 }
 
 fn run_palette(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {
@@ -416,7 +416,7 @@ fn run_palette(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descripto
     );
 
     let image_sampled = pool.entry(result).unwrap();
-    util::assert_reference(image_sampled.into(), "palette.png.crc");
+    util::assert_reference(image_sampled.into(), "palette.crc.png");
 }
 
 fn run_swap(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor)) {
@@ -442,7 +442,7 @@ fn run_swap(pool: &mut Pool, (orig_key, orig_descriptor): (PoolKey, Descriptor))
     );
 
     let image_swapped = pool.entry(result).unwrap();
-    util::assert_reference(image_swapped.into(), "swapped.png.crc");
+    util::assert_reference(image_swapped.into(), "swapped.crc.png");
 }
 
 fn run_oklab(pool: &mut Pool) {
@@ -503,7 +503,7 @@ fn run_oklab(pool: &mut Pool) {
     let result = run_once_with_output(commands, pool, vec![], retire_with_one_image(output));
 
     let image_show = pool.entry(result).unwrap();
-    util::assert_reference(image_show.into(), "oklab.png.crc");
+    util::assert_reference(image_show.into(), "oklab.crc.png");
 }
 
 fn run_srlab2(pool: &mut Pool) {
@@ -570,7 +570,7 @@ fn run_srlab2(pool: &mut Pool) {
     let result = run_once_with_output(commands, pool, vec![], retire_with_one_image(output));
 
     let image_show = pool.entry(result).unwrap();
-    util::assert_reference(image_show.into(), "srlab2.png.crc");
+    util::assert_reference(image_show.into(), "srlab2.crc.png");
 }
 
 fn run_derivative(pool: &mut Pool, (bg_key, background): (PoolKey, Descriptor)) {
@@ -611,7 +611,7 @@ fn run_derivative(pool: &mut Pool, (bg_key, background): (PoolKey, Descriptor)) 
         );
 
         let image_derived = pool.entry(result).unwrap();
-        let reference = format!("derived_{:?}.png.crc", method);
+        let reference = format!("derived_{:?}.crc.png", method);
         util::assert_reference(image_derived.into(), &reference);
     }
 }
