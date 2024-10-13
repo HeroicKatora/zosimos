@@ -1,3 +1,5 @@
+mod timing;
+
 use core::{future::Future, iter::once, marker::Unpin, ops::Range, pin::Pin};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -324,8 +326,7 @@ struct DevicePolled<'exe, T: WithGpu> {
 pub struct SyncPoint<'exe> {
     future: Option<DevicePolled<'exe, Gpu>>,
     marker: core::marker::PhantomData<&'exe mut Execution>,
-    #[cfg(not(target_arch = "wasm32"))]
-    host_start: std::time::Instant,
+    time: timing::TimeAccountant,
     debug_mark: Option<String>,
 }
 
@@ -1324,8 +1325,7 @@ impl Execution {
             .last()
             .map_or(usize::MAX, |range| range.start);
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let host_start = std::time::Instant::now();
+        let time = timing::TimeAccountant::from_now();
 
         let debug_mark = self
             .host
@@ -1377,8 +1377,7 @@ impl Execution {
                 gpu: self.gpu.clone(),
             }),
             marker: core::marker::PhantomData,
-            #[cfg(not(target_arch = "wasm32"))]
-            host_start,
+            time,
             debug_mark,
         })
     }
@@ -2920,18 +2919,24 @@ impl SyncPoint<'_> {
             Some(polled) => {
                 let DevicePolled { future, gpu } = polled;
                 block_on(future, Some(&gpu))?;
-                /*
-                let _took_time =
-                    std::time::Instant::now().saturating_duration_since(self.host_start);
-                eprint!("{:?}", _took_time);
-                if let Some(dbg) = &self.debug_mark {
-                    eprintln!("{}", dbg)
-                } else {
-                    eprintln!()
-                };*/
+                self.time.checkpoint();
                 Ok(())
             }
         }
+    }
+
+    /// Report the time spent in this sync point.
+    ///
+    /// If no timing interfaces are configured (e.g. on wasm32-none) then reports no duration.
+    /// Otherwise, based on total system time. This is convenience, should probably instead report
+    /// it as time spent keyed by each device actually utilized.
+    pub fn time_spent(&self) -> std::time::Duration {
+        self.time.spent()
+    }
+
+    /// Report, as debugging, the marker for the program instruction being synced on.
+    pub fn debug_mark(&self) -> Option<&str> {
+        self.debug_mark.as_deref()
     }
 }
 
