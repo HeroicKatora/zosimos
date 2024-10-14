@@ -10,7 +10,7 @@ use core::{
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU64, Ordering},
     Arc,
 };
 
@@ -335,7 +335,7 @@ struct DevicePolled<'exe, T: WithGpu> {
 
 pub struct SyncPoint<'exe> {
     future: Option<DevicePolled<'exe, Gpu>>,
-    submit_check: Arc<AtomicBool>,
+    submit_check: Arc<AtomicU64>,
     marker: PhantomData<&'exe mut Execution>,
     time: timing::TimeAccountant,
     debug_mark: Option<String>,
@@ -1359,7 +1359,7 @@ impl Execution {
             cache,
         } = self;
 
-        let submit_flag: Arc<AtomicBool> = Arc::default();
+        let submit_flag: Arc<AtomicU64> = Arc::default();
         let submit_check = submit_flag.clone();
 
         let async_step = async move {
@@ -1378,7 +1378,7 @@ impl Execution {
                     }
                     Ok(submission) => {
                         if submission.submit {
-                            submit_flag.fetch_or(true, Ordering::Release);
+                            submit_flag.fetch_add(1, Ordering::Release);
                         }
                     }
                 }
@@ -2951,13 +2951,118 @@ impl SyncPoint<'_> {
         }
     }
 
-    pub async fn step_forward(&mut self) -> Result<(), StepError> {
+    pub async fn fi<Guard>(
+        &mut self,
+        // A method that will ensure the GPU queue to be polled while its guard is live.
+        queue_poll: impl FnOnce(Gpu) -> Guard,
+    ) -> Result<(), StepError> {
         let Some(polled) = &mut self.future else {
             return Ok(());
         };
 
+        // In contrast to the synchronous `block_on` code, here we want to avoid integrating the
+        // GPU device itself deeply into the loop. If possible, the caller is responsible. This is
+        // due to wasm32-web where no polling needs to be done at all. Even with native code the
+        // necessary polling should not block the main asynchronous thread itself.
+        //
+        // Instead, rely on `on_submitted_work_done` callbacks for decisions. We still want to have
+        // concurrency between each work as progress can be made by submitting more work, except
+        // for specific synchronization points such as mapping a buffer for read-back.
+
+        struct ResubmitCheck<'q> {
+            /// Number of submits we can wait for.
+            submit_check: Arc<AtomicU64>,
+            /// Number of submits that have been enqueued.
+            submitted: u64,
+            /// Number of submits that are complete.
+            submit_done: Arc<AtomicU64>,
+            /// The queue to submit on_submitted_work_done checks against.
+            queue: &'q Queue,
+        }
+
+        impl core::future::Future for ResubmitCheck<'_> {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+                // Maintain: submit_check >= submitted >= submit_done locally for ResubmitCheck
+                let this = Pin::into_inner(self);
+                let check = this.submit_check.load(Ordering::SeqCst);
+                let done = this.submit_done.load(Ordering::Acquire);
+
+                // Are we to register a new waker for outstanding submissions?
+                if this.submitted == check {
+                    // We must maintain the property: either
+                    // - the `done` loaded has updated to the final value and we do not suspend
+                    // - the `done` loaded has not yet updated to the final value, `wake` will get
+                    //   called after this suspend.
+                    return if this.submitted == done {
+                        std::task::Poll::Ready(())
+                    } else {
+                        // Here we must guarantee wake was _after_ the call to poll (not its
+                        // completion and return). The happens-before relationship is established
+                        // by the SeqCst chain on `submit_done`. We got here because the
+                        // `fetch_max` catching up to `submitted` did not happen-before the above
+                        // load. That implies it happens-after since SeqCst requires at least one
+                        // of these two orderings to hold. The `wake()`  in that callback is
+                        // happens-after by local ordering.
+                        std::task::Poll::Pending
+                    };
+                }
+
+                struct CompleteOnDrop {
+                    check: u64,
+                    submit_done: Arc<AtomicU64>,
+                    waker: Option<std::task::Waker>,
+                }
+
+                impl Drop for CompleteOnDrop {
+                    fn drop(&mut self) {
+                        // See above comment on this ordering of operations, and SeqCst.
+                        self.submit_done.fetch_max(self.check, Ordering::SeqCst);
+                        self.waker.take().unwrap().wake();
+                    }
+                }
+
+                let callback_or_dropped = CompleteOnDrop {
+                    check,
+                    submit_done: this.submit_done.clone(),
+                    waker: Some(cx.waker().clone()),
+                };
+
+                this.queue.on_submitted_work_done(move || {
+                    drop(callback_or_dropped);
+                });
+
+                this.submitted = check;
+                // The on_submitted_work_done callback will happen-after the entry to this function
+                // by itself. We just require that it actually happens in finite time and that also
+                // happens should the device itself get dropped (assuming this behaves usual).
+                std::task::Poll::Pending
+            }
+        }
+
+        let check = self.submit_check.clone();
         let DevicePolled { future, gpu } = polled;
-        todo!()
+
+        let _guard = queue_poll(gpu.clone());
+
+        // Technically optional, but polling this future will ensure that the effects of the
+        // SyncPoint have been stabilized before stepping the next time. In particular, this
+        // protects the guard from dropping before the need of polling is done.
+        let submits_done_future = ResubmitCheck {
+            submit_check: check,
+            submitted: 0,
+            submit_done: Arc::default(),
+            queue: gpu.queue(),
+        };
+
+        // FIXME: we may want to poll these as a single join to get timely status updates. But then
+        // again, this is just fine. We only need that we do no drop the `_guard` before all submit
+        // calls have been polled for.
+        let result = future.await;
+        submits_done_future.await;
+
+        result
     }
 
     /// Report the time spent in this sync point.
