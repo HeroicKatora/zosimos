@@ -392,6 +392,13 @@ pub struct BadInstruction {
     inner: String,
 }
 
+#[derive(Default)]
+struct Submissions {
+    /// Did we submit to the device, i.e. if we want to sync can we `on_submitted_work_done` or
+    /// not? If multi-device then this should become a set or map from gpu keys.
+    submit: bool,
+}
+
 impl core::fmt::Display for BadInstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Bad Instruction: {:?}", self.inner)
@@ -1355,7 +1362,10 @@ impl Execution {
                         error.instruction_pointer = instruction_pointer;
                         return Err(error);
                     }
-                    Ok(()) => {}
+                    Ok(submission) => {
+                        if submission.submit {
+                        }
+                    }
                 }
 
                 if limits.is_exhausted() {
@@ -1422,7 +1432,7 @@ impl Host {
         cache: &mut Cache,
         gpu: &Gpu,
         limits: &mut StepLimits,
-    ) -> Result<(), StepError> {
+    ) -> Result<Submissions, StepError> {
         struct DumpFrame<'stack> {
             stack: Option<&'stack mut Vec<Frame>>,
         }
@@ -1453,7 +1463,7 @@ impl Host {
                 // resource it was meant to create / grab this resource from the environment.
                 // Otherwise, the index-tracking of other resources gets messed up as the encoder
                 // relies on this being essentially a stack machine.
-                return Ok(());
+                return Ok(Submissions::default());
             }
         }
 
@@ -1468,7 +1478,7 @@ impl Host {
                 // eprintln!("Made {}: {:?}", self.descriptors.bind_group_layouts.len(), group);
                 let group = gpu.with_gpu(|gpu| gpu.device().create_bind_group_layout(&group));
                 self.descriptors.bind_group_layouts.push(group);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::BindGroup(desc) => {
                 let mut entry_buffer = vec![];
@@ -1478,7 +1488,7 @@ impl Host {
                 // eprintln!("{}: {:?}", desc.layout_idx, group);
                 let group = gpu.with_gpu(|gpu| gpu.device().create_bind_group(&group));
                 self.descriptors.bind_groups.push(group);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::Buffer(desc) => {
                 let wgpu_desc = wgpu::BufferDescriptor {
@@ -1503,7 +1513,7 @@ impl Host {
                     .buffer_descriptors
                     .insert(buffer_idx, desc.clone());
                 self.descriptors.buffers.push(Arc::new(buffer));
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::BufferInit(desc) => {
                 use wgpu::util::DeviceExt;
@@ -1520,7 +1530,7 @@ impl Host {
                 self.usage.buffer_mem += desc.u64_len();
                 let buffer = gpu.with_gpu(|gpu| gpu.device().create_buffer_init(&wgpu_desc));
                 self.descriptors.buffers.push(Arc::new(buffer));
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::Shader(desc) => {
                 let shader;
@@ -1560,14 +1570,14 @@ impl Host {
                 }
 
                 self.descriptors.shaders.push(shader);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::PipelineLayout(desc) => {
                 let mut entry_buffer = vec![];
                 let layout = self.descriptors.pipeline_layout(desc, &mut entry_buffer)?;
                 let layout = gpu.with_gpu(|gpu| gpu.device().create_pipeline_layout(&layout));
                 self.descriptors.pipeline_layouts.push(layout);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::Sampler(desc) => {
                 let desc = wgpu::SamplerDescriptor {
@@ -1589,7 +1599,7 @@ impl Host {
                 };
                 let sampler = gpu.with_gpu(|gpu| gpu.device().create_sampler(&desc));
                 self.descriptors.sampler.push(sampler);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::TextureView(desc) => {
                 let texture = self
@@ -1613,7 +1623,7 @@ impl Host {
                 };
                 let view = texture.create_view(&desc);
                 self.descriptors.texture_views.push(view);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::RenderView(source_image) => {
                 let texture = match &mut self.descriptors.image_io_buffers[source_image.0].data {
@@ -1641,7 +1651,7 @@ impl Host {
 
                 let view = texture.create_view(&desc);
                 self.descriptors.texture_views.push(view);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::Texture(desc) => {
                 use wgpu::TextureUsages as U;
@@ -1692,7 +1702,7 @@ impl Host {
                 );
 
                 self.descriptors.textures.push(texture);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::RenderPipeline(desc) => {
                 let pipeline = if let Some(pipeline) = cache.precompiled_pipelines.remove(&inst.0) {
@@ -1721,7 +1731,7 @@ impl Host {
                 }
 
                 self.descriptors.render_pipelines.push(pipeline);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::BeginCommands => {
                 if self.command_encoder.is_some() {
@@ -1732,7 +1742,7 @@ impl Host {
 
                 let encoder = gpu.with_gpu(|gpu| gpu.device().create_command_encoder(&descriptor));
                 self.command_encoder = Some(encoder);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::BeginRenderPass(descriptor) => {
                 let mut attachment_buf = vec![];
@@ -1750,13 +1760,13 @@ impl Host {
                 drop(attachment_buf);
                 self.machine.render_pass(&self.descriptors, pass)?;
 
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::EndCommands => match self.command_encoder.take() {
                 None => Err(StepError::InvalidInstruction(line!())),
                 Some(encoder) => {
                     self.descriptors.command_buffers.push(encoder.finish());
-                    Ok(())
+                    Ok(Submissions::default())
                 }
             },
             &Low::RunTopCommand if self.delayed_submits == 0 => {
@@ -1766,7 +1776,7 @@ impl Host {
                     .pop()
                     .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                 gpu.with_gpu(|gpu| gpu.queue().submit(once(command)));
-                Ok(())
+                Ok(Submissions { submit: true })
             }
             &Low::RunTopCommand => {
                 let many = 1 + self.delayed_submits;
@@ -1774,10 +1784,11 @@ impl Host {
                     let commands = self.descriptors.command_buffers.drain(top..);
                     gpu.with_gpu(|gpu| gpu.queue().submit(commands));
                     self.delayed_submits = 0;
-                    Ok(())
                 } else {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
+
+                Ok(Submissions { submit: true })
             }
             &Low::RunBotToTop(many) => {
                 let many = many + self.delayed_submits;
@@ -1789,7 +1800,7 @@ impl Host {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                Ok(())
+                Ok(Submissions { submit: true })
             }
             &Low::WriteImageToBuffer {
                 source_image,
@@ -1881,7 +1892,7 @@ impl Host {
                         .precomputed
                         .insert(write_event, Precomputed);
 
-                    return Ok(());
+                    return Ok(Submissions::default());
                 } else if let ImageData::GpuBuffer {
                     buffer: src_buffer,
                     // FIXME: validate layout? What for?
@@ -1909,7 +1920,7 @@ impl Host {
                         .precomputed
                         .insert(write_event, Precomputed);
 
-                    return Ok(());
+                    return Ok(Submissions::default());
                 }
 
                 if image.as_bytes().is_none() {
@@ -1938,7 +1949,7 @@ impl Host {
                 drop(data);
                 buffer.unmap();
 
-                Ok(())
+                Ok(Submissions::default())
             }
             &Low::CopyBufferToTexture {
                 source_buffer,
@@ -1980,7 +1991,7 @@ impl Host {
 
                 encoder.copy_buffer_to_texture(buffer, texture, extent);
 
-                Ok(())
+                Ok(Submissions::default())
             }
             &Low::CopyTextureToBuffer {
                 source_texture,
@@ -2014,7 +2025,7 @@ impl Host {
 
                 encoder.copy_texture_to_buffer(texture, buffer, extent);
 
-                Ok(())
+                Ok(Submissions::default())
             }
             &Low::CopyBufferToBuffer {
                 source_buffer,
@@ -2048,7 +2059,7 @@ impl Host {
 
                 encoder.copy_buffer_to_buffer(source, 0, target, 0, size);
 
-                Ok(())
+                Ok(Submissions::default())
             }
             &Low::ReadBuffer {
                 source_buffer,
@@ -2110,7 +2121,7 @@ impl Host {
                     let command = encoder.finish();
                     gpu.with_gpu(|gpu| gpu.queue().submit(once(command)));
 
-                    return Ok(());
+                    return Ok(Submissions { submit: true });
                 } else if let ImageData::GpuBuffer {
                     buffer,
                     layout,
@@ -2132,7 +2143,7 @@ impl Host {
                     let command = encoder.finish();
                     gpu.with_gpu(|gpu| gpu.queue().submit(once(command)));
 
-                    return Ok(());
+                    return Ok(Submissions { submit: true });
                 }
 
                 if image.as_bytes().is_none() {
@@ -2165,21 +2176,21 @@ impl Host {
                 drop(data);
                 buffer.unmap();
 
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::StackFrame(frame) => {
                 if let Some(ref mut frames) = _dump_on_panic.stack {
                     frames.push(frame.clone());
                 }
 
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::StackPop => {
                 if let Some(ref mut frames) = _dump_on_panic.stack {
                     let _ = frames.pop();
                 }
 
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::Call {
                 function,
@@ -2231,7 +2242,7 @@ impl Host {
                 let instruction_range = fn_info.range.clone();
                 self.machine.instruction_pointer.push(instruction_range);
 
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::Return => {
                 // A bit questionable. We do not return from the entry point function.. That'll at
@@ -2247,7 +2258,7 @@ impl Host {
                         .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                 }
 
-                Ok(())
+                Ok(Submissions::default())
             }
             inner => {
                 return Err(StepError::BadInstruction(BadInstruction {
@@ -2923,6 +2934,15 @@ impl SyncPoint<'_> {
                 Ok(())
             }
         }
+    }
+
+    pub async fn step_forward(&mut self) -> Result<(), StepError> {
+        let Some(polled) = &mut self.future else {
+            return Ok(());
+        };
+
+        let DevicePolled { future, gpu } = polled;
+        todo!()
     }
 
     /// Report the time spent in this sync point.
