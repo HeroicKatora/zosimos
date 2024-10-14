@@ -3059,3 +3059,15 @@ pub(crate) fn copy_host_to_buffer(
         target_row[..bytes_to_copy].copy_from_slice(&source_row[..bytes_to_copy]);
     }
 }
+
+impl Drop for SyncPoint<'_> {
+    fn drop(&mut self) {
+        // FIXME: not a good strategy to poll to completion. However, dropping the future without
+        // polling it to completion seems in some instance to have a dead-lock effect. Should
+        // investigate alternate strategies for correctly destroying this future or unconditionally
+        // panic to enforce an explicit choice by the caller (when async polling is implemented).
+        if self.future.is_some() {
+            let _ = self.block_on();
+        }
+    }
+}
