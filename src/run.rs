@@ -1,8 +1,18 @@
 mod timing;
 
-use core::{future::Future, iter::once, marker::Unpin, ops::Range, pin::Pin};
+use core::{
+    future::Future,
+    iter::once,
+    marker::{PhantomData, Unpin},
+    ops::Range,
+    pin::Pin,
+};
+
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use crate::buffer::{BufferLayout, ByteLayout, Descriptor};
 use crate::command::Register;
@@ -325,7 +335,8 @@ struct DevicePolled<'exe, T: WithGpu> {
 
 pub struct SyncPoint<'exe> {
     future: Option<DevicePolled<'exe, Gpu>>,
-    marker: core::marker::PhantomData<&'exe mut Execution>,
+    submit_check: Arc<AtomicBool>,
+    marker: PhantomData<&'exe mut Execution>,
     time: timing::TimeAccountant,
     debug_mark: Option<String>,
 }
@@ -1348,6 +1359,9 @@ impl Execution {
             cache,
         } = self;
 
+        let submit_flag: Arc<AtomicBool> = Arc::default();
+        let submit_check = submit_flag.clone();
+
         let async_step = async move {
             let mut limits = limits;
 
@@ -1364,6 +1378,7 @@ impl Execution {
                     }
                     Ok(submission) => {
                         if submission.submit {
+                            submit_flag.fetch_or(true, Ordering::Release);
                         }
                     }
                 }
@@ -1380,13 +1395,13 @@ impl Execution {
             Ok(())
         };
 
-        // TODO: test the waters with one no-waker poll?
         Ok(SyncPoint {
             future: Some(DevicePolled {
                 future: Box::pin(async_step),
                 gpu: self.gpu.clone(),
             }),
-            marker: core::marker::PhantomData,
+            submit_check,
+            marker: PhantomData,
             time,
             debug_mark,
         })
