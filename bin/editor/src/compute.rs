@@ -5,6 +5,7 @@ use std::sync::{mpsc, Arc};
 use crate::surface::Surface;
 use arc_swap::ArcSwapAny;
 
+use zosimos::buffer::Descriptor;
 use zosimos::command::{CommandBuffer, Register};
 use zosimos::pool::{GpuKey, Pool, PoolBridge, PoolKey, SwapChain};
 use zosimos::run::StepLimits;
@@ -13,7 +14,11 @@ use zosimos::run::StepLimits;
 pub struct Compute {
     /// The pool we use for computing.
     pool: Pool,
-    key: GpuKey,
+    /// The bridge between the surface and compute pools.
+    bridge: PoolBridge,
+    gpu: GpuKey,
+    /// Descriptors for each in the swap chain.
+    render_target: Vec<PoolKey>,
     adapter: Arc<wgpu::Adapter>,
     program: ArcSwapAny<Arc<Program>>,
     bindings: HashMap<Register, PoolKey>,
@@ -41,9 +46,13 @@ pub struct ComputeCommands {
     pub out_registers: Vec<Register>,
 }
 
-#[derive(Default)]
 struct Exit {
     pool: Pool,
+    bridge: PoolBridge,
+    /// The key of the target buffer in the `Compute::pool`.
+    render_target: PoolKey,
+    /// The key of the buffer we rendered to, in the `Exit::pool`.
+    render_exec: PoolKey,
 }
 
 impl Compute {
@@ -52,8 +61,20 @@ impl Compute {
         let mut pool = Pool::new();
 
         let adapter = surface.adapter();
-        let key = surface.configure_pool(&mut pool);
+        let (gpu, bridge) = surface.configure_pool(&mut pool);
         let swap = surface.configure_swap_chain(2);
+
+        // Just allocate a buffer. We'll change the details later to align with the swap chain.
+        let render_target = swap
+            .empty
+            .iter()
+            .map(|_| {
+                pool.declare(Descriptor::with_srgb_image(
+                    &image::DynamicImage::new_luma_a8(0, 0),
+                ))
+                .key()
+            })
+            .collect();
 
         let program = Arc::new(Program {
             commands: None,
@@ -65,7 +86,9 @@ impl Compute {
 
         Compute {
             pool,
-            key,
+            bridge,
+            gpu,
+            render_target,
             adapter,
             program,
             bindings: Default::default(),
@@ -109,7 +132,13 @@ impl Compute {
     pub fn run(&mut self) -> Box<dyn Future<Output = ()> + Send + 'static> {
         let program = self.program.load().clone();
         let exit_send = self.exit_send.clone();
+
         let Some(commands) = &program.commands else {
+            return Box::new(core::future::ready(()));
+        };
+
+        let &[out_reg] = &commands.out_registers[..] else {
+            log::warn!("Only support compute with precisely one output register");
             return Box::new(core::future::ready(()));
         };
 
@@ -117,9 +146,18 @@ impl Compute {
             return Box::new(core::future::ready(()));
         };
 
+        let Some(render_target) = self.render_target.pop() else {
+            return Box::new(core::future::ready(()));
+        };
+
+        let Some(render_desc) = program.describe_register(out_reg) else {
+            log::warn!("Failed to describe output register, this is a bug");
+            return Box::new(core::future::ready(()));
+        };
+
         let mut pool = Pool::new();
         let mut bridge = PoolBridge::default();
-        bridge.share_device(&self.pool, self.key, &mut pool);
+        bridge.share_device(&self.pool, self.gpu, &mut pool);
 
         let mut bindings = HashMap::new();
         for (&reg, &key) in &self.bindings {
@@ -129,6 +167,28 @@ impl Compute {
             bridge.swap_image(from_image, run_image);
             bindings.insert(reg, key);
         }
+
+        let render_exec = {
+            let mut from_image = self
+                .pool
+                .entry(render_target)
+                .expect("Registered target descriptor");
+
+            let upload = from_image.set_texture(self.gpu, &render_desc);
+
+            if upload.is_err() {
+                log::warn!("Failed to allocate output texture on GPU");
+                return Box::new(core::future::ready(()));
+            }
+
+            let run_image = pool.declare(from_image.descriptor());
+            let key = run_image.key();
+
+            bridge.swap_image(from_image, run_image);
+            bindings.insert(out_reg, key);
+
+            key
+        };
 
         // Move resource into temporary running pool.
         let mut launcher = program.launch(&mut pool);
@@ -156,8 +216,46 @@ impl Compute {
                 retire.input(reg).unwrap();
             }
 
-            let _ = exit_send.send(Exit { pool });
+            let _ = exit_send.send(Exit {
+                pool,
+                bridge,
+                render_target,
+                render_exec,
+            });
         })
+    }
+
+    /// Collect complete computations, update the surface.
+    pub fn reap(&mut self, surface: &mut Surface) {
+        let Ok(mut exit) = self.exit.try_recv() else {
+            surface.set_from_swap_chain(&mut self.swap_in_surface_pool);
+            return;
+        };
+
+        let Some(present_target) = self.swap_in_surface_pool.empty.pop_back() else {
+            surface.set_from_swap_chain(&mut self.swap_in_surface_pool);
+            return;
+        };
+
+        let render_exec = exit
+            .pool
+            .entry(exit.render_exec)
+            .expect("Render target not in pool");
+        let render_target = self
+            .pool
+            .entry(exit.render_target)
+            .expect("Render target not in compute");
+
+        exit.bridge.swap_image(render_exec, render_target);
+
+        let render_target = self
+            .pool
+            .entry(exit.render_target)
+            .expect("Render target not in compute");
+        surface.swap_into(render_target, present_target, &self.bridge);
+        self.swap_in_surface_pool.full.push_back(present_target);
+
+        surface.set_from_swap_chain(&mut self.swap_in_surface_pool);
     }
 }
 

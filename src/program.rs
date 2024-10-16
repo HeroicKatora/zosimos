@@ -1014,6 +1014,12 @@ impl ImagePoolPlan {
 }
 
 impl Program {
+    pub fn describe_register(&self, reg: Register) -> Option<&'_ Descriptor> {
+        let main = &self.functions[self.entry_index];
+        let texture = main.image_buffers.get_info(reg).ok()?;
+        Some(texture.descriptor)
+    }
+
     /// Request an adapter, hoping to get a proper one.
     pub fn request_adapter(instance: &wgpu::Instance) -> Result<wgpu::Adapter, MismatchError> {
         let request = instance.request_adapter(&wgpu::RequestAdapterOptions {

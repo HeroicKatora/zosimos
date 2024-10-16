@@ -4,7 +4,7 @@ use crate::winit::{WindowSurface, WindowedSurface};
 
 use zosimos::buffer::{Color, Descriptor, SampleParts, Texel, Transfer};
 use zosimos::command;
-use zosimos::pool::{GpuKey, Pool, PoolKey, SwapChain};
+use zosimos::pool::{GpuKey, Pool, PoolBridge, PoolImageMut, PoolKey, SwapChain};
 use zosimos::program::{Capabilities, CompileError, LaunchError, Program};
 use zosimos::run::{Executable, StepLimits};
 
@@ -184,18 +184,28 @@ impl Surface {
     /// Create a pool that shares the device with this surface.
     ///
     /// The pool can separately render textures which the surface's pool can then display.
-    pub fn configure_pool(&mut self, pool: &mut Pool) -> GpuKey {
+    pub fn configure_pool(&mut self, pool: &mut Pool) -> (GpuKey, PoolBridge) {
         log::info!("Surface reconfiguring pool device");
         let internal_key = self.reconfigure_gpu();
 
-        self.pool
+        let mut bridge = PoolBridge::default();
+        let shared_key = self
+            .pool
             .share_device(internal_key, pool)
-            .expect("maintained incorrect gpu key")
+            .expect("maintained incorrect gpu key");
+        bridge.add_translated_gpu(internal_key, shared_key);
+
+        (shared_key, bridge)
     }
 
     /// Create a swap chain in our pool, for the presented texture.
     pub fn configure_swap_chain(&mut self, n: usize) -> SwapChain {
         self.pool.swap_chain(self.entry.presentable, n)
+    }
+
+    pub fn swap_into(&mut self, entry: PoolImageMut, img: PoolKey, bridge: &PoolBridge) {
+        let present = self.pool.entry(img).unwrap();
+        bridge.swap_image(present, entry);
     }
 
     /// Change the base device.
