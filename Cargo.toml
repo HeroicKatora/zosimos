@@ -53,6 +53,10 @@ version = "0.25.0"
 default-features = false
 features = ["png"]
 
+[dev-dependencies.tokio]
+version = "1"
+features = ["macros", "rt-multi-thread"]
+
 [[test]]
 name = "blend"
 

@@ -1,6 +1,18 @@
-use core::{future::Future, iter::once, marker::Unpin, ops::Range, pin::Pin};
+mod timing;
+
+use core::{
+    future::Future,
+    iter::once,
+    marker::{PhantomData, Unpin},
+    ops::Range,
+    pin::Pin,
+};
+
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use crate::buffer::{BufferLayout, ByteLayout, Descriptor};
 use crate::command::Register;
@@ -323,9 +335,9 @@ struct DevicePolled<'exe, T: WithGpu> {
 
 pub struct SyncPoint<'exe> {
     future: Option<DevicePolled<'exe, Gpu>>,
-    marker: core::marker::PhantomData<&'exe mut Execution>,
-    #[cfg(not(target_arch = "wasm32"))]
-    host_start: std::time::Instant,
+    submit_check: Arc<AtomicU64>,
+    marker: PhantomData<&'exe mut Execution>,
+    time: timing::TimeAccountant,
     debug_mark: Option<String>,
 }
 
@@ -389,6 +401,13 @@ enum StepErrorKind {
 #[derive(Debug)]
 pub struct BadInstruction {
     inner: String,
+}
+
+#[derive(Default)]
+struct Submissions {
+    /// Did we submit to the device, i.e. if we want to sync can we `on_submitted_work_done` or
+    /// not? If multi-device then this should become a set or map from gpu keys.
+    submit: bool,
 }
 
 impl core::fmt::Display for BadInstruction {
@@ -1324,8 +1343,7 @@ impl Execution {
             .last()
             .map_or(usize::MAX, |range| range.start);
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let host_start = std::time::Instant::now();
+        let time = timing::TimeAccountant::from_now();
 
         let debug_mark = self
             .host
@@ -1341,6 +1359,9 @@ impl Execution {
             cache,
         } = self;
 
+        let submit_flag: Arc<AtomicU64> = Arc::default();
+        let submit_check = submit_flag.clone();
+
         let async_step = async move {
             let mut limits = limits;
 
@@ -1355,7 +1376,11 @@ impl Execution {
                         error.instruction_pointer = instruction_pointer;
                         return Err(error);
                     }
-                    Ok(()) => {}
+                    Ok(submission) => {
+                        if submission.submit {
+                            submit_flag.fetch_add(1, Ordering::Release);
+                        }
+                    }
                 }
 
                 if limits.is_exhausted() {
@@ -1370,15 +1395,14 @@ impl Execution {
             Ok(())
         };
 
-        // TODO: test the waters with one no-waker poll?
         Ok(SyncPoint {
             future: Some(DevicePolled {
                 future: Box::pin(async_step),
                 gpu: self.gpu.clone(),
             }),
-            marker: core::marker::PhantomData,
-            #[cfg(not(target_arch = "wasm32"))]
-            host_start,
+            submit_check,
+            marker: PhantomData,
+            time,
             debug_mark,
         })
     }
@@ -1423,7 +1447,7 @@ impl Host {
         cache: &mut Cache,
         gpu: &Gpu,
         limits: &mut StepLimits,
-    ) -> Result<(), StepError> {
+    ) -> Result<Submissions, StepError> {
         struct DumpFrame<'stack> {
             stack: Option<&'stack mut Vec<Frame>>,
         }
@@ -1454,7 +1478,7 @@ impl Host {
                 // resource it was meant to create / grab this resource from the environment.
                 // Otherwise, the index-tracking of other resources gets messed up as the encoder
                 // relies on this being essentially a stack machine.
-                return Ok(());
+                return Ok(Submissions::default());
             }
         }
 
@@ -1469,7 +1493,7 @@ impl Host {
                 // eprintln!("Made {}: {:?}", self.descriptors.bind_group_layouts.len(), group);
                 let group = gpu.with_gpu(|gpu| gpu.device().create_bind_group_layout(&group));
                 self.descriptors.bind_group_layouts.push(group);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::BindGroup(desc) => {
                 let mut entry_buffer = vec![];
@@ -1479,7 +1503,7 @@ impl Host {
                 // eprintln!("{}: {:?}", desc.layout_idx, group);
                 let group = gpu.with_gpu(|gpu| gpu.device().create_bind_group(&group));
                 self.descriptors.bind_groups.push(group);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::Buffer(desc) => {
                 let wgpu_desc = wgpu::BufferDescriptor {
@@ -1504,7 +1528,7 @@ impl Host {
                     .buffer_descriptors
                     .insert(buffer_idx, desc.clone());
                 self.descriptors.buffers.push(Arc::new(buffer));
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::BufferInit(desc) => {
                 use wgpu::util::DeviceExt;
@@ -1521,7 +1545,7 @@ impl Host {
                 self.usage.buffer_mem += desc.u64_len();
                 let buffer = gpu.with_gpu(|gpu| gpu.device().create_buffer_init(&wgpu_desc));
                 self.descriptors.buffers.push(Arc::new(buffer));
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::Shader(desc) => {
                 let shader;
@@ -1561,14 +1585,14 @@ impl Host {
                 }
 
                 self.descriptors.shaders.push(shader);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::PipelineLayout(desc) => {
                 let mut entry_buffer = vec![];
                 let layout = self.descriptors.pipeline_layout(desc, &mut entry_buffer)?;
                 let layout = gpu.with_gpu(|gpu| gpu.device().create_pipeline_layout(&layout));
                 self.descriptors.pipeline_layouts.push(layout);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::Sampler(desc) => {
                 let desc = wgpu::SamplerDescriptor {
@@ -1590,7 +1614,7 @@ impl Host {
                 };
                 let sampler = gpu.with_gpu(|gpu| gpu.device().create_sampler(&desc));
                 self.descriptors.sampler.push(sampler);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::TextureView(desc) => {
                 let texture = self
@@ -1614,7 +1638,7 @@ impl Host {
                 };
                 let view = texture.create_view(&desc);
                 self.descriptors.texture_views.push(view);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::RenderView(source_image) => {
                 let texture = match &mut self.descriptors.image_io_buffers[source_image.0].data {
@@ -1642,7 +1666,7 @@ impl Host {
 
                 let view = texture.create_view(&desc);
                 self.descriptors.texture_views.push(view);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::Texture(desc) => {
                 use wgpu::TextureUsages as U;
@@ -1693,7 +1717,7 @@ impl Host {
                 );
 
                 self.descriptors.textures.push(texture);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::RenderPipeline(desc) => {
                 let pipeline = if let Some(pipeline) = cache.precompiled_pipelines.remove(&inst.0) {
@@ -1722,7 +1746,7 @@ impl Host {
                 }
 
                 self.descriptors.render_pipelines.push(pipeline);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::BeginCommands => {
                 if self.command_encoder.is_some() {
@@ -1733,7 +1757,7 @@ impl Host {
 
                 let encoder = gpu.with_gpu(|gpu| gpu.device().create_command_encoder(&descriptor));
                 self.command_encoder = Some(encoder);
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::BeginRenderPass(descriptor) => {
                 let mut attachment_buf = vec![];
@@ -1751,13 +1775,13 @@ impl Host {
                 drop(attachment_buf);
                 self.machine.render_pass(&self.descriptors, pass)?;
 
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::EndCommands => match self.command_encoder.take() {
                 None => Err(StepError::InvalidInstruction(line!())),
                 Some(encoder) => {
                     self.descriptors.command_buffers.push(encoder.finish());
-                    Ok(())
+                    Ok(Submissions::default())
                 }
             },
             &Low::RunTopCommand if self.delayed_submits == 0 => {
@@ -1767,7 +1791,7 @@ impl Host {
                     .pop()
                     .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                 gpu.with_gpu(|gpu| gpu.queue().submit(once(command)));
-                Ok(())
+                Ok(Submissions { submit: true })
             }
             &Low::RunTopCommand => {
                 let many = 1 + self.delayed_submits;
@@ -1775,10 +1799,11 @@ impl Host {
                     let commands = self.descriptors.command_buffers.drain(top..);
                     gpu.with_gpu(|gpu| gpu.queue().submit(commands));
                     self.delayed_submits = 0;
-                    Ok(())
                 } else {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
+
+                Ok(Submissions { submit: true })
             }
             &Low::RunBotToTop(many) => {
                 let many = many + self.delayed_submits;
@@ -1790,7 +1815,7 @@ impl Host {
                     return Err(StepError::InvalidInstruction(line!()));
                 }
 
-                Ok(())
+                Ok(Submissions { submit: true })
             }
             &Low::WriteImageToBuffer {
                 source_image,
@@ -1882,7 +1907,7 @@ impl Host {
                         .precomputed
                         .insert(write_event, Precomputed);
 
-                    return Ok(());
+                    return Ok(Submissions::default());
                 } else if let ImageData::GpuBuffer {
                     buffer: src_buffer,
                     // FIXME: validate layout? What for?
@@ -1910,7 +1935,7 @@ impl Host {
                         .precomputed
                         .insert(write_event, Precomputed);
 
-                    return Ok(());
+                    return Ok(Submissions::default());
                 }
 
                 if image.as_bytes().is_none() {
@@ -1939,7 +1964,7 @@ impl Host {
                 drop(data);
                 buffer.unmap();
 
-                Ok(())
+                Ok(Submissions::default())
             }
             &Low::CopyBufferToTexture {
                 source_buffer,
@@ -1981,7 +2006,7 @@ impl Host {
 
                 encoder.copy_buffer_to_texture(buffer, texture, extent);
 
-                Ok(())
+                Ok(Submissions::default())
             }
             &Low::CopyTextureToBuffer {
                 source_texture,
@@ -2015,7 +2040,7 @@ impl Host {
 
                 encoder.copy_texture_to_buffer(texture, buffer, extent);
 
-                Ok(())
+                Ok(Submissions::default())
             }
             &Low::CopyBufferToBuffer {
                 source_buffer,
@@ -2049,7 +2074,7 @@ impl Host {
 
                 encoder.copy_buffer_to_buffer(source, 0, target, 0, size);
 
-                Ok(())
+                Ok(Submissions::default())
             }
             &Low::ReadBuffer {
                 source_buffer,
@@ -2111,7 +2136,7 @@ impl Host {
                     let command = encoder.finish();
                     gpu.with_gpu(|gpu| gpu.queue().submit(once(command)));
 
-                    return Ok(());
+                    return Ok(Submissions { submit: true });
                 } else if let ImageData::GpuBuffer {
                     buffer,
                     layout,
@@ -2133,7 +2158,7 @@ impl Host {
                     let command = encoder.finish();
                     gpu.with_gpu(|gpu| gpu.queue().submit(once(command)));
 
-                    return Ok(());
+                    return Ok(Submissions { submit: true });
                 }
 
                 if image.as_bytes().is_none() {
@@ -2166,21 +2191,21 @@ impl Host {
                 drop(data);
                 buffer.unmap();
 
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::StackFrame(frame) => {
                 if let Some(ref mut frames) = _dump_on_panic.stack {
                     frames.push(frame.clone());
                 }
 
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::StackPop => {
                 if let Some(ref mut frames) = _dump_on_panic.stack {
                     let _ = frames.pop();
                 }
 
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::Call {
                 function,
@@ -2232,7 +2257,7 @@ impl Host {
                 let instruction_range = fn_info.range.clone();
                 self.machine.instruction_pointer.push(instruction_range);
 
-                Ok(())
+                Ok(Submissions::default())
             }
             Low::Return => {
                 // A bit questionable. We do not return from the entry point function.. That'll at
@@ -2248,7 +2273,7 @@ impl Host {
                         .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
                 }
 
-                Ok(())
+                Ok(Submissions::default())
             }
             inner => {
                 return Err(StepError::BadInstruction(BadInstruction {
@@ -2920,18 +2945,151 @@ impl SyncPoint<'_> {
             Some(polled) => {
                 let DevicePolled { future, gpu } = polled;
                 block_on(future, Some(&gpu))?;
-                /*
-                let _took_time =
-                    std::time::Instant::now().saturating_duration_since(self.host_start);
-                eprint!("{:?}", _took_time);
-                if let Some(dbg) = &self.debug_mark {
-                    eprintln!("{}", dbg)
-                } else {
-                    eprintln!()
-                };*/
+                self.time.checkpoint();
                 Ok(())
             }
         }
+    }
+
+    /// Step towards synchronization with the end of instructions, asynchronously.
+    ///
+    /// The provided closure must schedule polling of the GPU via some unspecified internal means,
+    /// *if* it is called. On a wasm32 web target for instance this is not necessary and will be
+    /// done automatically by itself in the background.
+    ///
+    /// The `queue_poll` returns a guard value. When the value is dropped, the polling loop can and
+    /// should be stopped. While it's possible to spawn a thread or task with routine polling, an
+    /// integration maintaining multiple concurrent executions may want to optimize to check the
+    /// device's ID instead.
+    pub async fn finish<Guard>(
+        &mut self,
+        // A method that will ensure the GPU queue to be polled while its guard is live.
+        queue_poll: impl FnOnce(Gpu) -> Guard,
+    ) -> Result<(), StepError> {
+        let Some(polled) = &mut self.future else {
+            return Ok(());
+        };
+
+        // In contrast to the synchronous `block_on` code, here we want to avoid integrating the
+        // GPU device itself deeply into the loop. If possible, the caller is responsible. This is
+        // due to wasm32-web where no polling needs to be done at all. Even with native code the
+        // necessary polling should not block the main asynchronous thread itself.
+        //
+        // Instead, rely on `on_submitted_work_done` callbacks for decisions. We still want to have
+        // concurrency between each work as progress can be made by submitting more work, except
+        // for specific synchronization points such as mapping a buffer for read-back.
+        struct ResubmitCheck<'q> {
+            /// Number of submits we can wait for.
+            submit_check: Arc<AtomicU64>,
+            /// Number of submits that have been enqueued.
+            submitted: u64,
+            /// Number of submits that are complete.
+            submit_done: Arc<AtomicU64>,
+            /// The queue to submit on_submitted_work_done checks against.
+            queue: &'q Queue,
+        }
+
+        impl core::future::Future for ResubmitCheck<'_> {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+                // Maintain: submit_check >= submitted >= submit_done locally for ResubmitCheck
+                let this = Pin::into_inner(self);
+                let check = this.submit_check.load(Ordering::SeqCst);
+                let done = this.submit_done.load(Ordering::Acquire);
+
+                // Are we to register a new waker for outstanding submissions?
+                if this.submitted == check {
+                    // We must maintain the property: either
+                    // - the `done` loaded has updated to the final value and we do not suspend
+                    // - the `done` loaded has not yet updated to the final value, `wake` will get
+                    //   called after this suspend.
+                    return if this.submitted == done {
+                        std::task::Poll::Ready(())
+                    } else {
+                        // Here we must guarantee wake was _after_ the call to poll (not its
+                        // completion and return). The happens-before relationship is established
+                        // by the SeqCst chain on `submit_done`. We got here because the
+                        // `fetch_max` catching up to `submitted` did not happen-before the above
+                        // load. That implies it happens-after since SeqCst requires at least one
+                        // of these two orderings to hold. The `wake()`  in that callback is
+                        // happens-after by local ordering.
+                        std::task::Poll::Pending
+                    };
+                }
+
+                struct CompleteOnDrop {
+                    check: u64,
+                    submit_done: Arc<AtomicU64>,
+                    waker: Option<std::task::Waker>,
+                }
+
+                impl Drop for CompleteOnDrop {
+                    fn drop(&mut self) {
+                        // See above comment on this ordering of operations, and SeqCst.
+                        self.submit_done.fetch_max(self.check, Ordering::SeqCst);
+                        self.waker.take().unwrap().wake();
+                    }
+                }
+
+                let callback_or_dropped = CompleteOnDrop {
+                    check,
+                    submit_done: this.submit_done.clone(),
+                    waker: Some(cx.waker().clone()),
+                };
+
+                this.queue.on_submitted_work_done(move || {
+                    drop(callback_or_dropped);
+                });
+
+                this.submitted = check;
+                // The on_submitted_work_done callback will happen-after the entry to this function
+                // by itself. We just require that it actually happens in finite time and that also
+                // happens should the device itself get dropped (assuming this behaves usual).
+                std::task::Poll::Pending
+            }
+        }
+
+        let check = self.submit_check.clone();
+        let DevicePolled { future, gpu } = polled;
+
+        // TODO: this could be lazy!
+        let _guard = queue_poll(gpu.clone());
+
+        let submit_gpu = gpu.clone();
+        // Technically optional, but polling this future will ensure that the effects of the
+        // SyncPoint have been stabilized before stepping the next time. In particular, this
+        // protects the guard from dropping before the need of polling is done.
+        let submits_done_future = ResubmitCheck {
+            submit_check: check,
+            submitted: 0,
+            submit_done: Arc::default(),
+            queue: submit_gpu.queue(),
+        };
+
+        // FIXME: we may want to poll these as a single join to get timely status updates. But then
+        // again, this is just fine. We only need that we do no drop the `_guard` before all submit
+        // calls have been polled for.
+        let result = future.await;
+        // Avoid polling the future (on Drop) after this point, it's done.
+        self.future = None;
+        submits_done_future.await;
+
+        result
+    }
+
+    /// Report the time spent in this sync point.
+    ///
+    /// If no timing interfaces are configured (e.g. on wasm32-none) then reports no duration.
+    /// Otherwise, based on total system time. This is convenience, should probably instead report
+    /// it as time spent keyed by each device actually utilized.
+    pub fn time_spent(&self) -> std::time::Duration {
+        self.time.spent()
+    }
+
+    /// Report, as debugging, the marker for the program instruction being synced on.
+    pub fn debug_mark(&self) -> Option<&str> {
+        self.debug_mark.as_deref()
     }
 }
 

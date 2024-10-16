@@ -161,6 +161,7 @@ fn run_affine(
         retire_with_one_image(output_affine),
     );
 
+    // This test is used in `async.rs`, with the same test image!
     let image_affine = pool.entry(result).unwrap();
     util::assert_reference(image_affine.into(), "affine.crc.png");
 }
