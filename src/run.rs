@@ -2951,7 +2951,17 @@ impl SyncPoint<'_> {
         }
     }
 
-    pub async fn fi<Guard>(
+    /// Step towards synchronization with the end of instructions, asynchronously.
+    ///
+    /// The provided closure must schedule polling of the GPU via some unspecified internal means,
+    /// *if* it is called. On a wasm32 web target for instance this is not necessary and will be
+    /// done automatically by itself in the background.
+    ///
+    /// The `queue_poll` returns a guard value. When the value is dropped, the polling loop can and
+    /// should be stopped. While it's possible to spawn a thread or task with routine polling, an
+    /// integration maintaining multiple concurrent executions may want to optimize to check the
+    /// device's ID instead.
+    pub async fn finish<Guard>(
         &mut self,
         // A method that will ensure the GPU queue to be polled while its guard is live.
         queue_poll: impl FnOnce(Gpu) -> Guard,
@@ -2968,7 +2978,6 @@ impl SyncPoint<'_> {
         // Instead, rely on `on_submitted_work_done` callbacks for decisions. We still want to have
         // concurrency between each work as progress can be made by submitting more work, except
         // for specific synchronization points such as mapping a buffer for read-back.
-
         struct ResubmitCheck<'q> {
             /// Number of submits we can wait for.
             submit_check: Arc<AtomicU64>,
@@ -3044,8 +3053,10 @@ impl SyncPoint<'_> {
         let check = self.submit_check.clone();
         let DevicePolled { future, gpu } = polled;
 
+        // TODO: this could be lazy!
         let _guard = queue_poll(gpu.clone());
 
+        let submit_gpu = gpu.clone();
         // Technically optional, but polling this future will ensure that the effects of the
         // SyncPoint have been stabilized before stepping the next time. In particular, this
         // protects the guard from dropping before the need of polling is done.
@@ -3053,13 +3064,15 @@ impl SyncPoint<'_> {
             submit_check: check,
             submitted: 0,
             submit_done: Arc::default(),
-            queue: gpu.queue(),
+            queue: submit_gpu.queue(),
         };
 
         // FIXME: we may want to poll these as a single join to get timely status updates. But then
         // again, this is just fine. We only need that we do no drop the `_guard` before all submit
         // calls have been polled for.
         let result = future.await;
+        // Avoid polling the future (on Drop) after this point, it's done.
+        self.future = None;
         submits_done_future.await;
 
         result
