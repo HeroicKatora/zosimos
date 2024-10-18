@@ -13,8 +13,7 @@ use crate::program::{
     ImageDescriptor, ImagePoolPlan, Initializer, Instruction, LaunchError, Low,
     PipelineLayoutDescriptor, PipelineLayoutKey, PrimitiveState, RenderPassDescriptor,
     RenderPipelineDescriptor, RenderPipelineKey, SamplerDescriptor, ShaderDescriptor,
-    ShaderDescriptorKey, Texture, TextureDescriptor, TextureUsage, TextureViewDescriptor,
-    VertexState,
+    ShaderDescriptorKey, Texture, TextureDescriptor, TextureViewDescriptor, VertexState,
 };
 use crate::util::ExtendOne;
 use crate::{run, shaders};
@@ -180,15 +179,6 @@ struct StagingTexture {
     format: TextureDescriptor,
     stage_kind: shaders::stage::StageKind,
     parameter: shaders::stage::XyzParameter,
-    /// A texture which we use as an attachment for encoding.
-    ///
-    /// The current implementation for encoding attaches the staging buffer as a storage image and
-    /// the texture as a sampled source texture. However, this means we can not use either of them
-    /// as the target attachment. So we have this additional texture that has the right size and
-    /// format to be used as a target attachment for encoding while we _never_ actually write to it
-    /// (op:write is disabled for that draw call).
-    /// FIXME: find a way to avoid this texture allocation.
-    temporary_attachment_buffer_for_encoding_remove_if_possible: DeviceTexture,
 }
 
 /// The gpu buffer associated with an image buffer.
@@ -584,17 +574,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 DeviceTexture(texture)
             };
 
-            let fallback = {
-                let texture = self.textures;
-                // eprintln!("Fallback Texture {:?} {:?}", device, &staging);
-                self.push(Low::Texture(TextureDescriptor {
-                    usage: TextureUsage::Transient,
-                    size: staging.size,
-                    ..texture_format
-                }))?;
-                DeviceTexture(texture)
-            };
-
             // eprintln!("{} {:?}", reg_texture.0, staging);
             self.staging_map.insert(
                 reg_texture,
@@ -603,7 +582,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     format: staging,
                     stage_kind: st_parameter.stage_kind,
                     parameter: st_parameter.parameter,
-                    temporary_attachment_buffer_for_encoding_remove_if_possible: fallback,
                 },
             );
         }
