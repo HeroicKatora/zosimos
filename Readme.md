@@ -5,7 +5,7 @@ barely notice it running. At least that's the goal. The main idea is to use
 pre-built GPU pipelines, the same you will find used in video games, but to
 wrap it into an interface more familiar from CPU-based methods.
 
-Planned: See [docs/roadmap.md].
+Planned: See <docs/roadmap.md>.
 
 ## How to test
 
@@ -41,7 +41,7 @@ processing needs invites the risk of many CVEs, a world of painful
 configuration, and overall slowness. Avoid all of this by relying on safe Rust,
 nice embedding, hardware acceleration and an optimizing execution engine.
 
-For more see [docs/philosophy.md].
+For more see <docs/philosophy.md>.
 
 ## How it works
 
@@ -62,4 +62,4 @@ demonstrate them. Feel free to grab one that tickles your interest. (And see
 try not to introduce anything incongruent to the project goals and prefer
 high-level primitives to deep integration / changes to the coammdn structure.
 
-See [docs/ideas.md].
+See <docs/ideas.md>.
