@@ -574,7 +574,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 DeviceTexture(texture)
             };
 
-            // eprintln!("{} {:?}", reg_texture.0, staging);
             self.staging_map.insert(
                 reg_texture,
                 StagingTexture {

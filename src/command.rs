@@ -77,9 +77,30 @@ pub struct GenericDescriptor {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct GenericBuffer {
+    /// The size of this buffer, where statically known.
+    ///
+    /// Generic means the size is determined by some other sized type parameter. Descriptor
+    /// parameters are sized in terms of their IO encoded buffer. Buffer parameters are sized in
+    /// terms of their own size.
+    size: Generic<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Generic<T> {
     Concrete(T),
     Generic(GenericVar),
+}
+
+/// Describe the value class of a register, and its precise type.
+#[non_exhaustive]
+pub enum RegisterDescription<'cmd> {
+    /// This register is not a value operation.
+    None,
+    /// This register is a texture.
+    Texture(&'cmd GenericDescriptor),
+    /// This register is a byte-based buffer.
+    Buffer(&'cmd GenericBuffer),
 }
 
 #[derive(Clone, Debug)]
@@ -605,6 +626,7 @@ impl CommandBuffer {
         descriptor
     }
 
+    /// Create a descriptor var by modifying another.
     pub fn derive_descriptor(
         &mut self,
         var: DescriptorDerivation,
@@ -625,11 +647,12 @@ impl CommandBuffer {
         Ok(descriptor)
     }
 
+    /// Create a descriptor var, describing a previous register.
     pub fn register_descriptor(
         &mut self,
         register: Register,
     ) -> Result<DescriptorVar, CommandError> {
-        let generic = self.describe_reg(register)?;
+        let generic = self.describe_reg(register).as_texture()?;
 
         let descriptor = DescriptorVar(self.tys.len());
         self.tys.push(generic.clone());
@@ -658,7 +681,9 @@ impl CommandBuffer {
                 .filter_map(|op| {
                     if let &Op::Output { src } = op {
                         Some(
+                            // FIXME: non-texture output.
                             self.describe_reg(src)
+                                .as_texture()
                                 .expect("Validated when creating output")
                                 .clone(),
                         )
@@ -712,7 +737,7 @@ impl CommandBuffer {
 
         for (param, arg) in signature.input.iter().zip(invoke.arguments) {
             let expected = param.rewrite(&generics);
-            let arg_ty = self.describe_reg(*arg)?;
+            let arg_ty = self.describe_reg(*arg).as_texture()?;
 
             if expected != *arg_ty {
                 return Err(CommandError::INVALID_CALL);
@@ -750,7 +775,7 @@ impl CommandBuffer {
 
     /// Select a rectangular part of an image.
     pub fn crop(&mut self, src: Register, rect: Rectangle) -> Result<Register, CommandError> {
-        let desc = self.describe_reg(src)?.clone();
+        let desc = self.describe_reg(src).as_texture()?.clone();
         Ok(self.push(Op::Unary {
             src,
             op: UnaryOp::Crop(rect),
@@ -770,7 +795,7 @@ impl CommandBuffer {
         color: Color,
         texel: Texel,
     ) -> Result<Register, CommandError> {
-        let desc_src = self.describe_reg(src)?;
+        let desc_src = self.describe_reg(src).as_texture()?;
         let conversion;
 
         let desc_src = desc_src.as_concrete().ok_or(CommandError {
@@ -897,7 +922,7 @@ impl CommandBuffer {
         method: ChromaticAdaptationMethod,
         target: Whitepoint,
     ) -> Result<Register, CommandError> {
-        let desc_src = self.describe_reg(src)?;
+        let desc_src = self.describe_reg(src).as_texture()?;
         let texel_color;
         let source_wp;
         let (to_xyz_matrix, from_xyz_matrix);
@@ -962,8 +987,8 @@ impl CommandBuffer {
         rect: Rectangle,
         above: Register,
     ) -> Result<Register, CommandError> {
-        let desc_below = self.describe_reg(below)?;
-        let desc_above = self.describe_reg(above)?;
+        let desc_below = self.describe_reg(below).as_texture()?;
+        let desc_above = self.describe_reg(above).as_texture()?;
 
         if desc_above.descriptor_chroma() != desc_below.descriptor_chroma() {
             return Err(CommandError {
@@ -1005,7 +1030,7 @@ impl CommandBuffer {
         src: Register,
         channel: ColorChannel,
     ) -> Result<Register, CommandError> {
-        let desc_src = self.describe_reg(src)?;
+        let desc_src = self.describe_reg(src).as_texture()?;
 
         let desc_src = desc_src.as_concrete().ok_or(CommandError {
             inner: CommandErrorKind::ConcreteDescriptorRequired,
@@ -1077,7 +1102,7 @@ impl CommandBuffer {
         src: Register,
         into: GenericDescriptor,
     ) -> Result<Register, CommandError> {
-        let source = self.describe_reg(src)?;
+        let source = self.describe_reg(src).as_texture()?;
         let supposed_type = into;
 
         if source.size() != supposed_type.size() {
@@ -1145,8 +1170,8 @@ impl CommandBuffer {
         channel: ColorChannel,
         above: Register,
     ) -> Result<Register, CommandError> {
-        let desc_below = self.describe_reg(below)?;
-        let desc_above = self.describe_reg(above)?.clone();
+        let desc_below = self.describe_reg(below).as_texture()?;
+        let desc_above = self.describe_reg(above).as_texture()?.clone();
 
         let Generic::Concrete((below_texel, below_color)) = desc_below.descriptor_chroma() else {
             return Err(CommandError {
@@ -1227,8 +1252,8 @@ impl CommandBuffer {
         config: Palette,
         indices: Register,
     ) -> Result<Register, CommandError> {
-        let color_desc = self.describe_reg(palette)?;
-        let idx_desc = self.describe_reg(indices)?;
+        let color_desc = self.describe_reg(palette).as_texture()?;
+        let idx_desc = self.describe_reg(indices).as_texture()?;
 
         // FIXME: check that channels are actually in indices' color type.
         let x_coord = if let Some(coord) = config.width {
@@ -1277,7 +1302,7 @@ impl CommandBuffer {
         image: Register,
         config: Derivative,
     ) -> Result<Register, CommandError> {
-        let desc = self.describe_reg(image)?.clone();
+        let desc = self.describe_reg(image).as_texture()?.clone();
 
         let op = Op::Unary {
             src: image,
@@ -1422,8 +1447,8 @@ impl CommandBuffer {
         above: Register,
     ) -> Result<Register, CommandError> {
         // TODO: should we check affine here?
-        let lhs = self.describe_reg(below)?.clone();
-        let rhs = self.describe_reg(above)?.clone();
+        let lhs = self.describe_reg(below).as_texture()?.clone();
+        let rhs = self.describe_reg(above).as_texture()?.clone();
 
         if lhs.descriptor_chroma() != rhs.descriptor_chroma() {
             return Err(CommandError::TYPE_ERR);
@@ -1487,7 +1512,7 @@ impl CommandBuffer {
     ///
     /// Outputs MUST later be bound from the pool during launch.
     pub fn output(&mut self, src: Register) -> Result<(Register, GenericDescriptor), CommandError> {
-        let outformat = self.describe_reg(src)?.clone();
+        let outformat = self.describe_reg(src).as_texture()?.clone();
         // Ignore this, it doesn't really produce a register.
         let register = self.push(Op::Output { src });
         Ok((register, outformat))
@@ -1499,7 +1524,7 @@ impl CommandBuffer {
     ///
     /// The target register must be renderable, i.e. a color with a native texture representation.
     pub fn render(&mut self, src: Register) -> Result<(Register, Descriptor), CommandError> {
-        let outformat = self.describe_reg(src)?.clone();
+        let outformat = self.describe_reg(src).as_texture()?.clone();
 
         let outformat = outformat.as_concrete().ok_or(CommandError {
             inner: CommandErrorKind::ConcreteDescriptorRequired,
@@ -1714,6 +1739,7 @@ impl CommandBuffer {
                 } else {
                     Register(idx)
                 })
+                .as_texture()
                 .expect("A non-output register");
 
             let descriptor = descriptor.monomorphize(tys);
@@ -1903,8 +1929,17 @@ impl CommandBuffer {
                 } => {
                     let texture = realize_texture(idx, op)?;
 
-                    let lhs_descriptor = command.describe_reg(*lhs).unwrap().monomorphize(tys);
-                    let rhs_descriptor = command.describe_reg(*rhs).unwrap().monomorphize(tys);
+                    let lhs_descriptor = command
+                        .describe_reg(*lhs)
+                        .as_texture()
+                        .unwrap()
+                        .monomorphize(tys);
+
+                    let rhs_descriptor = command
+                        .describe_reg(*rhs)
+                        .as_texture()
+                        .unwrap()
+                        .monomorphize(tys);
 
                     let lower_region = Rectangle::from(&lhs_descriptor);
                     let upper_region = Rectangle::from(&rhs_descriptor);
@@ -2112,21 +2147,19 @@ impl CommandBuffer {
     }
 
     /// Get the descriptor for a register.
-    fn describe_reg(&self, Register(reg): Register) -> Result<&GenericDescriptor, CommandError> {
+    fn describe_reg(&self, Register(reg): Register) -> RegisterDescription<'_> {
         match self.ops.get(reg) {
-            None | Some(Op::Output { .. }) | Some(Op::Render { .. }) => {
-                Err(CommandError::BAD_REGISTER)
-            }
+            None | Some(Op::Output { .. }) | Some(Op::Render { .. }) => RegisterDescription::None,
             Some(Op::Invoke { .. }) => {
                 // This does not describe results directly.
-                Err(CommandError::BAD_REGISTER)
+                RegisterDescription::None
             }
             Some(Op::InvokedResult { desc, .. })
             | Some(Op::Input { desc })
             | Some(Op::Construct { desc, .. })
             | Some(Op::Unary { desc, .. })
             | Some(Op::Binary { desc, .. })
-            | Some(Op::Dynamic { desc, .. }) => Ok(desc),
+            | Some(Op::Dynamic { desc, .. }) => RegisterDescription::Texture(desc),
         }
     }
 
@@ -2305,6 +2338,15 @@ impl From<Descriptor> for GenericDescriptor {
         GenericDescriptor {
             size: Generic::Concrete(size),
             chroma: Generic::Concrete(chroma),
+        }
+    }
+}
+
+impl<'lt> RegisterDescription<'lt> {
+    pub fn as_texture(&self) -> Result<&'lt GenericDescriptor, CommandError> {
+        match self {
+            RegisterDescription::Texture(tex) => Ok(tex),
+            _ => Err(CommandError::BAD_REGISTER),
         }
     }
 }
