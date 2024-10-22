@@ -252,6 +252,13 @@ pub(crate) struct Frame {
     pub(crate) name: String,
 }
 
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub(crate) struct KnobDescriptor {
+    /// The range of the initial data in the binary.
+    pub range: Range<usize>,
+}
+
 /// A gpu buffer associated with an image buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DeviceBuffer(pub(crate) usize);
@@ -1177,13 +1184,15 @@ impl Program {
         let mut functions = HashMap::new();
         let mut binary_data = vec![];
         let mut skip_by_op = HashMap::new();
+        let mut knobs = HashMap::new();
 
         let mut encoder = self.lower_to_impl(&capabilities, main, None)?;
         encoder.finalize()?;
         let io_map: Arc<run::IoMap> = encoder.io_map().into();
+
         instructions.extend(encoder.instructions);
         binary_data.extend(encoder.binary_data);
-        skip_by_op.extend(encoder.skip_by_op);
+        skip_by_op.extend(encoder.info.skip_by_op);
 
         functions.insert(
             Function(self.entry_index),
@@ -1216,9 +1225,18 @@ impl Program {
 
             skip_by_op.extend(
                 encoder
+                    .info
                     .skip_by_op
                     .into_iter()
                     .map(|(inst, event)| (Instruction(inst.0 + start), event)),
+            );
+
+            knobs.extend(
+                encoder
+                    .info
+                    .knobs
+                    .into_iter()
+                    .map(|(knob, info)| (knob, info.relocate(reloc_base))),
             );
 
             functions.insert(
@@ -1245,12 +1263,13 @@ impl Program {
             entry_point: Function(self.entry_index),
             instructions: instructions.into(),
             info: Arc::new(run::ProgramInfo {
-                buffer_by_op: encoder.buffer_by_op,
-                texture_by_op: encoder.texture_by_op,
-                shader_by_op: encoder.shader_by_op,
-                pipeline_by_op: encoder.pipeline_by_op,
+                buffer_by_op: encoder.info.buffer_by_op,
+                texture_by_op: encoder.info.texture_by_op,
+                shader_by_op: encoder.info.shader_by_op,
+                pipeline_by_op: encoder.info.pipeline_by_op,
                 skip_by_op,
                 functions,
+                knobs,
             }),
             binary_data,
             descriptors: run::Descriptors::default(),
@@ -1603,11 +1622,11 @@ impl Launcher<'_> {
             instructions,
             entry_point: Function(0),
             info: Arc::new(run::ProgramInfo {
-                buffer_by_op: encoder.buffer_by_op,
-                texture_by_op: encoder.texture_by_op,
-                shader_by_op: encoder.shader_by_op,
-                pipeline_by_op: encoder.pipeline_by_op,
-                skip_by_op: encoder.skip_by_op,
+                buffer_by_op: encoder.info.buffer_by_op,
+                texture_by_op: encoder.info.texture_by_op,
+                shader_by_op: encoder.info.shader_by_op,
+                pipeline_by_op: encoder.info.pipeline_by_op,
+                skip_by_op: encoder.info.skip_by_op,
                 functions: vec![(
                     Function(0),
                     FunctionFrame {
@@ -1618,6 +1637,7 @@ impl Launcher<'_> {
                 )]
                 .into_iter()
                 .collect(),
+                knobs: encoder.info.knobs,
             }),
             device,
             queue,
@@ -1768,6 +1788,18 @@ impl TextureDescriptor {
         let (w, h) = self.size;
         // FIXME: not really accurate.
         4 * u64::from(w.get()) * u64::from(h.get())
+    }
+}
+
+impl KnobDescriptor {
+    pub fn relocate(self, by: usize) -> Self {
+        let end = self.range.end.checked_add(by).unwrap();
+        let start = self.range.start.checked_add(by).unwrap();
+
+        KnobDescriptor {
+            range: start..end,
+            ..self
+        }
     }
 }
 

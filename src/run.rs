@@ -70,6 +70,7 @@ pub(crate) struct ProgramInfo {
     /// TODO: some instruction results supply multiple events.
     pub(crate) skip_by_op: HashMap<program::Instruction, program::Event>,
     pub(crate) functions: HashMap<program::Function, program::FunctionFrame>,
+    pub(crate) knobs: HashMap<program::Knob, program::KnobDescriptor>,
 }
 
 /// Configures devices and input/output buffers for an executable.

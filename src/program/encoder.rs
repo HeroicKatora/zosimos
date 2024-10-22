@@ -10,8 +10,8 @@ use crate::program::{
     BindGroupDescriptor, BindGroupLayoutDescriptor, BindingResource, Buffer, BufferDescriptor,
     BufferDescriptorInit, BufferInitContent, BufferUsage, Capabilities, ColorAttachmentDescriptor,
     DeviceBuffer, DeviceTexture, Event, FragmentState, ImageBufferAssignment, ImageBufferPlan,
-    ImageDescriptor, ImagePoolPlan, Initializer, Instruction, LaunchError, Low,
-    PipelineLayoutDescriptor, PipelineLayoutKey, PrimitiveState, RenderPassDescriptor,
+    ImageDescriptor, ImagePoolPlan, Initializer, Instruction, Knob, KnobDescriptor, LaunchError,
+    Low, PipelineLayoutDescriptor, PipelineLayoutKey, PrimitiveState, RenderPassDescriptor,
     RenderPipelineDescriptor, RenderPipelineKey, SamplerDescriptor, ShaderDescriptor,
     ShaderDescriptorKey, Texture, TextureDescriptor, TextureViewDescriptor, VertexState,
 };
@@ -100,27 +100,33 @@ pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
     /// Describes which intermediate textures have been mapped to the GPU.
     staging_map: HashMap<Texture, StagingTexture>,
     // Arena style allocators.
-
     // Output State with additional info relating to the input program.
-    // FIXME: remember masks for ops that can be skipped/replaced if texture is cached? Most ops
-    // build objects (descriptors, etc.) that are used in construction or initialization of a
-    // buffer. If we don't need to build the buffer, because we have its state in a previous cache,
-    // then we don't need the inputs either.
-    // We must always emulate the 'effect' (in terms of object indices) at runtime. Maybe we can
-    // just use a skip-list instead of Vec for those objects though. Or switch run to a pull-based
-    // model? But that would make it hard to provide bounds for `step`. Ahhh! Choices!
+    pub(crate) info: ExecutableInfo,
+}
+
+/// FIXME: remember masks for ops that can be skipped/replaced if texture is cached? Most ops
+/// build objects (descriptors, etc.) that are used in construction or initialization of a
+/// buffer. If we don't need to build the buffer, because we have its state in a previous cache,
+/// then we don't need the inputs either.
+/// We must always emulate the 'effect' (in terms of object indices) at runtime. Maybe we can
+/// just use a skip-list instead of Vec for those objects though. Or switch run to a pull-based
+/// model? But that would make it hard to provide bounds for `step`. Ahhh! Choices!
+#[derive(Default)]
+pub(crate) struct ExecutableInfo {
     /// Annotates which low op allocates a cacheable texture.
     pub(crate) texture_by_op: HashMap<usize, TextureDescriptor>,
     /// Annotates which low op allocates a cacheable buffer.
     pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
     /// Annotates which low op constructs a cacheable shader module.
     pub(crate) shader_by_op: HashMap<usize, ShaderDescriptorKey>,
-    /// Annotates which shader is built by what key.
-    pub(crate) shader_by_idx: HashMap<usize, ShaderDescriptorKey>,
     /// Annotates which low op allocates a pipeline that may be reused.
     pub(crate) pipeline_by_op: HashMap<usize, RenderPipelineKey>,
+    /// Annotates which shader is built by what key.
+    pub(crate) shader_by_idx: HashMap<usize, ShaderDescriptorKey>,
     /// Annotate which op to skip by which event.
     pub(crate) skip_by_op: HashMap<Instruction, Event>,
+    /// Annotate regions of memory which can be modified.
+    pub(crate) knobs: HashMap<Knob, KnobDescriptor>,
 }
 
 /// The GPU buffers associated with a register.
@@ -283,7 +289,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Low::BindGroupLayout(_) => self.bind_group_layouts += 1,
             Low::BindGroup(_) => self.bind_groups += 1,
             Low::Buffer(ref desc) => {
-                self.buffer_by_op
+                self.info
+                    .buffer_by_op
                     .insert(self.instruction_pointer, desc.clone());
                 self.buffers += 1;
             }
@@ -292,15 +299,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Low::Sampler(_) => self.sampler += 1,
             Low::Shader(ref desc) => {
                 if let Some(key) = &desc.key {
-                    self.shader_by_op
+                    self.info
+                        .shader_by_op
                         .insert(self.instruction_pointer, key.clone());
-                    self.shader_by_idx.insert(self.shaders, key.clone());
+                    self.info.shader_by_idx.insert(self.shaders, key.clone());
                 }
 
                 self.shaders += 1
             }
             Low::Texture(ref desc) => {
-                self.texture_by_op
+                self.info
+                    .texture_by_op
                     .insert(self.instruction_pointer, desc.clone());
                 self.textures += 1
             }
@@ -633,7 +642,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             write_event,
         })?;
 
-        self.skip_by_op.insert(inst, write_event);
+        self.info.skip_by_op.insert(inst, write_event);
 
         // FIXME: we're using wgpu internal's scheduling for writing the data to the gpu buffer but
         // this is a separate allocation. We'd instead like to use `regmap.map_write` and do our
@@ -649,7 +658,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 size: sizeu64,
                 target_buffer: regmap.buffer,
             })?;
-            self.skip_by_op.insert(inst, write_event);
+            self.info.skip_by_op.insert(inst, write_event);
             self.push(Low::EndCommands)?;
             // TODO: maybe also don't run it immediately?
             self.plan_run_top_command();
@@ -1270,8 +1279,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             ShaderBind::Shader { id, entry_point } => (id, entry_point),
         };
 
-        let desc_vertex = self.shader_by_idx.get(&vertex);
-        let desc_fragment = self.shader_by_idx.get(&fragment);
+        let desc_vertex = self.info.shader_by_idx.get(&vertex);
+        let desc_fragment = self.info.shader_by_idx.get(&fragment);
         match (desc_vertex, desc_fragment) {
             (Some(v), Some(f)) => {
                 let key = RenderPipelineKey {
@@ -1283,7 +1292,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     primitive: PrimitiveState::TriangleStrip,
                 };
 
-                self.pipeline_by_op.insert(self.instruction_pointer, key);
+                self.info
+                    .pipeline_by_op
+                    .insert(self.instruction_pointer, key);
             }
             _ => {}
         }
