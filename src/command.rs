@@ -7,7 +7,8 @@ use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
     CallBinding, CompileError, Frame, Function, FunctionLinked, High, ImageBufferAssignment,
-    ImageBufferPlan, ImageDescriptor, Initializer, Program, QuadTarget, Target, Texture,
+    ImageBufferPlan, ImageDescriptor, Initializer, ParameterizedFragment, Program, QuadTarget,
+    Target, Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
@@ -1791,9 +1792,12 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
-                                    shader: FragmentShaderInvocation::Normal2d(
-                                        distribution.clone(),
-                                    ),
+                                    shader: ParameterizedFragment {
+                                        invocation: FragmentShaderInvocation::Normal2d(
+                                            distribution.clone(),
+                                        ),
+                                        knob: None,
+                                    },
                                 },
                             })
                         }
@@ -1801,22 +1805,33 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
-                                    shader: FragmentShaderInvocation::FractalNoise(
-                                        noise_params.clone(),
-                                    ),
+                                    shader: ParameterizedFragment {
+                                        invocation: FragmentShaderInvocation::FractalNoise(
+                                            noise_params.clone(),
+                                        ),
+                                        knob: None,
+                                    },
                                 },
                             })
                         }
                         ConstructOp::Bilinear(bilinear) => high_ops.push(High::Construct {
                             dst: Target::Discard(texture),
                             fn_: Initializer::PaintFullScreen {
-                                shader: FragmentShaderInvocation::Bilinear(bilinear.clone()),
+                                shader: ParameterizedFragment {
+                                    invocation: FragmentShaderInvocation::Bilinear(
+                                        bilinear.clone(),
+                                    ),
+                                    knob: None,
+                                },
                             },
                         }),
                         &ConstructOp::Solid(color) => high_ops.push(High::Construct {
                             dst: Target::Discard(texture),
                             fn_: Initializer::PaintFullScreen {
-                                shader: FragmentShaderInvocation::SolidRgb(color.into()),
+                                shader: ParameterizedFragment {
+                                    invocation: FragmentShaderInvocation::SolidRgb(color.into()),
+                                    knob: None,
+                                },
                             },
                         }),
                     }
@@ -1842,9 +1857,12 @@ impl CommandBuffer {
                                     selection: region,
                                     target: target.into(),
                                     viewport: target,
-                                    shader: FragmentShaderInvocation::PaintOnTop(
-                                        PaintOnTopKind::Copy,
-                                    ),
+                                    shader: ParameterizedFragment {
+                                        invocation: FragmentShaderInvocation::PaintOnTop(
+                                            PaintOnTopKind::Copy,
+                                        ),
+                                        knob: None,
+                                    },
                                 },
                             });
                         }
@@ -1864,11 +1882,14 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
-                                    shader: FragmentShaderInvocation::LinearColorMatrix(
-                                        shaders::LinearColorTransform {
-                                            matrix: matrix.into(),
-                                        },
-                                    ),
+                                    shader: ParameterizedFragment {
+                                        invocation: FragmentShaderInvocation::LinearColorMatrix(
+                                            shaders::LinearColorTransform {
+                                                matrix: matrix.into(),
+                                            },
+                                        ),
+                                        knob: None,
+                                    },
                                 },
                             });
                         }
@@ -1891,7 +1912,10 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
-                                    shader: color.to_shader(),
+                                    shader: ParameterizedFragment {
+                                        invocation: color.to_shader(),
+                                        knob: None,
+                                    },
                                 },
                             });
                         }
@@ -1906,19 +1930,27 @@ impl CommandBuffer {
                                     // TODO: evaluate if this is the right way to do it. We could
                                     // also perform a LinearColorMatrix shader here with close to
                                     // the same amount of shader code but a precise result.
-                                    shader: FragmentShaderInvocation::PaintOnTop(
-                                        PaintOnTopKind::Copy,
-                                    ),
+                                    shader: ParameterizedFragment {
+                                        invocation: FragmentShaderInvocation::PaintOnTop(
+                                            PaintOnTopKind::Copy,
+                                        ),
+                                        knob: None,
+                                    },
                                 },
                             })
                         }
                         UnaryOp::Derivative(derivative) => {
-                            let shader = derivative.method.to_shader(derivative.direction)?;
+                            let invocation = derivative.method.to_shader(derivative.direction)?;
 
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
-                                fn_: Initializer::PaintFullScreen { shader },
+                                fn_: Initializer::PaintFullScreen {
+                                    shader: ParameterizedFragment {
+                                        invocation,
+                                        knob: None,
+                                    },
+                                },
                             })
                         }
                         UnaryOp::Transmute => high_ops.push(High::Copy {
@@ -1964,9 +1996,12 @@ impl CommandBuffer {
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
-                                    shader: FragmentShaderInvocation::PaintOnTop(
-                                        PaintOnTopKind::Copy,
-                                    ),
+                                    shader: ParameterizedFragment {
+                                        invocation: FragmentShaderInvocation::PaintOnTop(
+                                            PaintOnTopKind::Copy,
+                                        ),
+                                        knob: None,
+                                    },
                                 },
                             });
 
@@ -1978,9 +2013,12 @@ impl CommandBuffer {
                                     selection: upper_region,
                                     target: QuadTarget::from(upper_region).affine(&affine_matrix),
                                     viewport: lower_region,
-                                    shader: FragmentShaderInvocation::PaintOnTop(
-                                        affine.sampling.as_paint_on_top()?,
-                                    ),
+                                    shader: ParameterizedFragment {
+                                        invocation: FragmentShaderInvocation::PaintOnTop(
+                                            affine.sampling.as_paint_on_top()?,
+                                        ),
+                                        knob: None,
+                                    },
                                 },
                             })
                         }
@@ -1994,12 +2032,15 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
-                                    shader: FragmentShaderInvocation::Inject(
-                                        shaders::inject::Shader {
-                                            mix: channel.into_vec4(),
-                                            color: from_channels.channel_weight_vec4().unwrap(),
-                                        },
-                                    ),
+                                    shader: ParameterizedFragment {
+                                        invocation: FragmentShaderInvocation::Inject(
+                                            shaders::inject::Shader {
+                                                mix: channel.into_vec4(),
+                                                color: from_channels.channel_weight_vec4().unwrap(),
+                                            },
+                                        ),
+                                        knob: None,
+                                    },
                                 },
                             })
                         }
@@ -2012,9 +2053,12 @@ impl CommandBuffer {
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
-                                    shader: FragmentShaderInvocation::PaintOnTop(
-                                        PaintOnTopKind::Copy,
-                                    ),
+                                    shader: ParameterizedFragment {
+                                        invocation: FragmentShaderInvocation::PaintOnTop(
+                                            PaintOnTopKind::Copy,
+                                        ),
+                                        knob: None,
+                                    },
                                 },
                             });
 
@@ -2026,9 +2070,12 @@ impl CommandBuffer {
                                     selection: upper_region,
                                     target: (*placement).into(),
                                     viewport: lower_region,
-                                    shader: FragmentShaderInvocation::PaintOnTop(
-                                        PaintOnTopKind::Copy,
-                                    ),
+                                    shader: ParameterizedFragment {
+                                        invocation: FragmentShaderInvocation::PaintOnTop(
+                                            PaintOnTopKind::Copy,
+                                        ),
+                                        knob: None,
+                                    },
                                 },
                             });
                         }
@@ -2039,7 +2086,12 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
                                 fn_: Initializer::PaintFullScreen {
-                                    shader: FragmentShaderInvocation::Palette(shader.clone()),
+                                    shader: ParameterizedFragment {
+                                        invocation: FragmentShaderInvocation::Palette(
+                                            shader.clone(),
+                                        ),
+                                        knob: None,
+                                    },
                                 },
                             });
                         }
@@ -2075,7 +2127,10 @@ impl CommandBuffer {
                     high_ops.push(High::Construct {
                         dst: Target::Discard(texture),
                         fn_: Initializer::PaintFullScreen {
-                            shader: FragmentShaderInvocation::Runtime(command.clone()),
+                            shader: ParameterizedFragment {
+                                invocation: FragmentShaderInvocation::Runtime(command.clone()),
+                                knob: None,
+                            },
                         },
                     })
                 }

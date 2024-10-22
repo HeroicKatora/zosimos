@@ -1599,7 +1599,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
-                let shader = shader.shader();
+                let super::ParameterizedFragment { invocation, knob: _ } = shader;
+
+                let shader = invocation.shader();
                 let key = shader.key();
                 let spirv = shader.spirv_source();
 
@@ -1642,7 +1644,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
-                let shader = shader.shader();
+                let super::ParameterizedFragment { invocation, knob: _ } = shader;
+
+                let shader = invocation.shader();
                 let key = shader.key();
                 let spirv = shader.spirv_source();
 

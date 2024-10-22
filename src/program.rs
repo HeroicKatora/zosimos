@@ -125,6 +125,12 @@ pub(crate) enum Target {
     Load(Texture),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ParameterizedFragment {
+    pub(crate) invocation: shaders::FragmentShaderInvocation,
+    pub(crate) knob: Option<Knob>,
+}
+
 /// Describes a function call in more common terms.
 ///
 /// The bind sets follow the logic that functions will use the same setup for the vertex shader to
@@ -161,7 +167,7 @@ pub(crate) enum Initializer {
         /// The target coordinates are relative to this and the fragment shader given by
         /// paint_on_top is only executed within that rectangle.
         viewport: Rectangle,
-        shader: shaders::FragmentShaderInvocation,
+        shader: ParameterizedFragment,
     },
     /// Execute a shader on full textures.
     /// VS: id
@@ -175,9 +181,7 @@ pub(crate) enum Initializer {
     ///   bind(1,1): sampler2D
     ///   bind(2,0): shader specific data.
     ///   out: vec4 (color)
-    PaintFullScreen {
-        shader: shaders::FragmentShaderInvocation,
-    },
+    PaintFullScreen { shader: ParameterizedFragment },
     /// VS: id
     /// FS:
     ///   bind(1, …) readonly inputs uimage2D
@@ -276,6 +280,14 @@ pub struct Instruction(pub(crate) usize);
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct Event(pub(crate) usize);
+
+/// Identifies binary data which can be updated from the host as execution parameter.
+///
+/// This will map to a region inside the assembled program's blob data. When a buffer is changed on
+/// the host side, the execution will automatically ensure the used buffer state is updated to the
+/// bytes indicated. Unchanged bytes will be left or initialized to the value in the binary.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct Knob(pub(crate) usize);
 
 /// A map of features which we may use during encoding.
 #[derive(Clone, Debug)]
