@@ -13,7 +13,7 @@ pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
 pub use crate::shaders::fractal_noise::Shader as FractalNoise;
 
-use crate::shaders::{self, FragmentShader, PaintOnTopKind, ShaderInvocation};
+use crate::shaders::{self, FragmentShaderInvocation, PaintOnTopKind, ShaderInvocation};
 
 use image_canvas::color::{Color, ColorChannel, Whitepoint};
 use image_canvas::layout::{SampleParts, Texel};
@@ -1791,7 +1791,9 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
-                                    shader: FragmentShader::Normal2d(distribution.clone()),
+                                    shader: FragmentShaderInvocation::Normal2d(
+                                        distribution.clone(),
+                                    ),
                                 },
                             })
                         }
@@ -1799,20 +1801,22 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
-                                    shader: FragmentShader::FractalNoise(noise_params.clone()),
+                                    shader: FragmentShaderInvocation::FractalNoise(
+                                        noise_params.clone(),
+                                    ),
                                 },
                             })
                         }
                         ConstructOp::Bilinear(bilinear) => high_ops.push(High::Construct {
                             dst: Target::Discard(texture),
                             fn_: Initializer::PaintFullScreen {
-                                shader: FragmentShader::Bilinear(bilinear.clone()),
+                                shader: FragmentShaderInvocation::Bilinear(bilinear.clone()),
                             },
                         }),
                         &ConstructOp::Solid(color) => high_ops.push(High::Construct {
                             dst: Target::Discard(texture),
                             fn_: Initializer::PaintFullScreen {
-                                shader: FragmentShader::SolidRgb(color.into()),
+                                shader: FragmentShaderInvocation::SolidRgb(color.into()),
                             },
                         }),
                     }
@@ -1838,7 +1842,9 @@ impl CommandBuffer {
                                     selection: region,
                                     target: target.into(),
                                     viewport: target,
-                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
+                                    shader: FragmentShaderInvocation::PaintOnTop(
+                                        PaintOnTopKind::Copy,
+                                    ),
                                 },
                             });
                         }
@@ -1858,7 +1864,7 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
-                                    shader: FragmentShader::LinearColorMatrix(
+                                    shader: FragmentShaderInvocation::LinearColorMatrix(
                                         shaders::LinearColorTransform {
                                             matrix: matrix.into(),
                                         },
@@ -1900,7 +1906,9 @@ impl CommandBuffer {
                                     // TODO: evaluate if this is the right way to do it. We could
                                     // also perform a LinearColorMatrix shader here with close to
                                     // the same amount of shader code but a precise result.
-                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
+                                    shader: FragmentShaderInvocation::PaintOnTop(
+                                        PaintOnTopKind::Copy,
+                                    ),
                                 },
                             })
                         }
@@ -1956,7 +1964,9 @@ impl CommandBuffer {
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
-                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
+                                    shader: FragmentShaderInvocation::PaintOnTop(
+                                        PaintOnTopKind::Copy,
+                                    ),
                                 },
                             });
 
@@ -1968,7 +1978,7 @@ impl CommandBuffer {
                                     selection: upper_region,
                                     target: QuadTarget::from(upper_region).affine(&affine_matrix),
                                     viewport: lower_region,
-                                    shader: FragmentShader::PaintOnTop(
+                                    shader: FragmentShaderInvocation::PaintOnTop(
                                         affine.sampling.as_paint_on_top()?,
                                     ),
                                 },
@@ -1984,10 +1994,12 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
-                                    shader: FragmentShader::Inject(shaders::inject::Shader {
-                                        mix: channel.into_vec4(),
-                                        color: from_channels.channel_weight_vec4().unwrap(),
-                                    }),
+                                    shader: FragmentShaderInvocation::Inject(
+                                        shaders::inject::Shader {
+                                            mix: channel.into_vec4(),
+                                            color: from_channels.channel_weight_vec4().unwrap(),
+                                        },
+                                    ),
                                 },
                             })
                         }
@@ -2000,7 +2012,9 @@ impl CommandBuffer {
                                     selection: lower_region,
                                     target: lower_region.into(),
                                     viewport: lower_region,
-                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
+                                    shader: FragmentShaderInvocation::PaintOnTop(
+                                        PaintOnTopKind::Copy,
+                                    ),
                                 },
                             });
 
@@ -2012,7 +2026,9 @@ impl CommandBuffer {
                                     selection: upper_region,
                                     target: (*placement).into(),
                                     viewport: lower_region,
-                                    shader: FragmentShader::PaintOnTop(PaintOnTopKind::Copy),
+                                    shader: FragmentShaderInvocation::PaintOnTop(
+                                        PaintOnTopKind::Copy,
+                                    ),
                                 },
                             });
                         }
@@ -2023,7 +2039,7 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Load(texture),
                                 fn_: Initializer::PaintFullScreen {
-                                    shader: FragmentShader::Palette(shader.clone()),
+                                    shader: FragmentShaderInvocation::Palette(shader.clone()),
                                 },
                             });
                         }
@@ -2059,7 +2075,7 @@ impl CommandBuffer {
                     high_ops.push(High::Construct {
                         dst: Target::Discard(texture),
                         fn_: Initializer::PaintFullScreen {
-                            shader: FragmentShader::Dynamic(command.clone()),
+                            shader: FragmentShaderInvocation::Runtime(command.clone()),
                         },
                     })
                 }
@@ -2363,7 +2379,7 @@ impl TyVarBounds {
 }
 
 impl ColorConversion {
-    pub(crate) fn to_shader(&self) -> FragmentShader {
+    pub(crate) fn to_shader(&self) -> FragmentShaderInvocation {
         match self {
             ColorConversion::Xyz {
                 to_xyz_matrix,
@@ -2372,19 +2388,23 @@ impl ColorConversion {
                 let from = from_xyz_matrix.inv();
                 let matrix = to_xyz_matrix.multiply_right(from.into()).into();
 
-                FragmentShader::LinearColorMatrix(shaders::LinearColorTransform { matrix })
+                FragmentShaderInvocation::LinearColorMatrix(shaders::LinearColorTransform {
+                    matrix,
+                })
             }
             ColorConversion::XyzToOklab { to_xyz_matrix } => {
-                FragmentShader::Oklab(shaders::oklab::Shader::with_encode(*to_xyz_matrix))
+                FragmentShaderInvocation::Oklab(shaders::oklab::Shader::with_encode(*to_xyz_matrix))
             }
             ColorConversion::OklabToXyz { from_xyz_matrix } => {
                 let from_xyz_matrix = from_xyz_matrix.inv();
-                FragmentShader::Oklab(shaders::oklab::Shader::with_decode(from_xyz_matrix))
+                FragmentShaderInvocation::Oklab(shaders::oklab::Shader::with_decode(
+                    from_xyz_matrix,
+                ))
             }
             ColorConversion::XyzToSrLab2 {
                 to_xyz_matrix,
                 whitepoint,
-            } => FragmentShader::SrLab2(shaders::srlab2::Shader::with_encode(
+            } => FragmentShaderInvocation::SrLab2(shaders::srlab2::Shader::with_encode(
                 *to_xyz_matrix,
                 *whitepoint,
             )),
@@ -2393,7 +2413,7 @@ impl ColorConversion {
                 whitepoint,
             } => {
                 let from_xyz_matrix = from_xyz_matrix.inv();
-                FragmentShader::SrLab2(shaders::srlab2::Shader::with_decode(
+                FragmentShaderInvocation::SrLab2(shaders::srlab2::Shader::with_decode(
                     from_xyz_matrix,
                     *whitepoint,
                 ))
@@ -2467,7 +2487,7 @@ impl ChromaticAdaptation {
 
 #[rustfmt::skip]
 impl DerivativeMethod {
-    fn to_shader(&self, direction: Direction) -> Result<FragmentShader, CompileError> {
+    fn to_shader(&self, direction: Direction) -> Result<FragmentShaderInvocation, CompileError> {
         use DerivativeMethod::*;
         use shaders::box3;
         match self {
@@ -2478,7 +2498,7 @@ impl DerivativeMethod {
                 );
 
                 let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
-                Ok(shaders::FragmentShader::Box3(shader))
+                Ok(shaders::FragmentShaderInvocation::Box3(shader))
             }
             Sobel => {
                 let matrix = RowMatrix::with_outer_product(
@@ -2487,7 +2507,7 @@ impl DerivativeMethod {
                 );
 
                 let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
-                Ok(shaders::FragmentShader::Box3(shader))
+                Ok(shaders::FragmentShaderInvocation::Box3(shader))
             }
             Scharr3 => {
                 let matrix = RowMatrix::with_outer_product(
@@ -2496,7 +2516,7 @@ impl DerivativeMethod {
                 );
 
                 let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
-                Ok(shaders::FragmentShader::Box3(shader))
+                Ok(shaders::FragmentShaderInvocation::Box3(shader))
             }
             Scharr3To4Bit => {
                 let matrix = RowMatrix::with_outer_product(
@@ -2505,7 +2525,7 @@ impl DerivativeMethod {
                 );
 
                 let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
-                Ok(shaders::FragmentShader::Box3(shader))
+                Ok(shaders::FragmentShaderInvocation::Box3(shader))
             }
             Scharr3To8Bit => {
                 let matrix = RowMatrix::with_outer_product(
@@ -2514,7 +2534,7 @@ impl DerivativeMethod {
                 );
 
                 let shader = box3::Shader::new(direction.adjust_vertical_box(matrix));
-                Ok(shaders::FragmentShader::Box3(shader))
+                Ok(shaders::FragmentShaderInvocation::Box3(shader))
             }
             // FIXME: implement these.
             // When you do add them to tests/blend.rs

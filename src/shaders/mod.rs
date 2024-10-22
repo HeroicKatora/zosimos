@@ -135,7 +135,7 @@ pub enum VertexShader {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum FragmentShader {
+pub(crate) enum FragmentShaderInvocation {
     PaintOnTop(PaintOnTopKind),
     LinearColorMatrix(LinearColorTransform),
     Normal2d(DistributionNormal2d),
@@ -147,24 +147,24 @@ pub(crate) enum FragmentShader {
     SrLab2(self::srlab2::Shader),
     Box3(self::box3::Shader),
     SolidRgb(self::solid_rgb::Shader),
-    Dynamic(ShaderInvocation),
+    Runtime(ShaderInvocation),
 }
 
-impl FragmentShader {
+impl FragmentShaderInvocation {
     pub(crate) fn shader(&self) -> &dyn FragmentShaderData {
         match self {
-            FragmentShader::PaintOnTop(kind) => kind,
-            FragmentShader::LinearColorMatrix(shader) => shader,
-            FragmentShader::Normal2d(normal) => normal,
-            FragmentShader::FractalNoise(noise) => noise,
-            FragmentShader::Palette(palette) => palette,
-            FragmentShader::Bilinear(bilinear) => bilinear,
-            FragmentShader::Inject(inject) => inject,
-            FragmentShader::Oklab(oklab) => oklab,
-            FragmentShader::SrLab2(srlab2) => srlab2,
-            FragmentShader::Box3(box3) => box3,
-            FragmentShader::SolidRgb(color) => color,
-            FragmentShader::Dynamic(dynamic) => dynamic,
+            FragmentShaderInvocation::PaintOnTop(kind) => kind,
+            FragmentShaderInvocation::LinearColorMatrix(shader) => shader,
+            FragmentShaderInvocation::Normal2d(normal) => normal,
+            FragmentShaderInvocation::FractalNoise(noise) => noise,
+            FragmentShaderInvocation::Palette(palette) => palette,
+            FragmentShaderInvocation::Bilinear(bilinear) => bilinear,
+            FragmentShaderInvocation::Inject(inject) => inject,
+            FragmentShaderInvocation::Oklab(oklab) => oklab,
+            FragmentShaderInvocation::SrLab2(srlab2) => srlab2,
+            FragmentShaderInvocation::Box3(box3) => box3,
+            FragmentShaderInvocation::SolidRgb(color) => color,
+            FragmentShaderInvocation::Runtime(dynamic) => dynamic,
         }
     }
 }

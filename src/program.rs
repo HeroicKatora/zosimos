@@ -161,7 +161,7 @@ pub(crate) enum Initializer {
         /// The target coordinates are relative to this and the fragment shader given by
         /// paint_on_top is only executed within that rectangle.
         viewport: Rectangle,
-        shader: shaders::FragmentShader,
+        shader: shaders::FragmentShaderInvocation,
     },
     /// Execute a shader on full textures.
     /// VS: id
@@ -175,7 +175,9 @@ pub(crate) enum Initializer {
     ///   bind(1,1): sampler2D
     ///   bind(2,0): shader specific data.
     ///   out: vec4 (color)
-    PaintFullScreen { shader: shaders::FragmentShader },
+    PaintFullScreen {
+        shader: shaders::FragmentShaderInvocation,
+    },
     /// VS: id
     /// FS:
     ///   bind(1, …) readonly inputs uimage2D
