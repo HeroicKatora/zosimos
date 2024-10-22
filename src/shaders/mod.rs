@@ -50,6 +50,9 @@ pub(crate) trait FragmentShaderData: core::fmt::Debug {
     /// The SPIR-V shader source code.
     fn spirv_source(&self) -> Cow<'static, [u8]>;
     /// Encode the shader's data into the buffer, returning the descriptor to that.
+    ///
+    /// FIXME: context of the buffer is imported. It may be possible to re-use a previous
+    /// allocation iff the data is read-only and within the same encoding buffer.
     fn binary_data(&self, _: &mut Vec<u8>) -> Option<BufferInitContent> {
         None
     }

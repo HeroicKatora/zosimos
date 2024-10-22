@@ -1532,9 +1532,14 @@ impl Host {
             }
             Low::BufferInit(desc) => {
                 use wgpu::util::DeviceExt;
+                let contents = self
+                    .binary_data
+                    .get(desc.content.clone())
+                    .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
+
                 let wgpu_desc = wgpu::util::BufferInitDescriptor {
                     label: None,
-                    contents: desc.content.as_slice(&self.binary_data),
+                    contents,
                     usage: desc.usage.to_wgpu(),
                 };
 

@@ -587,7 +587,7 @@ pub(crate) struct BufferDescriptor {
 /// For constructing a new buffer, of anonymous memory.
 #[derive(Debug)]
 pub(crate) struct BufferDescriptorInit {
-    pub content: BufferInitContent,
+    pub content: Range<usize>,
     pub usage: BufferUsage,
 }
 
@@ -650,7 +650,7 @@ pub(crate) enum BufferUsage {
     DataOut,
     /// Storage + Copy Src/Dst
     DataBuffer,
-    /// Map Write + Uniform + Copy Src
+    /// Uniform + Copy Dst
     Uniform,
 }
 
@@ -1449,12 +1449,13 @@ impl Program {
         match op {
             Low::BufferInit(range) => {
                 match &mut range.content {
-                    BufferInitContent::Owned(_) => {}
-                    BufferInitContent::Defer { start, end } => {
-                        *start = start
+                    range => {
+                        range.start = range
+                            .start
                             .checked_add(base)
                             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
-                        *end = end
+                        range.end = range
+                            .end
                             .checked_add(base)
                             .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
                     }
@@ -1744,10 +1745,7 @@ impl BufferDescriptor {
 
 impl BufferDescriptorInit {
     pub fn u64_len(&self) -> u64 {
-        match self.content {
-            BufferInitContent::Owned(ref v) => v.len() as u64,
-            BufferInitContent::Defer { start, end } => end.wrapping_sub(start) as u64,
-        }
+        self.content.end.wrapping_sub(self.content.start) as u64
     }
 }
 

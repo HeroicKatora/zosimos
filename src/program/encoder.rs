@@ -1,5 +1,5 @@
 //! Produce a stream of `Low` instructions that can be executed on a particular device.
-use core::num::NonZeroU64;
+use core::{num::NonZeroU64, ops::Range};
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -236,7 +236,7 @@ enum BufferBind<'data> {
     },
     /// The data has already been planned beforehand.
     Planned {
-        data: BufferInitContent,
+        data: core::ops::Range<usize>,
     },
     None,
     // /// The data is already there, simply bind the buffer.
@@ -896,6 +896,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             let fragment = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
             let fragment_bind_data = shader
                 .binary_data(&mut self.binary_data)
+                .map(|data| self.ingest_buffer_init(data))
                 .map(|data| BufferBind::Planned { data })
                 .unwrap_or(BufferBind::None);
 
@@ -1214,6 +1215,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let buffers = &mut self.buffers;
         let instructions = &mut self.instructions;
         let instruction_pointer = &mut self.instruction_pointer;
+        let mut data = &mut self.binary_data;
 
         *self.simple_quad_buffer.get_or_insert_with(|| {
             // Sole quad!
@@ -1224,9 +1226,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 0.0, 0.0,
             ];
 
+            let content = Self::append_range(&mut data, content);
+
             let descriptor = BufferDescriptorInit {
                 usage: BufferUsage::InVertices,
-                content: bytemuck::cast_slice(content).to_vec().into(),
+                content,
             };
 
             *instruction_pointer += 1;
@@ -1643,6 +1647,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 let fragment = self.fragment_shader(key, shader_include_to_spirv_static(spirv))?;
                 let fragment_bind_data = shader.binary_data(&mut self.binary_data)
+                    .map(|data| self.ingest_buffer_init(data))
                     .map(|data| BufferBind::Planned { data })
                     .unwrap_or(BufferBind::None);
 
@@ -1759,8 +1764,22 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 
     /// Ingest the data into the encoder's active buffer data.
-    fn ingest_data(&mut self, data: &[impl bytemuck::Pod]) -> BufferInitContent {
-        BufferInitContent::new(&mut self.binary_data, data)
+    fn ingest_data(&mut self, data: &[impl bytemuck::Pod]) -> Range<usize> {
+        Self::append_range(&mut self.binary_data, data)
+    }
+
+    fn ingest_buffer_init(&mut self, shader: BufferInitContent) -> Range<usize> {
+        match shader {
+            BufferInitContent::Owned(data) => Self::append_range(&mut self.binary_data, &data),
+            BufferInitContent::Defer { start, end } => start..end,
+        }
+    }
+
+    fn append_range(into: &mut Vec<u8>, data: &[impl bytemuck::Pod]) -> Range<usize> {
+        let start = into.len();
+        into.extend_from_slice(bytemuck::cast_slice(data));
+        let end = into.len();
+        start..end
     }
 
     pub(crate) fn io_map(&self) -> run::IoMap {
