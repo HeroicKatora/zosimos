@@ -21,7 +21,7 @@ use image_canvas::layout::{SampleParts, Texel};
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// A reference to one particular value.
@@ -51,6 +51,8 @@ pub struct CommandBuffer {
     vars: Vec<TyVarBounds>,
     symbols: Vec<CommandSignature>,
     tys: Vec<GenericDescriptor>,
+    /// Commands that consume a statically initialized buffer, which we can adjust at launch time.
+    knobs: HashSet<Register>,
 }
 
 /// Refers to a generic argument declaration.
@@ -548,6 +550,10 @@ struct Monomorphizing<'lt> {
     commands: Vec<&'lt CommandBuffer>,
 }
 
+pub struct WithKnob<'lt> {
+    inner: &'lt mut CommandBuffer,
+}
+
 #[derive(Debug)]
 // `Debug` is our use. Until we get better errors.
 #[allow(unused)]
@@ -916,7 +922,6 @@ impl CommandBuffer {
     /// Perform a whitepoint adaptation.
     ///
     /// The `function` describes the method and target whitepoint of the chromatic adaptation.
-    #[allow(unreachable_patterns)]
     pub fn chromatic_adaptation(
         &mut self,
         src: Register,
@@ -1543,6 +1548,98 @@ impl CommandBuffer {
         Ok((register, outformat))
     }
 
+    /// Configure a next, parameterized, operation whose parameter structure can be overridden at
+    /// runtime.
+    pub fn with_knob(&mut self) -> WithKnob<'_> {
+        WithKnob { inner: self }
+    }
+}
+
+impl WithKnob<'_> {
+    /// Wrap commands that generate one register instruction, that is parameterized by the buffer.
+    fn regular_with_knob(
+        &mut self,
+        fn_: impl FnOnce(&mut CommandBuffer) -> Result<Register, CommandError>,
+    ) -> Result<Register, CommandError> {
+        let register = fn_(&mut self.inner)?;
+        self.inner.knobs.insert(register);
+        Ok(register)
+    }
+
+    /// See [`CommandBuffer::crop`].
+    pub fn crop(&mut self, src: Register, rect: Rectangle) -> Result<Register, CommandError> {
+        self.regular_with_knob(move |cmd| cmd.crop(src, rect))
+    }
+
+    /// See [`CommandBuffer::chromatic_adaptation`].
+    pub fn chromatic_adaptation(
+        &mut self,
+        src: Register,
+        method: ChromaticAdaptationMethod,
+        target: Whitepoint,
+    ) -> Result<Register, CommandError> {
+        self.regular_with_knob(move |cmd| cmd.chromatic_adaptation(src, method, target))
+    }
+
+    /// See [`CommandBuffer::inscribe`].
+    pub fn inscribe(
+        &mut self,
+        below: Register,
+        rect: Rectangle,
+        above: Register,
+    ) -> Result<Register, CommandError> {
+        self.regular_with_knob(move |cmd| cmd.inscribe(below, rect, above))
+    }
+
+    /// See [`CommandBuffer::solid_rgba`].
+    pub fn solid_rgba(
+        &mut self,
+        describe: Descriptor,
+        color: [f32; 4],
+    ) -> Result<Register, CommandError> {
+        self.regular_with_knob(move |cmd| cmd.solid_rgba(describe, color))
+    }
+
+    /// See [`CommandBuffer::distribution_normal2d`].
+    pub fn distribution_normal2d(
+        &mut self,
+        describe: Descriptor,
+        distribution: shaders::DistributionNormal2d,
+    ) -> Result<Register, CommandError> {
+        self.regular_with_knob(move |cmd| cmd.distribution_normal2d(describe, distribution))
+    }
+
+    /// See [`CommandBuffer::distribution_fractal_noise`].
+    pub fn distribution_fractal_noise(
+        &mut self,
+        describe: Descriptor,
+        distribution: shaders::FractalNoise,
+    ) -> Result<Register, CommandError> {
+        self.regular_with_knob(move |cmd| cmd.distribution_fractal_noise(describe, distribution))
+    }
+
+    /// See [`CommandBuffer::bilinear`].
+    pub fn bilinear(
+        &mut self,
+        describe: Descriptor,
+        distribution: Bilinear,
+    ) -> Result<Register, CommandError> {
+        self.regular_with_knob(move |cmd| cmd.bilinear(describe, distribution))
+    }
+
+    /// See [`CommandBuffer::affine`].
+    pub fn affine(
+        &mut self,
+        below: Register,
+        affine: Affine,
+        above: Register,
+    ) -> Result<Register, CommandError> {
+        self.regular_with_knob(move |cmd| cmd.affine(below, affine, above))
+    }
+}
+
+/// Turn a command buffer into a `Program`.
+impl CommandBuffer {
     pub fn compile(&self) -> Result<Program, CompileError> {
         self.link(&[], &[], &[])
     }
@@ -2279,16 +2376,6 @@ impl CommandBuffer {
             },
             desc: desc.into(),
         })
-    }
-
-    /// Record a _unary operator_.
-    pub fn unary_dynamic(&mut self, _: Register, _: &dyn ShaderCommand) -> Register {
-        todo!()
-    }
-
-    /// Record a _binary operator_.
-    pub fn binary_dynamic(&mut self, _: Register, _: Register, _: &dyn ShaderCommand) -> Register {
-        todo!()
     }
 }
 
