@@ -1655,7 +1655,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;
 
-                let super::ParameterizedFragment { invocation, knob: _ } = shader;
+                let super::ParameterizedFragment { invocation, knob } = shader;
 
                 let shader = invocation.shader();
                 let key = shader.key();
@@ -1667,6 +1667,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     .map(|data| BufferBind::Planned { data })
                     .unwrap_or(BufferBind::None);
 
+                self.plan_knob(*knob, &fragment_bind_data)?;
                 let arguments = shader.num_args();
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
@@ -1777,6 +1778,31 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 })
             }
         }
+    }
+
+    fn plan_knob(
+        &mut self,
+        knob: Option<Knob>,
+        fragment_bind_data: &BufferBind,
+    ) -> Result<(), LaunchError> {
+        // Nothing to plan.
+        let Some(knob) = knob else {
+            return Ok(());
+        };
+
+        // Only `planned` bindings can be knob controlled!
+        let BufferBind::Planned { data } = fragment_bind_data else {
+            return Err(LaunchError::InternalCommandError(line!()));
+        };
+
+        self.info.knobs.insert(
+            knob,
+            KnobDescriptor {
+                range: data.clone(),
+            },
+        );
+
+        Ok(())
     }
 
     /// Ingest the data into the encoder's active buffer data.
