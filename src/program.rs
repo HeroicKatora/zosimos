@@ -10,7 +10,7 @@ use crate::buffer::{
     Block, ByteLayout, Color, Descriptor, SampleBits, SampleParts, Texel, Transfer,
 };
 use crate::color_matrix::RowMatrix;
-use crate::command::{Rectangle, Register};
+use crate::command::{Rectangle, Register, RegisterKnob};
 use crate::pool::{Pool, PoolKey};
 use crate::{run, shaders};
 
@@ -32,6 +32,8 @@ pub struct Program {
     pub(crate) texture_by_op: HashMap<usize, TextureDescriptor>,
     /// Annotates which function allocates a cacheable buffer.
     pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
+    /// The maps of registers to persistent global knobs indices.
+    pub(crate) knobs: HashMap<RegisterKnob, Knob>,
 }
 
 pub(crate) struct FunctionLinked {
@@ -1269,7 +1271,8 @@ impl Program {
                 pipeline_by_op: encoder.info.pipeline_by_op,
                 skip_by_op,
                 functions,
-                knobs,
+                knob_descriptors: knobs,
+                knobs: self.knobs.clone(),
             }),
             binary_data,
             descriptors: run::Descriptors::default(),
@@ -1637,7 +1640,8 @@ impl Launcher<'_> {
                 )]
                 .into_iter()
                 .collect(),
-                knobs: encoder.info.knobs,
+                knob_descriptors: encoder.info.knobs,
+                knobs: self.program.knobs.clone(),
             }),
             device,
             queue,

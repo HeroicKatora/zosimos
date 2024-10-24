@@ -7,8 +7,8 @@ use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
     CallBinding, CompileError, Frame, Function, FunctionLinked, High, ImageBufferAssignment,
-    ImageBufferPlan, ImageDescriptor, Initializer, ParameterizedFragment, Program, QuadTarget,
-    Target, Texture,
+    ImageBufferPlan, ImageDescriptor, Initializer, Knob, ParameterizedFragment, Program,
+    QuadTarget, Target, Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
@@ -548,10 +548,27 @@ struct Monomorphizing<'lt> {
     stack: Vec<CommandMonomorphization<'lt>>,
     monomorphic: HashMap<LinkedMonomorphicSignature, Function>,
     commands: Vec<&'lt CommandBuffer>,
+    knobs: HashMap<RegisterKnob, Knob>,
+    next_knob: Knob,
+    /// The ID of a program being translated.
+    current_link_id: usize,
 }
 
+/// Schedule instructions with host-dependent and modifiable configuration.
 pub struct WithKnob<'lt> {
     inner: &'lt mut CommandBuffer,
+}
+
+/// A register that may be mapped to a knob.
+///
+/// A `knob` is the identifier of a region of memory _in the linked program_, associated with some
+/// set of static parameters in that source. You can discover the identifiers chosen during linking
+/// by passing the index and register of the [`CommandBuffer`] which has created its command with a
+/// corresponding [`WithKnob`] method. Not all commands can have knobs.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RegisterKnob {
+    pub link_idx: usize,
+    pub register: Register,
 }
 
 #[derive(Debug)]
@@ -1673,6 +1690,9 @@ impl CommandBuffer {
             stack: vec![],
             monomorphic: HashMap::new(),
             commands: Some(self).into_iter().chain(functions).collect(),
+            knobs: HashMap::new(),
+            next_knob: Knob(0),
+            current_link_id: 0,
         };
 
         monomorphic.push_function(LinkedMonomorphicSignature {
@@ -1700,6 +1720,19 @@ impl CommandBuffer {
                     Function(idx)
                 })
             }
+
+            pub fn next_knob(&mut self, register: Register) -> Knob {
+                let knob = self.next_knob;
+                self.next_knob.0 += 1;
+                self.knobs.insert(
+                    RegisterKnob {
+                        link_idx: self.current_link_id,
+                        register,
+                    },
+                    knob,
+                );
+                knob
+            }
         }
 
         let mut functions = vec![];
@@ -1710,7 +1743,9 @@ impl CommandBuffer {
                 tys,
             } = top;
 
+            monomorphic.current_link_id = link_idx;
             let links = links.get(link_idx).copied().unwrap_or_default();
+
             let linked = Self::link_in(command, tys, &mut high_ops, &mut monomorphic, links)?;
             // FIXME: expand further requested generic instantiations.
             functions.push(linked);
@@ -1722,6 +1757,7 @@ impl CommandBuffer {
             entry_index: 0,
             buffer_by_op: HashMap::default(),
             texture_by_op: HashMap::default(),
+            knobs: monomorphic.knobs,
         })
     }
 
@@ -1853,17 +1889,25 @@ impl CommandBuffer {
                 name: format!("Command: {:#?}", op),
             }));
 
+            let idx_reg = Register(idx);
+
+            let knob = if command.knobs.contains(&idx_reg) {
+                Some(mono.next_knob(idx_reg))
+            } else {
+                None
+            };
+
             match op {
                 Op::Input { desc: _ } => {
                     // This implicitly also persists the descriptor
                     let texture = realize_texture(idx, op)?;
-                    high_ops.push(High::Input(Register(idx)));
-                    reg_to_texture.insert(Register(idx), texture);
-                    signature_in.push(Register(idx));
+                    high_ops.push(High::Input(idx_reg));
+                    reg_to_texture.insert(idx_reg, texture);
+                    signature_in.push(idx_reg);
                 }
                 &Op::Output { src } => {
                     let _texture = realize_texture(idx, op)?;
-                    signature_out.push(Register(idx));
+                    signature_out.push(idx_reg);
 
                     high_ops.push(High::Output {
                         src,
@@ -1893,7 +1937,7 @@ impl CommandBuffer {
                                         invocation: FragmentShaderInvocation::Normal2d(
                                             distribution.clone(),
                                         ),
-                                        knob: None,
+                                        knob,
                                     },
                                 },
                             })
@@ -1906,7 +1950,7 @@ impl CommandBuffer {
                                         invocation: FragmentShaderInvocation::FractalNoise(
                                             noise_params.clone(),
                                         ),
-                                        knob: None,
+                                        knob,
                                     },
                                 },
                             })
@@ -1918,7 +1962,7 @@ impl CommandBuffer {
                                     invocation: FragmentShaderInvocation::Bilinear(
                                         bilinear.clone(),
                                     ),
-                                    knob: None,
+                                    knob,
                                 },
                             },
                         }),
@@ -1927,13 +1971,13 @@ impl CommandBuffer {
                             fn_: Initializer::PaintFullScreen {
                                 shader: ParameterizedFragment {
                                     invocation: FragmentShaderInvocation::SolidRgb(color.into()),
-                                    knob: None,
+                                    knob,
                                 },
                             },
                         }),
                     }
 
-                    reg_to_texture.insert(Register(idx), texture);
+                    reg_to_texture.insert(idx_reg, texture);
                 }
                 Op::Unary {
                     desc: _,
@@ -1958,7 +2002,7 @@ impl CommandBuffer {
                                         invocation: FragmentShaderInvocation::PaintOnTop(
                                             PaintOnTopKind::Copy,
                                         ),
-                                        knob: None,
+                                        knob,
                                     },
                                 },
                             });
@@ -1985,7 +2029,7 @@ impl CommandBuffer {
                                                 matrix: matrix.into(),
                                             },
                                         ),
-                                        knob: None,
+                                        knob,
                                     },
                                 },
                             });
@@ -2011,7 +2055,7 @@ impl CommandBuffer {
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment {
                                         invocation: color.to_shader(),
-                                        knob: None,
+                                        knob,
                                     },
                                 },
                             });
@@ -2031,7 +2075,7 @@ impl CommandBuffer {
                                         invocation: FragmentShaderInvocation::PaintOnTop(
                                             PaintOnTopKind::Copy,
                                         ),
-                                        knob: None,
+                                        knob,
                                     },
                                 },
                             })
@@ -2043,10 +2087,7 @@ impl CommandBuffer {
                             high_ops.push(High::Construct {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
-                                    shader: ParameterizedFragment {
-                                        invocation,
-                                        knob: None,
-                                    },
+                                    shader: ParameterizedFragment { invocation, knob },
                                 },
                             })
                         }
@@ -2097,7 +2138,7 @@ impl CommandBuffer {
                                         invocation: FragmentShaderInvocation::PaintOnTop(
                                             PaintOnTopKind::Copy,
                                         ),
-                                        knob: None,
+                                        knob,
                                     },
                                 },
                             });
@@ -2114,7 +2155,7 @@ impl CommandBuffer {
                                         invocation: FragmentShaderInvocation::PaintOnTop(
                                             affine.sampling.as_paint_on_top()?,
                                         ),
-                                        knob: None,
+                                        knob,
                                     },
                                 },
                             })
@@ -2136,7 +2177,7 @@ impl CommandBuffer {
                                                 color: from_channels.channel_weight_vec4().unwrap(),
                                             },
                                         ),
-                                        knob: None,
+                                        knob,
                                     },
                                 },
                             })
@@ -2154,7 +2195,7 @@ impl CommandBuffer {
                                         invocation: FragmentShaderInvocation::PaintOnTop(
                                             PaintOnTopKind::Copy,
                                         ),
-                                        knob: None,
+                                        knob,
                                     },
                                 },
                             });
@@ -2171,7 +2212,7 @@ impl CommandBuffer {
                                         invocation: FragmentShaderInvocation::PaintOnTop(
                                             PaintOnTopKind::Copy,
                                         ),
-                                        knob: None,
+                                        knob,
                                     },
                                 },
                             });
@@ -2187,7 +2228,7 @@ impl CommandBuffer {
                                         invocation: FragmentShaderInvocation::Palette(
                                             shader.clone(),
                                         ),
-                                        knob: None,
+                                        knob,
                                     },
                                 },
                             });
@@ -2226,7 +2267,7 @@ impl CommandBuffer {
                         fn_: Initializer::PaintFullScreen {
                             shader: ParameterizedFragment {
                                 invocation: FragmentShaderInvocation::Runtime(command.clone()),
-                                knob: None,
+                                knob,
                             },
                         },
                     })

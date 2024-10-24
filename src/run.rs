@@ -15,11 +15,11 @@ use std::sync::{
 };
 
 use crate::buffer::{BufferLayout, ByteLayout, Descriptor};
-use crate::command::Register;
+use crate::command::{Register, RegisterKnob};
 use crate::pool::{
     BufferKey, Gpu, GpuKey, ImageData, PipelineKey, Pool, PoolImage, PoolKey, ShaderKey, TextureKey,
 };
-use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
+use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Knob, Low};
 use crate::util::Ping;
 
 use wgpu::{Device, Queue};
@@ -70,7 +70,8 @@ pub(crate) struct ProgramInfo {
     /// TODO: some instruction results supply multiple events.
     pub(crate) skip_by_op: HashMap<program::Instruction, program::Event>,
     pub(crate) functions: HashMap<program::Function, program::FunctionFrame>,
-    pub(crate) knobs: HashMap<program::Knob, program::KnobDescriptor>,
+    pub(crate) knobs: HashMap<RegisterKnob, program::Knob>,
+    pub(crate) knob_descriptors: HashMap<program::Knob, program::KnobDescriptor>,
 }
 
 /// Configures devices and input/output buffers for an executable.
@@ -84,6 +85,7 @@ pub(crate) struct ProgramInfo {
 /// Note that the type system does not stop you from submitting it to a different program but it
 /// may be rejected if the inputs and device capabilities differ.
 pub struct Environment<'pool> {
+    /// The pool to act on when referencing resources.
     pool: &'pool mut Pool,
     /// The gpu, potentially from the pool.
     gpu: Gpu,
@@ -93,13 +95,15 @@ pub struct Environment<'pool> {
     buffers: Vec<Image>,
     /// Map of program input/outputs as signature information (inverse of retiring).
     io_map: Arc<IoMap>,
+    knob_data: Vec<u8>,
+    knobs: HashMap<Knob, Range<usize>>,
     /// Static info about the program, i.e. resource it will require or benefit from cache/prefetching.
     info: Arc<ProgramInfo>,
     /// Cache state of this environment.
     cache: Cache,
 }
 
-/// A running `Executable`.
+/// A running [`Executable`] with some particular function stack and resources.
 pub struct Execution {
     /// The gpu processor handles.
     pub(crate) gpu: Gpu,
@@ -472,6 +476,8 @@ impl Executable {
                 .iter()
                 .map(Image::clone_like)
                 .collect(),
+            knob_data: vec![],
+            knobs: HashMap::default(),
             io_map: self.io_map.clone(),
             cache: Cache::default(),
         })
@@ -1249,6 +1255,30 @@ impl Environment<'_> {
         }
 
         image.key = Some(pool_img.key());
+
+        Ok(())
+    }
+
+    /// Define the knob data for this run, by register.
+    #[track_caller]
+    pub fn knob_by_register(&mut self, knob: &RegisterKnob, data: &[u8]) -> Result<(), StartError> {
+        let knob = self
+            .info
+            .knobs
+            .get(knob)
+            .expect("Knob does not exist in this program");
+
+        let desc = &self.info.knob_descriptors[knob];
+
+        if data.len() != desc.range.len() {
+            // FIXME: better error!
+            return Err(StartError::InternalCommandError(line!()));
+        }
+
+        let start = self.knob_data.len();
+        self.knob_data.extend_from_slice(data);
+        let end = self.knob_data.len();
+        self.knobs.insert(*knob, start..end);
 
         Ok(())
     }
