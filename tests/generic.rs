@@ -117,6 +117,7 @@ fn generic_palette() {
         &executable,
         &mut pool,
         vec![(img_input, pool_background)],
+        [],
         retire_with_one_image(output),
     );
 

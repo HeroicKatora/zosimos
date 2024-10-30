@@ -27,6 +27,19 @@ impl Shader {
             uv_max: [0.0; 4],
         }
     }
+
+    pub fn into_std430(&self) -> Vec<u8> {
+        let mat = [
+            self.u_min,
+            self.u_max,
+            self.v_min,
+            self.v_max,
+            self.uv_min,
+            self.uv_max,
+        ];
+
+        bytemuck::bytes_of(&mat).to_vec()
+    }
 }
 
 impl FragmentShaderData for Shader {

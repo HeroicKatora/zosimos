@@ -1606,6 +1606,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Initializer::PaintToSelection { texture, selection, target: target_coords, viewport, shader } => {
                 let (tex_width, tex_height) = self.texture_map[texture].format.size;
 
+                // FIXME: choose this shader depending on whether target_coords are knob'd or not.
+                // Since the screen space transform depends on sizes, the user in commands.rs can
+                // not and importantly shouldn't need to care.
                 let vertex = self.vertex_shader(
                     Some(shaders::VertexShader::Noop),
                     shader_include_to_spirv(shaders::VERT_NOOP))?;

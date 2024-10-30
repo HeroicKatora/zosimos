@@ -565,7 +565,7 @@ pub struct WithKnob<'lt> {
 /// set of static parameters in that source. You can discover the identifiers chosen during linking
 /// by passing the index and register of the [`CommandBuffer`] which has created its command with a
 /// corresponding [`WithKnob`] method. Not all commands can have knobs.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RegisterKnob {
     pub link_idx: usize,
     pub register: Register,
@@ -1583,11 +1583,6 @@ impl WithKnob<'_> {
         Ok(register)
     }
 
-    /// See [`CommandBuffer::crop`].
-    pub fn crop(&mut self, src: Register, rect: Rectangle) -> Result<Register, CommandError> {
-        self.regular_with_knob(move |cmd| cmd.crop(src, rect))
-    }
-
     /// See [`CommandBuffer::chromatic_adaptation`].
     pub fn chromatic_adaptation(
         &mut self,
@@ -1644,15 +1639,25 @@ impl WithKnob<'_> {
         self.regular_with_knob(move |cmd| cmd.bilinear(describe, distribution))
     }
 
-    /// See [`CommandBuffer::affine`].
-    pub fn affine(
-        &mut self,
-        below: Register,
-        affine: Affine,
-        above: Register,
-    ) -> Result<Register, CommandError> {
-        self.regular_with_knob(move |cmd| cmd.affine(below, affine, above))
-    }
+    /*Should be knob'able but we currently do not generate the vertex coordinate buffer, i.e. sampled
+     * 2d parameterization, in a manner that permits adding a knob.
+
+        /// See [`CommandBuffer::crop`].
+        pub fn crop(&mut self, src: Register, rect: Rectangle) -> Result<Register, CommandError> {
+            self.regular_with_knob(move |cmd| cmd.crop(src, rect))
+        }
+
+        /// See [`CommandBuffer::affine`].
+        pub fn affine(
+            &mut self,
+            below: Register,
+            affine: Affine,
+            above: Register,
+        ) -> Result<Register, CommandError> {
+            self.regular_with_knob(move |cmd| cmd.affine(below, affine, above))
+        }
+
+    */
 }
 
 /// Turn a command buffer into a `Program`.

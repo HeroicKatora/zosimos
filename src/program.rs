@@ -3,7 +3,7 @@ mod encoder;
 use core::{num::NonZeroU32, ops::Range};
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use crate::buffer::{
@@ -1196,6 +1196,14 @@ impl Program {
         binary_data.extend(encoder.binary_data);
         skip_by_op.extend(encoder.info.skip_by_op);
 
+        knobs.extend(
+            encoder
+                .info
+                .knobs
+                .into_iter()
+                .map(|(knob, info)| (knob, info)),
+        );
+
         functions.insert(
             Function(self.entry_index),
             FunctionFrame {
@@ -1261,6 +1269,15 @@ impl Program {
             .map(run::Image::with_late_bound)
             .collect();
 
+        let knob_starts: BTreeMap<_, _> = {
+            knobs
+                .iter()
+                .map(|(&key, info)| (info.range.start, key))
+                .collect()
+        };
+
+        assert_eq!(knob_starts.len(), knobs.len());
+
         Ok(run::Executable {
             entry_point: Function(self.entry_index),
             instructions: instructions.into(),
@@ -1273,6 +1290,7 @@ impl Program {
                 functions,
                 knob_descriptors: knobs,
                 knobs: self.knobs.clone(),
+                knob_starts,
             }),
             binary_data,
             descriptors: run::Descriptors::default(),
@@ -1619,6 +1637,15 @@ impl Launcher<'_> {
         let instructions: Arc<[_]> = encoder.instructions.into();
         let all_range = 0..instructions.len();
 
+        let knob_starts: BTreeMap<_, _> = {
+            encoder
+                .info
+                .knobs
+                .iter()
+                .map(|(&key, info)| (info.range.start, key))
+                .collect()
+        };
+
         let init = run::InitialState {
             // TODO: shared with lower_to. Find a better way to reap the `encoder` for its
             // resources and descriptors.
@@ -1642,6 +1669,7 @@ impl Launcher<'_> {
                 .collect(),
                 knob_descriptors: encoder.info.knobs,
                 knobs: self.program.knobs.clone(),
+                knob_starts,
             }),
             device,
             queue,

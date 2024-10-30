@@ -7,7 +7,7 @@ use std::path::Path;
 use zosimos::command::{CommandBuffer, Register};
 use zosimos::pool::PoolImage;
 use zosimos::pool::{Pool, PoolKey};
-use zosimos::program::Capabilities;
+use zosimos::program::{Capabilities, Knob};
 use zosimos::run::{Executable, Retire};
 
 const CRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/reference");
@@ -78,16 +78,21 @@ pub fn run_once_with_output<T>(
         .lower_to(capabilities)
         .expect("No extras beyond device required");
 
-    run_executable_with_output(&executable, pool, binds, output)
+    run_executable_with_output(&executable, pool, binds, [], output)
 }
 
-pub fn run_executable_with_output<T>(
+pub fn run_executable_with_output<'knob, T>(
     executable: &Executable,
     pool: &mut Pool,
     binds: impl IntoIterator<Item = (Register, PoolKey)>,
+    knobs: impl IntoIterator<Item = (Knob, &'knob [u8])>,
     output: impl FnOnce(&mut Retire) -> T,
 ) -> T {
     let mut environment = executable.from_pool(pool).expect("no device found in pool");
+
+    for (knob, data) in knobs {
+        environment.knob(knob, data).expect("no knob data set");
+    }
 
     for (target, key) in binds {
         environment.bind(target, key).unwrap();
