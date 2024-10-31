@@ -235,6 +235,7 @@ pub(crate) enum TextureBind {
     },
 }
 
+#[derive(Debug)]
 enum BufferBind<'data> {
     /// Upload the data, then bind the buffer.
     Set {

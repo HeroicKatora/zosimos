@@ -2263,10 +2263,20 @@ impl CommandBuffer {
                         }
                     }
 
+                    if command.num_args != arguments.len() as u32 {
+                        // FIXME: should just error with information. We need to pin-point  the
+                        // source of the num args to either the library (an internal bug) or the
+                        // user for dynamically constructed shaders. Also consider if the number of
+                        // arguments can be recovered from the SPIR-V earlier.
+                        return Err(CompileError::NotYetImplemented);
+                    }
+
                     for &operand in arguments {
                         high_ops.push(High::PushOperand(operand));
                     }
 
+                    // This always 'constructs' an output texture. The image we render to is new,
+                    // no matter how many arguments are being inserted.
                     high_ops.push(High::Construct {
                         dst: Target::Discard(texture),
                         fn_: Initializer::PaintFullScreen {
@@ -2422,6 +2432,46 @@ impl CommandBuffer {
             },
             desc: desc.into(),
         })
+    }
+
+    pub fn unary_dynamic(
+        &mut self,
+        op: Register,
+        dynamic: &dyn ShaderCommand,
+    ) -> Result<Register, CommandError> {
+        let _input_descriptor = match self.describe_reg(op) {
+            RegisterDescription::Texture(desc) => desc,
+            _ => return Err(CommandError::INVALID_CALL),
+        };
+
+        let mut data = vec![];
+        let mut content = None;
+
+        let source = dynamic.source();
+        let desc = dynamic.data(ShaderData {
+            data_buffer: &mut data,
+            content: &mut content,
+        });
+
+        let out_reg = self.push(Op::Dynamic {
+            call: OperandDynKind::Unary(op),
+            // FIXME: maybe this conversion should be delayed.
+            // In particular, converting source to SPIR-V may take some form of 'compiler' argument
+            // that's only available during `compile` phase.
+            command: ShaderInvocation {
+                spirv: match source {
+                    ShaderSource::SpirV(spirv) => spirv,
+                },
+                shader_data: match content {
+                    None => None,
+                    Some(c) => Some(c.as_slice(&data).into()),
+                },
+                num_args: 1,
+            },
+            desc: desc.into(),
+        });
+
+        Ok(out_reg)
     }
 }
 
