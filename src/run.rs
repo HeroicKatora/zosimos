@@ -8,18 +8,18 @@ use core::{
     pin::Pin,
 };
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 
 use crate::buffer::{BufferLayout, ByteLayout, Descriptor};
-use crate::command::Register;
+use crate::command::{Register, RegisterKnob};
 use crate::pool::{
     BufferKey, Gpu, GpuKey, ImageData, PipelineKey, Pool, PoolImage, PoolKey, ShaderKey, TextureKey,
 };
-use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Low};
+use crate::program::{self, Capabilities, DeviceBuffer, DeviceTexture, Knob, Low};
 use crate::util::Ping;
 
 use wgpu::{Device, Queue};
@@ -70,6 +70,9 @@ pub(crate) struct ProgramInfo {
     /// TODO: some instruction results supply multiple events.
     pub(crate) skip_by_op: HashMap<program::Instruction, program::Event>,
     pub(crate) functions: HashMap<program::Function, program::FunctionFrame>,
+    pub(crate) knobs: HashMap<RegisterKnob, program::Knob>,
+    pub(crate) knob_descriptors: HashMap<program::Knob, program::KnobDescriptor>,
+    pub(crate) knob_starts: BTreeMap<usize, program::Knob>,
 }
 
 /// Configures devices and input/output buffers for an executable.
@@ -83,6 +86,7 @@ pub(crate) struct ProgramInfo {
 /// Note that the type system does not stop you from submitting it to a different program but it
 /// may be rejected if the inputs and device capabilities differ.
 pub struct Environment<'pool> {
+    /// The pool to act on when referencing resources.
     pool: &'pool mut Pool,
     /// The gpu, potentially from the pool.
     gpu: Gpu,
@@ -92,13 +96,15 @@ pub struct Environment<'pool> {
     buffers: Vec<Image>,
     /// Map of program input/outputs as signature information (inverse of retiring).
     io_map: Arc<IoMap>,
+    knob_data: Vec<u8>,
+    knobs: HashMap<Knob, Range<usize>>,
     /// Static info about the program, i.e. resource it will require or benefit from cache/prefetching.
     info: Arc<ProgramInfo>,
     /// Cache state of this environment.
     cache: Cache,
 }
 
-/// A running `Executable`.
+/// A running [`Executable`] with some particular function stack and resources.
 pub struct Execution {
     /// The gpu processor handles.
     pub(crate) gpu: Gpu,
@@ -115,6 +121,9 @@ pub(crate) struct Host {
     pub(crate) binary_data: Vec<u8>,
     pub(crate) io_map: Arc<IoMap>,
     pub(crate) info: Arc<ProgramInfo>,
+
+    knob_data: Arc<[u8]>,
+    knobs: HashMap<Knob, Range<usize>>,
 
     /// Variable information during execution.
     pub(crate) command_encoder: Option<wgpu::CommandEncoder>,
@@ -471,6 +480,8 @@ impl Executable {
                 .iter()
                 .map(Image::clone_like)
                 .collect(),
+            knob_data: vec![],
+            knobs: HashMap::default(),
             io_map: self.io_map.clone(),
             cache: Cache::default(),
         })
@@ -996,6 +1007,10 @@ impl Executable {
         )
     }
 
+    pub fn query_knob(&self, knob: RegisterKnob) -> Option<Knob> {
+        self.info.knobs.get(&knob).copied()
+    }
+
     pub fn launch(&self, mut env: Environment) -> Result<Execution, StartError> {
         log::info!("Instructions {:#?}", self.instructions);
         self.check_satisfiable(&mut env)?;
@@ -1013,6 +1028,8 @@ impl Executable {
                 command_encoder: None,
                 binary_data: self.binary_data.clone(),
                 io_map: self.io_map.clone(),
+                knob_data: env.knob_data.into(),
+                knobs: env.knobs.into(),
                 info: self.info.clone(),
                 call_stack: vec![],
                 debug_stack: vec![],
@@ -1041,6 +1058,8 @@ impl Executable {
                 command_encoder: None,
                 binary_data: self.binary_data,
                 io_map: self.io_map.clone(),
+                knob_data: env.knob_data.into(),
+                knobs: env.knobs.into(),
                 info: self.info.clone(),
                 call_stack: vec![],
                 debug_stack: vec![],
@@ -1252,6 +1271,33 @@ impl Environment<'_> {
         Ok(())
     }
 
+    /// Define the knob data for this run, by register.
+    #[track_caller]
+    pub fn knob_by_register(&mut self, knob: &RegisterKnob, data: &[u8]) -> Result<(), StartError> {
+        let knob = self
+            .info
+            .knobs
+            .get(knob)
+            .expect("Knob does not exist in this program");
+        self.knob(*knob, data)
+    }
+
+    pub fn knob(&mut self, knob: Knob, data: &[u8]) -> Result<(), StartError> {
+        let desc = &self.info.knob_descriptors[&knob];
+
+        if data.len() != desc.range.len() {
+            // FIXME: better error!
+            return Err(StartError::InternalCommandError(line!()));
+        }
+
+        let start = self.knob_data.len();
+        self.knob_data.extend_from_slice(data);
+        let end = self.knob_data.len();
+        self.knobs.insert(knob, start..end);
+
+        Ok(())
+    }
+
     /// Retrieve matching temporary buffers from the pool.
     ///
     /// This reuses of allocations of buffers, textures, etc. from previous iterations of this
@@ -1311,6 +1357,8 @@ impl Execution {
                 command_encoder: None,
                 binary_data: init.binary_data,
                 io_map: init.io_map,
+                knob_data: Arc::default(),
+                knobs: Default::default(),
                 info: init.info,
                 call_stack: vec![],
                 debug_stack: vec![],
@@ -1532,10 +1580,23 @@ impl Host {
             }
             Low::BufferInit(desc) => {
                 use wgpu::util::DeviceExt;
-                let contents = self
-                    .binary_data
-                    .get(desc.content.clone())
-                    .ok_or_else(|| StepError::InvalidInstruction(line!()))?;
+
+                let knob_range = if let Some(knob) = self.info.knob_starts.get(&desc.content.start)
+                {
+                    let kdesc = &self.info.knob_descriptors[knob];
+                    assert_eq!(&kdesc.range, &desc.content, "Unhandled encoding error");
+                    self.knobs.get(knob)
+                } else {
+                    None
+                };
+
+                let contents = if let Some(knob_range) = knob_range {
+                    &self.knob_data[knob_range.clone()]
+                } else {
+                    self.binary_data
+                        .get(desc.content.clone())
+                        .ok_or_else(|| StepError::InvalidInstruction(line!()))?
+                };
 
                 let wgpu_desc = wgpu::util::BufferInitDescriptor {
                     label: None,

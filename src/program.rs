@@ -3,14 +3,14 @@ mod encoder;
 use core::{num::NonZeroU32, ops::Range};
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use crate::buffer::{
     Block, ByteLayout, Color, Descriptor, SampleBits, SampleParts, Texel, Transfer,
 };
 use crate::color_matrix::RowMatrix;
-use crate::command::{Rectangle, Register};
+use crate::command::{Rectangle, Register, RegisterKnob};
 use crate::pool::{Pool, PoolKey};
 use crate::{run, shaders};
 
@@ -32,6 +32,8 @@ pub struct Program {
     pub(crate) texture_by_op: HashMap<usize, TextureDescriptor>,
     /// Annotates which function allocates a cacheable buffer.
     pub(crate) buffer_by_op: HashMap<usize, BufferDescriptor>,
+    /// The maps of registers to persistent global knobs indices.
+    pub(crate) knobs: HashMap<RegisterKnob, Knob>,
 }
 
 pub(crate) struct FunctionLinked {
@@ -250,6 +252,13 @@ pub struct ImageBufferDescriptors<'a> {
 #[derive(Clone, Debug)]
 pub(crate) struct Frame {
     pub(crate) name: String,
+}
+
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub(crate) struct KnobDescriptor {
+    /// The range of the initial data in the binary.
+    pub range: Range<usize>,
 }
 
 /// A gpu buffer associated with an image buffer.
@@ -1177,13 +1186,23 @@ impl Program {
         let mut functions = HashMap::new();
         let mut binary_data = vec![];
         let mut skip_by_op = HashMap::new();
+        let mut knobs = HashMap::new();
 
         let mut encoder = self.lower_to_impl(&capabilities, main, None)?;
         encoder.finalize()?;
         let io_map: Arc<run::IoMap> = encoder.io_map().into();
+
         instructions.extend(encoder.instructions);
         binary_data.extend(encoder.binary_data);
-        skip_by_op.extend(encoder.skip_by_op);
+        skip_by_op.extend(encoder.info.skip_by_op);
+
+        knobs.extend(
+            encoder
+                .info
+                .knobs
+                .into_iter()
+                .map(|(knob, info)| (knob, info)),
+        );
 
         functions.insert(
             Function(self.entry_index),
@@ -1216,9 +1235,18 @@ impl Program {
 
             skip_by_op.extend(
                 encoder
+                    .info
                     .skip_by_op
                     .into_iter()
                     .map(|(inst, event)| (Instruction(inst.0 + start), event)),
+            );
+
+            knobs.extend(
+                encoder
+                    .info
+                    .knobs
+                    .into_iter()
+                    .map(|(knob, info)| (knob, info.relocate(reloc_base))),
             );
 
             functions.insert(
@@ -1241,16 +1269,28 @@ impl Program {
             .map(run::Image::with_late_bound)
             .collect();
 
+        let knob_starts: BTreeMap<_, _> = {
+            knobs
+                .iter()
+                .map(|(&key, info)| (info.range.start, key))
+                .collect()
+        };
+
+        assert_eq!(knob_starts.len(), knobs.len());
+
         Ok(run::Executable {
             entry_point: Function(self.entry_index),
             instructions: instructions.into(),
             info: Arc::new(run::ProgramInfo {
-                buffer_by_op: encoder.buffer_by_op,
-                texture_by_op: encoder.texture_by_op,
-                shader_by_op: encoder.shader_by_op,
-                pipeline_by_op: encoder.pipeline_by_op,
+                buffer_by_op: encoder.info.buffer_by_op,
+                texture_by_op: encoder.info.texture_by_op,
+                shader_by_op: encoder.info.shader_by_op,
+                pipeline_by_op: encoder.info.pipeline_by_op,
                 skip_by_op,
                 functions,
+                knob_descriptors: knobs,
+                knobs: self.knobs.clone(),
+                knob_starts,
             }),
             binary_data,
             descriptors: run::Descriptors::default(),
@@ -1597,17 +1637,26 @@ impl Launcher<'_> {
         let instructions: Arc<[_]> = encoder.instructions.into();
         let all_range = 0..instructions.len();
 
+        let knob_starts: BTreeMap<_, _> = {
+            encoder
+                .info
+                .knobs
+                .iter()
+                .map(|(&key, info)| (info.range.start, key))
+                .collect()
+        };
+
         let init = run::InitialState {
             // TODO: shared with lower_to. Find a better way to reap the `encoder` for its
             // resources and descriptors.
             instructions,
             entry_point: Function(0),
             info: Arc::new(run::ProgramInfo {
-                buffer_by_op: encoder.buffer_by_op,
-                texture_by_op: encoder.texture_by_op,
-                shader_by_op: encoder.shader_by_op,
-                pipeline_by_op: encoder.pipeline_by_op,
-                skip_by_op: encoder.skip_by_op,
+                buffer_by_op: encoder.info.buffer_by_op,
+                texture_by_op: encoder.info.texture_by_op,
+                shader_by_op: encoder.info.shader_by_op,
+                pipeline_by_op: encoder.info.pipeline_by_op,
+                skip_by_op: encoder.info.skip_by_op,
                 functions: vec![(
                     Function(0),
                     FunctionFrame {
@@ -1618,6 +1667,9 @@ impl Launcher<'_> {
                 )]
                 .into_iter()
                 .collect(),
+                knob_descriptors: encoder.info.knobs,
+                knobs: self.program.knobs.clone(),
+                knob_starts,
             }),
             device,
             queue,
@@ -1768,6 +1820,18 @@ impl TextureDescriptor {
         let (w, h) = self.size;
         // FIXME: not really accurate.
         4 * u64::from(w.get()) * u64::from(h.get())
+    }
+}
+
+impl KnobDescriptor {
+    pub fn relocate(self, by: usize) -> Self {
+        let end = self.range.end.checked_add(by).unwrap();
+        let start = self.range.start.checked_add(by).unwrap();
+
+        KnobDescriptor {
+            range: start..end,
+            ..self
+        }
     }
 }
 

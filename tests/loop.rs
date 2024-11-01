@@ -86,6 +86,7 @@ fn integration() {
             &executable,
             &mut pool,
             vec![(background, bg_key), (foreground, fg_key)],
+            [],
             retire_with_one_image(output),
         );
     }
