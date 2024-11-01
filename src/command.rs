@@ -2404,7 +2404,7 @@ impl CommandBuffer {
 /// 3. Create a new entry on the command buffer.
 /// 4. Not yet performed: (Validate the SPIR-V module inputs against the data definition)
 impl CommandBuffer {
-    /// Record a _constructor_.
+    /// Record a _constructor_, with a user-supplied shader.
     pub fn construct_dynamic(&mut self, dynamic: &dyn ShaderCommand) -> Register {
         let mut data = vec![];
         let mut content = None;
@@ -2434,6 +2434,7 @@ impl CommandBuffer {
         })
     }
 
+    /// Record a unary operator, with a user-supplied shader.
     pub fn unary_dynamic(
         &mut self,
         op: Register,
@@ -2473,9 +2474,61 @@ impl CommandBuffer {
 
         Ok(out_reg)
     }
+
+    /// Record a binary operator, with a user-supplied shader.
+    pub fn binary_dynamic(
+        &mut self,
+        lhs: Register,
+        rhs: Register,
+        dynamic: &dyn ShaderCommand,
+    ) -> Result<Register, CommandError> {
+        let _input_descriptor = match self.describe_reg(lhs) {
+            RegisterDescription::Texture(desc) => desc,
+            _ => return Err(CommandError::INVALID_CALL),
+        };
+
+        let _input_descriptor = match self.describe_reg(rhs) {
+            RegisterDescription::Texture(desc) => desc,
+            _ => return Err(CommandError::INVALID_CALL),
+        };
+
+        let mut data = vec![];
+        let mut content = None;
+
+        let source = dynamic.source();
+        let desc = dynamic.data(ShaderData {
+            data_buffer: &mut data,
+            content: &mut content,
+        });
+
+        let out_reg = self.push(Op::Dynamic {
+            call: OperandDynKind::Binary { lhs, rhs },
+            // FIXME: maybe this conversion should be delayed.
+            // In particular, converting source to SPIR-V may take some form of 'compiler' argument
+            // that's only available during `compile` phase.
+            command: ShaderInvocation {
+                spirv: match source {
+                    ShaderSource::SpirV(spirv) => spirv,
+                },
+                shader_data: match content {
+                    None => None,
+                    Some(c) => Some(c.as_slice(&data).into()),
+                },
+                num_args: 2,
+            },
+            desc: desc.into(),
+        });
+
+        Ok(out_reg)
+    }
 }
 
 impl CommandSignature {
+    /// Verify if a signature matches an other command signature.
+    ///
+    /// That is, whether the subtyping relationship of all its bounds and the argument allows using
+    /// one in place of the other declared type. This checks if `self` contains all bounds that
+    /// occur in `actual`.
     pub fn is_declaration_of(&self, actual: &CommandSignature) -> bool {
         if self.vars.len() != actual.vars.len() {
             return false;

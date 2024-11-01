@@ -175,3 +175,109 @@ fn crt() {
     let image = pool.entry(result).unwrap();
     util::assert_reference(image.into(), "crt.crc.png");
 }
+
+#[test]
+fn flat_correction() {
+    struct FlatField {
+        source: &'static [u8],
+        descriptor: Descriptor,
+        recovered_mean: f32,
+    }
+
+    impl FlatField {
+        fn new(descriptor: Descriptor, flat: &Descriptor, mean: f32) -> Self {
+            pub const SHADER_ENCODE: &[u8] =
+                include_bytes!(concat!(env!("OUT_DIR"), "/spirv/flat_field.frag.v"));
+
+            assert_eq!(descriptor.size(), flat.size());
+
+            FlatField {
+                source: SHADER_ENCODE,
+                descriptor,
+                recovered_mean: mean,
+            }
+        }
+    }
+
+    impl ShaderCommand for FlatField {
+        fn source(&self) -> command::ShaderSource {
+            command::ShaderSource::SpirV(self.source.into())
+        }
+
+        fn data(&self, mut data: command::ShaderData<'_>) -> Descriptor {
+            data.set_data(&[self.recovered_mean]);
+            self.descriptor.clone()
+        }
+    }
+
+    let _ = env_logger::try_init();
+
+    const ANY: wgpu::Backends = wgpu::Backends::VULKAN;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: ANY,
+        ..Default::default()
+    });
+
+    let adapter = Program::minimum_adapter(instance.enumerate_adapters(ANY).into_iter())
+        .expect("to get an adapter");
+
+    let mut pool = Pool::new();
+
+    let (bg_key, bg_descriptor) = {
+        let background = image::open(BACKGROUND).expect("Background image opened");
+        let entry = pool.insert_srgb(&background);
+        (entry.key(), entry.descriptor())
+    };
+
+    let flat_descriptor = {
+        let flat = image::DynamicImage::ImageLuma8(image::GrayImage::new(512, 512));
+        Descriptor::with_srgb_image(&flat)
+    };
+
+    pool.request_device(&adapter, Program::minimal_device_descriptor())
+        .expect("to get a device");
+
+    // We synthesize it here as noise with known amplitude. Realistically you want the parameters
+    // to be a runtime-computed knob, i.e. supplied via some source buffer.
+    let flat_field = FlatField::new(bg_descriptor.clone(), &flat_descriptor, 0.124 / 2.0);
+
+    // Actual program begins here.
+    let target = image::DynamicImage::ImageRgba8(image::RgbaImage::new(512, 512));
+
+    let mut commands = CommandBuffer::default();
+    let reg_background = commands
+        .input(bg_descriptor.clone())
+        .expect("Valid for input");
+
+    let reg_flat = commands
+        .distribution_fractal_noise(
+            flat_descriptor.clone(),
+            command::FractalNoise {
+                num_octaves: 8,
+                initial_amplitude: 0.1,
+                amplitude_damping: 0.2,
+                grid_scale: [10.0, 10.0],
+            },
+        )
+        .expect("Value as fractal noise");
+
+    let corrected = commands
+        .binary_dynamic(reg_background, reg_flat, &flat_field)
+        .expect("Valid for call");
+
+    let srgb = Descriptor::with_srgb_image(&target);
+    let srgb = commands
+        .color_convert(corrected, srgb.color, srgb.texel)
+        .expect("Valid for color conversion");
+    let (output, _outformat) = commands.output(srgb).expect("Valid for output");
+
+    let result = run_once_with_output(
+        commands,
+        &mut pool,
+        vec![(reg_background, bg_key)],
+        retire_with_one_image(output),
+    );
+
+    let image = pool.entry(result).unwrap();
+    util::assert_reference(image.into(), "flat_field.crc.png");
+}
