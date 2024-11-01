@@ -1,7 +1,5 @@
 // This is almost certainly not all used in all tests.
 #![allow(dead_code)]
-use image::GenericImageView;
-use std::hash::Hasher;
 use std::path::Path;
 
 use zosimos::command::{CommandBuffer, Register};
@@ -21,33 +19,22 @@ pub fn assert_reference(image: PoolImage, key: &str) {
 }
 
 pub fn assert_reference_image(image: image::DynamicImage, key: &str) {
-    let mut crc = crc32fast::Hasher::new();
-    let (width, height) = image.dimensions();
-    crc.write_u32(width);
-    crc.write_u32(height);
-
-    crc.write(image.as_bytes());
-    let crc = crc.finish();
+    let hash = blockhash::blockhash256(&image);
 
     let output = Path::new(CRC).join(key);
     let debug_path = Path::new(DEBUG).join(key);
 
     if std::env::var_os("ZOSIMOS_BLESS").is_some() {
         eprintln!("{}: {:?}", key, image.color());
-        std::fs::write(&output, format!("{}", crc)).expect("Failed to bless result");
+        std::fs::write(&output, hash.to_string()).expect("Failed to bless result");
         image
             .save_with_format(&debug_path, image::ImageFormat::Png)
             .expect("Failed to read result file");
     }
 
-    let expected = std::fs::read(&output).expect("Failed to read result file");
+    let expected = std::fs::read_to_string(&output).expect("Failed to read result file");
 
-    let expected: u64 = ::core::str::from_utf8(&expected)
-        .expect("Failed to read result file")
-        .parse()
-        .expect("Failed to parse result file as 64-bit CRC");
-
-    if expected != crc {
+    if expected != hash.to_string() {
         image
             .save_with_format(&debug_path, image::ImageFormat::Png)
             .expect("Failed to read result file");
@@ -56,7 +43,7 @@ pub fn assert_reference_image(image: image::DynamicImage, key: &str) {
             "Reference CRC-32 comparison failed: {} vs. {}\
             An image has been saved to {}",
             expected,
-            crc,
+            hash,
             debug_path.display(),
         );
     }
