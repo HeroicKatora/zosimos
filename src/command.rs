@@ -559,6 +559,11 @@ pub struct WithKnob<'lt> {
     inner: &'lt mut CommandBuffer,
 }
 
+/// Schedule instructions with parameters already in GPU memory.
+struct WithBuffer<'lt> {
+    inner: &'lt mut CommandBuffer,
+}
+
 /// A register that may be mapped to a knob.
 ///
 /// A `knob` is the identifier of a region of memory _in the linked program_, associated with some
@@ -1570,6 +1575,39 @@ impl CommandBuffer {
     pub fn with_knob(&mut self) -> WithKnob<'_> {
         WithKnob { inner: self }
     }
+
+    fn with_buffer(&mut self) -> WithBuffer<'_> {
+        todo!()
+    }
+}
+
+/// Commands that operate on buffers.
+impl CommandBuffer {
+    /// Construct a buffer by initializing it with data from memory.
+    ///
+    /// The binary value will be copied into a buffer held by the execution state. If you intend to
+    /// modify that buffer with each execution, see [`Self::with_knob`] and [`WithKnob::buffer_init`].
+    pub fn buffer_init(&mut self, init: &[u8]) -> Register {
+        todo!()
+    }
+
+    /// Construct a buffer that is fully zeroed from memory.
+    pub fn buffer_zero(&mut self, len: usize) -> Register {
+        todo!()
+    }
+
+    /// Construct a buffer by overlaying one on top of another.
+    ///
+    /// The output buffer is sized according to the underlying buffer. Overflowed data will be
+    /// discarded.
+    pub fn buffer_interpolate(
+        &mut self,
+        under: Register,
+        at: usize,
+        over: Register,
+    ) -> Result<Register, CommandError> {
+        todo!()
+    }
 }
 
 impl WithKnob<'_> {
@@ -1637,6 +1675,10 @@ impl WithKnob<'_> {
         distribution: Bilinear,
     ) -> Result<Register, CommandError> {
         self.regular_with_knob(move |cmd| cmd.bilinear(describe, distribution))
+    }
+
+    pub fn buffer_init(&mut self, init: &[u8]) -> Result<Register, CommandError> {
+        todo!()
     }
 
     /*Should be knob'able but we currently do not generate the vertex coordinate buffer, i.e. sampled
