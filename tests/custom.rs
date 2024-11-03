@@ -57,7 +57,16 @@ fn mandelbrot() {
 
     let mut pool = Pool::new();
 
-    pool.request_device(&adapter, Program::minimal_device_descriptor())
+    let descriptor = Program::minimal_device_descriptor();
+    let descriptor = wgpu::DeviceDescriptor {
+        required_limits: wgpu::Limits {
+            max_texture_dimension_2d: 1 << 12,
+            ..descriptor.required_limits
+        },
+        ..descriptor
+    };
+
+    pool.request_device(&adapter, descriptor)
         .expect("to get a device");
 
     // Actual program begins here.

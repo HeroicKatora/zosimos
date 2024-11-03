@@ -99,7 +99,7 @@ pub(crate) enum High {
     /// Add an additional texture operand to the next operation.
     PushOperand(Texture),
     /// Call a function on the currently prepared operands.
-    Construct { dst: Target, fn_: Initializer },
+    DrawInto { dst: Target, fn_: Initializer },
     /// Create all the state for a texture, without doing anything in it.
     Uninit { dst: Target },
     /// Last phase marking a register as done.
@@ -1360,7 +1360,7 @@ impl Program {
 
                     // Nothing more to do.
                 }
-                High::Construct { dst, fn_ } => {
+                High::DrawInto { dst, fn_ } => {
                     let dst_texture = match dst {
                         Target::Discard(texture) | Target::Load(texture) => *texture,
                     };

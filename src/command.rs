@@ -142,7 +142,7 @@ enum Op {
         op: BinaryOp,
         desc: GenericDescriptor,
     },
-    Dynamic {
+    DynamicImage {
         call: OperandDynKind,
         /// The planned shader invocation.
         command: ShaderInvocation,
@@ -160,6 +160,10 @@ enum Op {
         invocation: Register,
         /// The result's type monomorphized as called.
         desc: GenericDescriptor,
+    },
+    Buffer {
+        desc: GenericBuffer,
+        op: BufferInitOp,
     },
 }
 
@@ -200,6 +204,17 @@ pub(crate) enum ConstructOp {
     DistributionNoise(shaders::FractalNoise),
     /// A color to repeat on pixels.
     Solid([f32; 4]),
+    /// An existing buffer to use.
+    FromBuffer(Register),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum BufferInitOp {
+    FromData {
+        size: u64,
+        placement: core::ops::Range<usize>,
+        data: Arc<[u8]>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -800,6 +815,36 @@ impl CommandBuffer {
         let descriptor = img.descriptor();
         self.input(descriptor)
             .expect("Pool image descriptor should be valid")
+    }
+
+    /// Construct an image buffer a buffer already allocated in device memory.
+    pub fn from_buffer(
+        &mut self,
+        buffer_reg: Register,
+        descriptor: Descriptor,
+    ) -> Result<Register, CommandError> {
+        let RegisterDescription::Buffer(buffer) = self.describe_reg(buffer_reg) else {
+            return Err(CommandError::TYPE_ERR);
+        };
+
+        let required_size = u64::from(descriptor.layout.height)
+            .checked_mul(descriptor.layout.row_stride)
+            .ok_or_else(|| CommandError::TYPE_ERR)?;
+
+        match buffer.size {
+            Generic::Concrete(sz) if sz >= required_size => {}
+            Generic::Concrete(_) => {
+                return Err(CommandError::INVALID_CALL);
+            }
+            _ => {
+                return Err(CommandError::UNIMPLEMENTED);
+            }
+        }
+
+        Ok(self.push(Op::Construct {
+            desc: descriptor.into(),
+            op: ConstructOp::FromBuffer(buffer_reg),
+        }))
     }
 
     /// Select a rectangular part of an image.
@@ -1596,6 +1641,11 @@ impl CommandBuffer {
         todo!()
     }
 
+    /// Construct a buffer representing *encoded* image data.
+    pub fn buffer_from_image(&mut self, register: Register) -> Register {
+        todo!()
+    }
+
     /// Construct a buffer by overlaying one on top of another.
     ///
     /// The output buffer is sized according to the underlying buffer. Overflowed data will be
@@ -1841,7 +1891,7 @@ impl CommandBuffer {
             match op {
                 Op::Input { .. }
                 | Op::Construct { .. }
-                | Op::Dynamic {
+                | Op::DynamicImage {
                     call: OperandDynKind::Construct,
                     ..
                 } => {}
@@ -1856,7 +1906,7 @@ impl CommandBuffer {
                 &Op::Unary {
                     src: Register(src), ..
                 }
-                | &Op::Dynamic {
+                | &Op::DynamicImage {
                     call: OperandDynKind::Unary(Register(src)),
                     ..
                 } => {
@@ -1868,7 +1918,7 @@ impl CommandBuffer {
                     rhs: Register(rhs),
                     ..
                 }
-                | &Op::Dynamic {
+                | &Op::DynamicImage {
                     call:
                         OperandDynKind::Binary {
                             lhs: Register(lhs),
@@ -1899,6 +1949,9 @@ impl CommandBuffer {
                 } => {
                     last_use[invocation] = last_use[invocation].max(idx);
                     first_use[invocation] = first_use[invocation].min(idx);
+                }
+                Op::Buffer { .. } => {
+                    todo!()
                 }
             }
         }
@@ -1977,7 +2030,7 @@ impl CommandBuffer {
 
                     match construct_op {
                         &ConstructOp::DistributionNormal(ref distribution) => {
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment {
@@ -1989,8 +2042,12 @@ impl CommandBuffer {
                                 },
                             })
                         }
+                        &ConstructOp::FromBuffer(src) => {
+                            // Well we realized the texture, now just initialize it.
+                            high_ops.push(High::Copy { src, dst: idx_reg });
+                        }
                         ConstructOp::DistributionNoise(ref noise_params) => {
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment {
@@ -2002,7 +2059,7 @@ impl CommandBuffer {
                                 },
                             })
                         }
-                        ConstructOp::Bilinear(bilinear) => high_ops.push(High::Construct {
+                        ConstructOp::Bilinear(bilinear) => high_ops.push(High::DrawInto {
                             dst: Target::Discard(texture),
                             fn_: Initializer::PaintFullScreen {
                                 shader: ParameterizedFragment {
@@ -2013,7 +2070,7 @@ impl CommandBuffer {
                                 },
                             },
                         }),
-                        &ConstructOp::Solid(color) => high_ops.push(High::Construct {
+                        &ConstructOp::Solid(color) => high_ops.push(High::DrawInto {
                             dst: Target::Discard(texture),
                             fn_: Initializer::PaintFullScreen {
                                 shader: ParameterizedFragment {
@@ -2038,7 +2095,7 @@ impl CommandBuffer {
                             let target =
                                 Rectangle::with_width_height(region.width(), region.height());
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[src],
@@ -2067,7 +2124,7 @@ impl CommandBuffer {
                             // eprintln!("{:?}", matrix);
 
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment {
@@ -2097,7 +2154,7 @@ impl CommandBuffer {
                             // back to the non-linear electrical space.
                             // We could do this directly from one matrix to another or try using an
                             // ephemeral intermediate attachment?
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment {
@@ -2110,7 +2167,7 @@ impl CommandBuffer {
                         UnaryOp::Extract { channel: _ } => {
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
 
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     // This will grab the right channel, that is all of them.
@@ -2131,7 +2188,7 @@ impl CommandBuffer {
                             let invocation = derivative.method.to_shader(derivative.direction)?;
 
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment { invocation, knob },
@@ -2174,7 +2231,7 @@ impl CommandBuffer {
                             let affine_matrix = RowMatrix::new(affine.transformation);
 
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[lhs],
@@ -2191,7 +2248,7 @@ impl CommandBuffer {
                             });
 
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Load(texture),
                                 fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[rhs],
@@ -2214,7 +2271,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
 
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment {
@@ -2231,7 +2288,7 @@ impl CommandBuffer {
                         }
                         BinaryOp::Inscribe { placement } => {
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[lhs],
@@ -2248,7 +2305,7 @@ impl CommandBuffer {
                             });
 
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Load(texture),
                                 fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[rhs],
@@ -2268,7 +2325,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
 
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Load(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment {
@@ -2284,7 +2341,7 @@ impl CommandBuffer {
 
                     reg_to_texture.insert(Register(idx), texture);
                 }
-                Op::Dynamic { call, command, .. } => {
+                Op::DynamicImage { call, command, .. } => {
                     let texture = realize_texture(idx, op)?;
                     let (op_unary, op_binary, arguments);
 
@@ -2319,7 +2376,7 @@ impl CommandBuffer {
 
                     // This always 'constructs' an output texture. The image we render to is new,
                     // no matter how many arguments are being inserted.
-                    high_ops.push(High::Construct {
+                    high_ops.push(High::DrawInto {
                         dst: Target::Discard(texture),
                         fn_: Initializer::PaintFullScreen {
                             shader: ParameterizedFragment {
@@ -2425,7 +2482,8 @@ impl CommandBuffer {
             | Some(Op::Construct { desc, .. })
             | Some(Op::Unary { desc, .. })
             | Some(Op::Binary { desc, .. })
-            | Some(Op::Dynamic { desc, .. }) => RegisterDescription::Texture(desc),
+            | Some(Op::DynamicImage { desc, .. }) => RegisterDescription::Texture(desc),
+            Some(Op::Buffer { desc, .. }) => RegisterDescription::Buffer(desc),
         }
     }
 
@@ -2457,7 +2515,7 @@ impl CommandBuffer {
             content: &mut content,
         });
 
-        self.push(Op::Dynamic {
+        self.push(Op::DynamicImage {
             call: OperandDynKind::Construct,
             // FIXME: maybe this conversion should be delayed.
             // In particular, converting source to SPIR-V may take some form of 'compiler' argument
@@ -2496,7 +2554,7 @@ impl CommandBuffer {
             content: &mut content,
         });
 
-        let out_reg = self.push(Op::Dynamic {
+        let out_reg = self.push(Op::DynamicImage {
             call: OperandDynKind::Unary(op),
             // FIXME: maybe this conversion should be delayed.
             // In particular, converting source to SPIR-V may take some form of 'compiler' argument
@@ -2543,7 +2601,7 @@ impl CommandBuffer {
             content: &mut content,
         });
 
-        let out_reg = self.push(Op::Dynamic {
+        let out_reg = self.push(Op::DynamicImage {
             call: OperandDynKind::Binary { lhs, rhs },
             // FIXME: maybe this conversion should be delayed.
             // In particular, converting source to SPIR-V may take some form of 'compiler' argument
