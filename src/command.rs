@@ -2015,7 +2015,7 @@ impl CommandBuffer {
                     last_use[invocation] = last_use[invocation].max(idx);
                     first_use[invocation] = first_use[invocation].min(idx);
                 }
-                Op::Buffer { .. } => {
+                Op::Buffer { desc, op } => {
                     todo!()
                 }
             }
