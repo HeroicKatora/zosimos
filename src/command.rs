@@ -215,6 +215,15 @@ pub(crate) enum BufferInitOp {
         placement: core::ops::Range<usize>,
         data: Arc<[u8]>,
     },
+    FromImage {
+        register: Register,
+    },
+    /// Combine two buffers by overlaying one over the contents of the other, at a fixed location.
+    Overlay {
+        under: Register,
+        at: u64,
+        over: Register,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -575,7 +584,8 @@ pub struct WithKnob<'lt> {
 }
 
 /// Schedule instructions with parameters already in GPU memory.
-struct WithBuffer<'lt> {
+#[allow(dead_code)]
+pub struct WithBuffer<'lt> {
     inner: &'lt mut CommandBuffer,
 }
 
@@ -1621,7 +1631,11 @@ impl CommandBuffer {
         WithKnob { inner: self }
     }
 
-    fn with_buffer(&mut self) -> WithBuffer<'_> {
+    /// FIXME!! Implement this with a mechanism similar to `with_knob` but here we can probably use
+    /// a different set of calls. Where it would be necessary to do indirect paint calls it'll get
+    /// more complicated in the translation stage (need new `Low` ops) but it should be simple for
+    /// a few other calls.
+    pub fn with_buffer(&mut self) -> WithBuffer<'_> {
         todo!()
     }
 }
@@ -1633,30 +1647,81 @@ impl CommandBuffer {
     /// The binary value will be copied into a buffer held by the execution state. If you intend to
     /// modify that buffer with each execution, see [`Self::with_knob`] and [`WithKnob::buffer_init`].
     pub fn buffer_init(&mut self, init: &[u8]) -> Register {
-        todo!()
+        use core::convert::TryInto as _;
+        let size: u64 = init.len().try_into().unwrap();
+
+        self.push(Op::Buffer {
+            desc: GenericBuffer {
+                size: Generic::Concrete(size),
+            },
+            op: BufferInitOp::FromData {
+                size,
+                placement: 0..init.len(),
+                data: Arc::from(init),
+            },
+        })
     }
 
     /// Construct a buffer that is fully zeroed from memory.
-    pub fn buffer_zero(&mut self, len: usize) -> Register {
-        todo!()
+    pub fn buffer_zero(&mut self, len: u64) -> Register {
+        self.push(Op::Buffer {
+            desc: GenericBuffer {
+                size: Generic::Concrete(len),
+            },
+            op: BufferInitOp::FromData {
+                size: len,
+                placement: 0..0,
+                data: Arc::default(),
+            },
+        })
     }
 
     /// Construct a buffer representing *encoded* image data.
-    pub fn buffer_from_image(&mut self, register: Register) -> Register {
-        todo!()
+    pub fn buffer_from_image(&mut self, register: Register) -> Result<Register, CommandError> {
+        let RegisterDescription::Texture(tex) = self.describe_reg(register) else {
+            return Err(CommandError::BAD_REGISTER);
+        };
+
+        let len = match tex.as_concrete() {
+            Some(descriptor) => descriptor.to_canvas().u64_len(),
+            // FIXME: better diagnostic or allow this?
+            None => return Err(CommandError::BAD_REGISTER),
+        };
+
+        Ok(self.push(Op::Buffer {
+            desc: GenericBuffer {
+                size: Generic::Concrete(len),
+            },
+            op: BufferInitOp::FromImage { register },
+        }))
     }
 
     /// Construct a buffer by overlaying one on top of another.
     ///
     /// The output buffer is sized according to the underlying buffer. Overflowed data will be
     /// discarded.
-    pub fn buffer_interpolate(
+    pub fn buffer_overlay(
         &mut self,
         under: Register,
-        at: usize,
+        at: u64,
         over: Register,
     ) -> Result<Register, CommandError> {
-        todo!()
+        let RegisterDescription::Buffer(buf) = self.describe_reg(under) else {
+            return Err(CommandError::BAD_REGISTER);
+        };
+
+        let RegisterDescription::Buffer(_) = self.describe_reg(over) else {
+            return Err(CommandError::BAD_REGISTER);
+        };
+
+        // FIXME: generate warnings if out of bounds? There is no use cloning a buffer that I can
+        // see right now, it's all still the exact same content.
+        Ok(self.push(Op::Buffer {
+            desc: GenericBuffer {
+                size: buf.size.clone(),
+            },
+            op: BufferInitOp::Overlay { under, at, over },
+        }))
     }
 }
 
