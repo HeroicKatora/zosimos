@@ -161,9 +161,20 @@ enum Op {
         /// The result's type monomorphized as called.
         desc: GenericDescriptor,
     },
-    Buffer {
-        desc: GenericBuffer,
+    BufferInit {
         op: BufferInitOp,
+        desc: GenericBuffer,
+    },
+    BufferUnary {
+        src: Register,
+        op: BufferUnaryOp,
+        desc: GenericBuffer,
+    },
+    BufferBinary {
+        lhs: Register,
+        rhs: Register,
+        op: BufferBinaryOp,
+        desc: GenericBuffer,
     },
 }
 
@@ -215,15 +226,17 @@ pub(crate) enum BufferInitOp {
         placement: core::ops::Range<usize>,
         data: Arc<[u8]>,
     },
-    FromImage {
-        register: Register,
-    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum BufferUnaryOp {
+    FromImage {},
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum BufferBinaryOp {
     /// Combine two buffers by overlaying one over the contents of the other, at a fixed location.
-    Overlay {
-        under: Register,
-        at: u64,
-        over: Register,
-    },
+    Overlay { at: u64 },
 }
 
 #[derive(Clone, Debug)]
@@ -1650,7 +1663,7 @@ impl CommandBuffer {
         use core::convert::TryInto as _;
         let size: u64 = init.len().try_into().unwrap();
 
-        self.push(Op::Buffer {
+        self.push(Op::BufferInit {
             desc: GenericBuffer {
                 size: Generic::Concrete(size),
             },
@@ -1664,7 +1677,7 @@ impl CommandBuffer {
 
     /// Construct a buffer that is fully zeroed from memory.
     pub fn buffer_zero(&mut self, len: u64) -> Register {
-        self.push(Op::Buffer {
+        self.push(Op::BufferInit {
             desc: GenericBuffer {
                 size: Generic::Concrete(len),
             },
@@ -1688,11 +1701,12 @@ impl CommandBuffer {
             None => return Err(CommandError::BAD_REGISTER),
         };
 
-        Ok(self.push(Op::Buffer {
+        Ok(self.push(Op::BufferUnary {
+            src: register,
             desc: GenericBuffer {
                 size: Generic::Concrete(len),
             },
-            op: BufferInitOp::FromImage { register },
+            op: BufferUnaryOp::FromImage {},
         }))
     }
 
@@ -1716,11 +1730,13 @@ impl CommandBuffer {
 
         // FIXME: generate warnings if out of bounds? There is no use cloning a buffer that I can
         // see right now, it's all still the exact same content.
-        Ok(self.push(Op::Buffer {
+        Ok(self.push(Op::BufferBinary {
+            lhs: under,
+            rhs: over,
             desc: GenericBuffer {
                 size: buf.size.clone(),
             },
-            op: BufferInitOp::Overlay { under, at, over },
+            op: BufferBinaryOp::Overlay { at },
         }))
     }
 }
@@ -1956,6 +1972,7 @@ impl CommandBuffer {
             match op {
                 Op::Input { .. }
                 | Op::Construct { .. }
+                | Op::BufferInit { .. }
                 | Op::DynamicImage {
                     call: OperandDynKind::Construct,
                     ..
@@ -1974,11 +1991,19 @@ impl CommandBuffer {
                 | &Op::DynamicImage {
                     call: OperandDynKind::Unary(Register(src)),
                     ..
+                }
+                | &Op::BufferUnary {
+                    src: Register(src), ..
                 } => {
                     last_use[src] = last_use[src].max(idx);
                     first_use[src] = first_use[src].min(idx);
                 }
                 &Op::Binary {
+                    lhs: Register(lhs),
+                    rhs: Register(rhs),
+                    ..
+                }
+                | &Op::BufferBinary {
                     lhs: Register(lhs),
                     rhs: Register(rhs),
                     ..
@@ -2014,9 +2039,6 @@ impl CommandBuffer {
                 } => {
                     last_use[invocation] = last_use[invocation].max(idx);
                     first_use[invocation] = first_use[invocation].min(idx);
-                }
-                Op::Buffer { desc, op } => {
-                    todo!()
                 }
             }
         }
@@ -2548,7 +2570,9 @@ impl CommandBuffer {
             | Some(Op::Unary { desc, .. })
             | Some(Op::Binary { desc, .. })
             | Some(Op::DynamicImage { desc, .. }) => RegisterDescription::Texture(desc),
-            Some(Op::Buffer { desc, .. }) => RegisterDescription::Buffer(desc),
+            Some(Op::BufferInit { desc, .. })
+            | Some(Op::BufferUnary { desc, .. })
+            | Some(Op::BufferBinary { desc, .. }) => RegisterDescription::Buffer(desc),
         }
     }
 
