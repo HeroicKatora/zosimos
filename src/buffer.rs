@@ -1,9 +1,7 @@
 //! Defines layout and buffer of our images.
 pub use image_canvas::{
     color::{Color, ColorChannel, Transfer, Whitepoint},
-    layout::{
-        Block, CanvasLayout as BufferLayout, RowLayoutDescription, SampleBits, SampleParts, Texel,
-    },
+    layout::{Block, CanvasLayout, RowLayoutDescription, SampleBits, SampleParts, Texel},
     Canvas,
 };
 
@@ -128,12 +126,12 @@ impl Descriptor {
         })
     }
 
-    pub(crate) fn to_canvas(&self) -> BufferLayout {
+    pub(crate) fn to_canvas(&self) -> CanvasLayout {
         self.try_to_canvas()
             .expect("To be validated on construction")
     }
 
-    pub(crate) fn try_to_canvas(&self) -> Option<BufferLayout> {
+    pub(crate) fn try_to_canvas(&self) -> Option<CanvasLayout> {
         let descriptor = RowLayoutDescription {
             width: self.layout.width,
             height: self.layout.height,
@@ -141,7 +139,7 @@ impl Descriptor {
             texel: self.texel.clone(),
         };
 
-        BufferLayout::with_row_layout(&descriptor).ok()
+        CanvasLayout::with_row_layout(&descriptor).ok()
     }
 
     /// Check if the descriptor is consistent.
@@ -327,12 +325,12 @@ impl Descriptor {
 
 impl ImageBuffer {
     /// Allocate a new image buffer given its layout.
-    pub fn with_layout(layout: &BufferLayout) -> Self {
+    pub fn with_layout(layout: &CanvasLayout) -> Self {
         let inner = Canvas::new(layout.clone());
         ImageBuffer { inner }
     }
 
-    pub fn layout(&self) -> &BufferLayout {
+    pub fn layout(&self) -> &CanvasLayout {
         self.inner.layout()
     }
 
@@ -364,7 +362,7 @@ impl From<&'_ image::DynamicImage> for ByteLayout {
 impl From<&'_ image::DynamicImage> for ImageBuffer {
     fn from(image: &'_ image::DynamicImage) -> ImageBuffer {
         let descriptor = Descriptor::with_srgb_image(image);
-        let mut layout = BufferLayout::with_row_layout(&RowLayoutDescription {
+        let mut layout = CanvasLayout::with_row_layout(&RowLayoutDescription {
             width: image.width(),
             height: image.height(),
             row_stride: descriptor.layout.row_stride,
@@ -386,8 +384,8 @@ impl From<&'_ image::DynamicImage> for ImageBuffer {
     }
 }
 
-impl From<&'_ BufferLayout> for Descriptor {
-    fn from(buf: &BufferLayout) -> Descriptor {
+impl From<&'_ CanvasLayout> for Descriptor {
+    fn from(buf: &CanvasLayout) -> Descriptor {
         // FIXME: panics on purpose.
         let _plane = buf.as_plane().unwrap();
 

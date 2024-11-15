@@ -99,14 +99,26 @@ pub(crate) enum High {
     /// Add an additional texture operand to the next operation.
     PushOperand(Texture),
     /// Call a function on the currently prepared operands.
-    DrawInto { dst: Target, fn_: Initializer },
+    DrawInto {
+        dst: Target,
+        fn_: Initializer,
+    },
     /// Create all the state for a texture, without doing anything in it.
-    Uninit { dst: Target },
+    Uninit {
+        dst: Target,
+    },
+    WriteInto {
+        dst: Buffer,
+        fn_: BufferWrite,
+    },
     /// Last phase marking a register as done.
     /// This is emitted after the Command defining the register has been translated.
     Done(Register),
     /// Copy binary data from a buffer to another.
-    Copy { src: Register, dst: Register },
+    Copy {
+        src: Register,
+        dst: Register,
+    },
     /// Push one high-level function marker.
     StackPush(Frame),
     /// Pop a high-level function marker.
@@ -206,6 +218,17 @@ pub(crate) enum Initializer {
     },
 }
 
+/// An operation that modifies the contents of a buffer.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum BufferWrite {
+    Zero,
+
+    Put {
+        placement: Range<usize>,
+        data: Arc<[u8]>,
+    },
+}
+
 /// Describes a method of calculating the screen space coordinates of the painted quad.
 #[derive(Clone, Debug, PartialEq)]
 pub enum QuadTarget {
@@ -216,9 +239,15 @@ pub enum QuadTarget {
 #[derive(Clone, Debug, Default)]
 pub struct ImageBufferPlan {
     pub(crate) texture: Vec<Descriptor>,
-    pub(crate) buffer: Vec<ByteLayout>,
+    pub(crate) buffer: Vec<BufferLayout>,
     pub(crate) by_register: Vec<ImageBufferAssignment>,
     pub(crate) by_layout: HashMap<ByteLayout, Texture>,
+}
+
+#[derive(Clone, Debug)]
+enum BufferLayout {
+    Linear(u64),
+    Texture(ByteLayout),
 }
 
 /// Contains the data on how images relate to the launcher's pool.
@@ -233,6 +262,11 @@ pub struct ImagePoolPlan {
 #[derive(Clone, Copy, Debug)]
 pub struct ImageBufferAssignment {
     pub(crate) texture: Texture,
+    pub(crate) buffer: Buffer,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ByteBufferAssignment {
     pub(crate) buffer: Buffer,
 }
 
@@ -432,11 +466,23 @@ pub(crate) enum Low {
         target_buffer: DeviceBuffer,
         target_layout: ByteLayout,
     },
+
+    // FIXME: requires a *dynamic* alignment condition. We should thus have an emulated version of
+    // this copy for buffers that can be bound? Unsure exactly what to make it of it.
     CopyBufferToBuffer {
         source_buffer: DeviceBuffer,
+        source: u64,
+        target_buffer: DeviceBuffer,
+        target: u64,
+        size: u64,
+    },
+
+    ZeroBuffer {
+        start: u64,
         size: u64,
         target_buffer: DeviceBuffer,
     },
+
     /// Read a buffer into host image data.
     /// Will map the buffer then do row-wise reads.
     ReadBuffer {
@@ -667,9 +713,9 @@ impl From<shaders::VertexShader> for ShaderDescriptorKey {
 pub(crate) enum BufferUsage {
     /// Map Write + Vertex
     InVertices,
-    /// Map Write + Storage + Copy Src
+    /// Map Write + Copy Src
     DataIn,
-    /// Map Read + Storage + Copy Dst
+    /// Map Read + Copy Dst
     DataOut,
     /// Storage + Copy Src/Dst
     DataBuffer,
@@ -960,7 +1006,7 @@ pub struct Launcher<'program> {
 }
 
 impl ImageBufferPlan {
-    pub(crate) fn allocate_for(
+    pub(crate) fn alloc_texture_for(
         &mut self,
         desc: &Descriptor,
         _: Range<usize>,
@@ -969,17 +1015,26 @@ impl ImageBufferPlan {
         let texture = Texture(self.texture.len());
         self.texture.push(desc.clone());
         let buffer = Buffer(self.buffer.len());
-        self.buffer.push(desc.layout.clone());
+        self.buffer.push(BufferLayout::Texture(desc.layout.clone()));
         self.by_layout.insert(desc.layout.clone(), texture);
         let assigned = ImageBufferAssignment { buffer, texture };
         self.by_register.push(assigned);
         assigned
     }
 
-    pub(crate) fn get(&self, idx: Register) -> Result<ImageBufferAssignment, LaunchError> {
+    pub(crate) fn alloc_buffer_for(&mut self, len: u64, _: Range<usize>) -> ByteBufferAssignment {
+        let buffer = Buffer(self.buffer.len());
+        self.buffer.push(BufferLayout::Linear(len));
+        ByteBufferAssignment { buffer }
+    }
+
+    pub(crate) fn get_image(&self, idx: Register) -> Result<ImageBufferAssignment, LaunchError> {
         self.by_register
             .get(idx.0)
-            .ok_or_else(|| LaunchError::InternalCommandError(line!()))
+            .ok_or_else(|| {
+                eprintln!("{idx:?}");
+                LaunchError::InternalCommandError(line!())
+            })
             .map(ImageBufferAssignment::clone)
     }
 
@@ -987,14 +1042,17 @@ impl ImageBufferPlan {
         &self,
         idx: Register,
     ) -> Result<ImageBufferDescriptors<'_>, LaunchError> {
-        let assigned = self.get(idx)?;
+        let assigned = self.get_image(idx)?;
         Ok(self.describe(&assigned))
     }
 
     pub(crate) fn describe(&self, assigned: &ImageBufferAssignment) -> ImageBufferDescriptors<'_> {
         ImageBufferDescriptors {
             descriptor: &self.texture[assigned.texture.0],
-            layout: &self.buffer[assigned.buffer.0],
+            layout: match &self.buffer[assigned.buffer.0] {
+                BufferLayout::Texture(desc) => desc,
+                _ => panic!("Image appear assigned to non-image buffer. Mixed up buffer plans?"),
+            },
         }
     }
 }
@@ -1016,6 +1074,15 @@ impl ImagePoolPlan {
     pub(crate) fn get_texture(&self, idx: Register) -> Option<Texture> {
         let key = self.plan.get(&idx)?;
         self.buffer.get(key).cloned()
+    }
+}
+
+impl BufferLayout {
+    fn len_u64(&self) -> u64 {
+        match self {
+            &BufferLayout::Linear(len) => len,
+            BufferLayout::Texture(tex) => u64::from(tex.height) * tex.row_stride,
+        }
     }
 }
 
@@ -1422,13 +1489,18 @@ impl Program {
                     encoder.push(Low::BeginCommands)?;
                     encoder.push(Low::CopyBufferToBuffer {
                         source_buffer,
-                        size,
+                        source: 0,
                         target_buffer,
+                        target: 0,
+                        size,
                     })?;
                     encoder.push(Low::EndCommands)?;
                     encoder.push(Low::RunTopCommand)?;
 
                     encoder.copy_buffer_to_staging(*dst)?;
+                }
+                High::WriteInto { dst, fn_ } => {
+                    encoder.prepare_buffer_write(fn_, *dst)?;
                 }
                 High::StackPush(frame) => {
                     encoder.push(Low::StackFrame(run::Frame {
@@ -1545,6 +1617,7 @@ impl Program {
             | Low::CopyBufferToTexture { .. }
             | Low::CopyTextureToBuffer { .. }
             | Low::CopyBufferToBuffer { .. }
+            | Low::ZeroBuffer { .. }
             | Low::ReadBuffer { .. }
             | Low::StackFrame(_)
             | Low::StackPop

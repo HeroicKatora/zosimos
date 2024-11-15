@@ -5,7 +5,7 @@ use std::sync::Arc;
 use slotmap::{DefaultKey, SlotMap};
 use wgpu::{Buffer, Texture};
 
-use crate::buffer::{BufferLayout, Color, Descriptor, ImageBuffer};
+use crate::buffer::{CanvasLayout, Color, Descriptor, ImageBuffer};
 use crate::program::{
     BufferDescriptor, BufferUsage, Capabilities, ImageDescriptor, RenderPipelineKey,
     ShaderDescriptorKey, TextureDescriptor,
@@ -135,7 +135,7 @@ pub(crate) enum ImageData {
         /// offset. In particular, any modification will require a device (and queue) anyways,
         /// which is also sufficient to setup a new allocation where necessary.
         buffer: Arc<Buffer>,
-        layout: BufferLayout,
+        layout: CanvasLayout,
         gpu: DefaultKey,
     },
     /// The data lives in a texture buffer on the device.
@@ -146,13 +146,13 @@ pub(crate) enum ImageData {
         // COPY_SRC and TEXTURE_BINDING is impossible to read out; or a texture with exclusively
         // RENDER_ATTACHMENT can be rendered to but not copied to for initialization.
         texture: Texture,
-        layout: BufferLayout,
+        layout: CanvasLayout,
         gpu: DefaultKey,
     },
     /// The image data will be provided by the caller.
     /// Such data can only be used in operations that do not keep a reference, e.g. it is not
     /// possible to create a mere view.
-    LateBound(BufferLayout),
+    LateBound(CanvasLayout),
 }
 
 impl PoolKey {
@@ -621,7 +621,7 @@ impl ImageData {
         }
     }
 
-    pub(crate) fn layout(&self) -> &BufferLayout {
+    pub(crate) fn layout(&self) -> &CanvasLayout {
         match self {
             ImageData::Host(canvas) => canvas.layout(),
             ImageData::GpuBuffer { layout, .. } => layout,
@@ -651,7 +651,7 @@ impl PoolImage<'_> {
         PoolKey(self.key)
     }
 
-    pub fn layout(&self) -> &BufferLayout {
+    pub fn layout(&self) -> &CanvasLayout {
         self.image.data.layout()
     }
 
@@ -680,7 +680,7 @@ impl PoolImageMut<'_> {
     }
 
     /// Get the buffer layout describing the byte occupancy.
-    pub fn layout(&self) -> &BufferLayout {
+    pub fn layout(&self) -> &CanvasLayout {
         self.image.data.layout()
     }
 

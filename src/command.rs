@@ -2,13 +2,13 @@ mod dynamic;
 
 pub use self::dynamic::{ShaderCommand, ShaderData, ShaderSource};
 
-use crate::buffer::{BufferLayout, ByteLayout, ChannelPosition, Descriptor, TexelExt};
+use crate::buffer::{ByteLayout, CanvasLayout, ChannelPosition, Descriptor, TexelExt};
 use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
-    CallBinding, CompileError, Frame, Function, FunctionLinked, High, ImageBufferAssignment,
-    ImageBufferPlan, ImageDescriptor, Initializer, Knob, ParameterizedFragment, Program,
-    QuadTarget, Target, Texture,
+    BufferWrite, ByteBufferAssignment, CallBinding, CompileError, Frame, Function, FunctionLinked,
+    High, ImageBufferAssignment, ImageBufferPlan, ImageDescriptor, Initializer, Knob,
+    ParameterizedFragment, Program, QuadTarget, Target, Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
@@ -1964,7 +1964,7 @@ impl CommandBuffer {
         let mut last_use = vec![0; steps];
         let mut first_use = vec![steps; steps];
 
-        let mut image_buffers = ImageBufferPlan::default();
+        let image_buffers = core::cell::RefCell::new(ImageBufferPlan::default());
 
         // Liveness analysis.
         for (back_idx, op) in ops.iter().rev().enumerate() {
@@ -2048,7 +2048,7 @@ impl CommandBuffer {
         let mut signature_in: Vec<Register> = vec![];
         let mut signature_out: Vec<Register> = vec![];
 
-        let mut realize_texture = |idx, op: &Op| {
+        let realize_texture = |idx, op: &Op| {
             let liveness = first_use[idx]..last_use[idx];
 
             // FIXME: not all our High ops actually allocate textures..
@@ -2061,14 +2061,36 @@ impl CommandBuffer {
                     Register(idx)
                 })
                 .as_texture()
-                .expect("A non-output register");
+                .expect("A texture register");
 
             let descriptor = descriptor.monomorphize(tys);
 
-            let ImageBufferAssignment { buffer: _, texture } =
-                image_buffers.allocate_for(&descriptor, liveness);
+            let ImageBufferAssignment { buffer: _, texture } = image_buffers
+                .borrow_mut()
+                .alloc_texture_for(&descriptor, liveness);
 
             Ok(texture)
+        };
+
+        let realize_buffer = |idx, op: &Op| {
+            let liveness = first_use[idx]..last_use[idx];
+
+            let descriptor = command
+                .describe_reg(if let Op::Output { src } = op {
+                    *src
+                } else if let Op::Render { src } = op {
+                    *src
+                } else {
+                    Register(idx)
+                })
+                .as_buffer()
+                .expect("A buffer register");
+
+            let len = descriptor.monomorphize(tys);
+            let ByteBufferAssignment { buffer } =
+                image_buffers.borrow_mut().alloc_buffer_for(len, liveness);
+
+            Ok(buffer)
         };
 
         for (idx, op) in ops.iter().enumerate() {
@@ -2169,6 +2191,33 @@ impl CommandBuffer {
                     }
 
                     reg_to_texture.insert(idx_reg, texture);
+                }
+                Op::BufferInit {
+                    op: buf_op,
+                    desc: _,
+                } => {
+                    let buffer = realize_buffer(idx, op)?;
+
+                    match buf_op {
+                        BufferInitOp::FromData {
+                            size: _,
+                            placement,
+                            data,
+                        } => {
+                            high_ops.push(High::WriteInto {
+                                dst: buffer,
+                                fn_: BufferWrite::Zero,
+                            });
+
+                            high_ops.push(High::WriteInto {
+                                dst: buffer,
+                                fn_: BufferWrite::Put {
+                                    placement: placement.clone(),
+                                    data: data.clone(),
+                                },
+                            });
+                        }
+                    }
                 }
                 Op::Unary {
                     desc: _,
@@ -2551,7 +2600,7 @@ impl CommandBuffer {
 
         Ok(FunctionLinked {
             ops: start..end,
-            image_buffers,
+            image_buffers: image_buffers.into_inner(),
             signature_registers,
         })
     }
@@ -2826,6 +2875,15 @@ impl GenericDescriptor {
     }
 }
 
+impl GenericBuffer {
+    pub fn monomorphize(&self, decl: &[Descriptor]) -> u64 {
+        match self.size {
+            Generic::Concrete(val) => val,
+            Generic::Generic(var) => decl[var.0].to_canvas().u64_len(),
+        }
+    }
+}
+
 impl From<Descriptor> for GenericDescriptor {
     fn from(desc: Descriptor) -> Self {
         let size = desc.size();
@@ -2842,6 +2900,13 @@ impl<'lt> RegisterDescription<'lt> {
     pub fn as_texture(&self) -> Result<&'lt GenericDescriptor, CommandError> {
         match self {
             RegisterDescription::Texture(tex) => Ok(tex),
+            _ => Err(CommandError::BAD_REGISTER),
+        }
+    }
+
+    pub fn as_buffer(&self) -> Result<&'lt GenericBuffer, CommandError> {
+        match self {
+            RegisterDescription::Buffer(tex) => Ok(tex),
             _ => Err(CommandError::BAD_REGISTER),
         }
     }
@@ -3215,8 +3280,8 @@ impl From<&'_ ByteLayout> for Rectangle {
     }
 }
 
-impl From<&'_ BufferLayout> for Rectangle {
-    fn from(buffer: &BufferLayout) -> Rectangle {
+impl From<&'_ CanvasLayout> for Rectangle {
+    fn from(buffer: &CanvasLayout) -> Rectangle {
         Rectangle::with_width_height(buffer.width(), buffer.height())
     }
 }

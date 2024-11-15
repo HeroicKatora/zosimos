@@ -3,22 +3,23 @@ use core::{num::NonZeroU64, ops::Range};
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use crate::buffer::{BufferLayout, ByteLayout};
+use crate::buffer::{ByteLayout, CanvasLayout, Descriptor};
 use crate::command::Register;
 use crate::pool::Pool;
 use crate::program::{
     BindGroupDescriptor, BindGroupLayoutDescriptor, BindingResource, Buffer, BufferDescriptor,
-    BufferDescriptorInit, BufferInitContent, BufferUsage, Capabilities, ColorAttachmentDescriptor,
-    DeviceBuffer, DeviceTexture, Event, FragmentState, ImageBufferAssignment, ImageBufferPlan,
-    ImageDescriptor, ImagePoolPlan, Initializer, Instruction, Knob, KnobDescriptor, LaunchError,
-    Low, PipelineLayoutDescriptor, PipelineLayoutKey, PrimitiveState, RenderPassDescriptor,
-    RenderPipelineDescriptor, RenderPipelineKey, SamplerDescriptor, ShaderDescriptor,
-    ShaderDescriptorKey, Texture, TextureDescriptor, TextureViewDescriptor, VertexState,
+    BufferDescriptorInit, BufferInitContent, BufferLayout, BufferUsage, Capabilities,
+    ColorAttachmentDescriptor, DeviceBuffer, DeviceTexture, Event, FragmentState,
+    ImageBufferAssignment, ImageBufferPlan, ImageDescriptor, ImagePoolPlan, Initializer,
+    Instruction, Knob, KnobDescriptor, LaunchError, Low, PipelineLayoutDescriptor,
+    PipelineLayoutKey, PrimitiveState, RenderPassDescriptor, RenderPipelineDescriptor,
+    RenderPipelineKey, SamplerDescriptor, ShaderDescriptor, ShaderDescriptorKey, Texture,
+    TextureDescriptor, TextureViewDescriptor, VertexState,
 };
 use crate::util::ExtendOne;
 use crate::{run, shaders};
 
-use image_canvas::layout::{CanvasLayout, RowLayoutDescription};
+use image_canvas::layout::RowLayoutDescription;
 use wgpu::StoreOp;
 
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
@@ -148,7 +149,7 @@ pub(crate) struct RegisterMap {
     /// This might differ from the layout of the corresponding pool image because it must adhere to
     /// the layout requirements of the device. For example, the alignment of each row must be
     /// divisible by 256 etc.
-    pub(crate) buffer_layout: BufferLayout,
+    pub(crate) buffer_layout: CanvasLayout,
     /// The byte (row-wise) descriptor for the buffer layout.
     /// Same caveat applies, this must be padded to alignments. Note that all currently supported
     /// wgpu formats have a row-wise layout. When and if this changes, turn this field into an enum
@@ -391,7 +392,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Low::WriteImageToTexture { .. }
             | Low::CopyBufferToTexture { .. }
             | Low::CopyTextureToBuffer { .. }
-            | Low::CopyBufferToBuffer { .. } => {
+            | Low::CopyBufferToBuffer { .. }
+            | Low::ZeroBuffer { .. } => {
                 if !self.is_in_command_encoder {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
@@ -462,7 +464,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let ImageBufferAssignment {
             buffer: reg_buffer,
             texture: reg_texture,
-        } = self.buffer_plan.get(idx)?;
+        } = self.buffer_plan.get_image(idx)?;
 
         if self.register_map.get(&idx).is_some() {
             return Ok(());
@@ -534,11 +536,13 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             .or_insert_with(|| map_entry.clone());
         *in_map = map_entry.clone();
 
+        let desc = Descriptor::from(&in_map.buffer_layout);
+
         self.buffer_map.insert(
             reg_buffer,
             BufferMap {
                 device: buffer,
-                layout: in_map.buffer_layout.clone(),
+                layout: BufferLayout::Texture(desc.layout),
             },
         );
 
@@ -598,8 +602,37 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(texture)
     }
 
+    fn ensure_allocate_buffer(&mut self, idx: Buffer) -> Result<(), LaunchError> {
+        if self.buffer_map.contains_key(&idx) {
+            return Ok(());
+        }
+
+        let plan = self
+            .buffer_plan
+            .buffer
+            .get(idx.0)
+            .map(Clone::clone)
+            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+        let buffer = DeviceBuffer(self.buffers);
+        self.push(Low::Buffer(BufferDescriptor {
+            size: plan.len_u64(),
+            usage: BufferUsage::DataBuffer,
+        }))?;
+
+        self.buffer_map.insert(
+            idx,
+            BufferMap {
+                device: buffer,
+                layout: plan,
+            },
+        );
+
+        Ok(())
+    }
+
     fn ingest_image_data(&mut self, idx: Register) -> Result<Texture, LaunchError> {
-        let texture = self.buffer_plan.get(idx)?.texture;
+        let texture = self.buffer_plan.get_image(idx)?.texture;
 
         // FIXME: We are conflating `texture` and the index in the execution's vector of IO
         // buffers. That is, we have an entry there even when the register/texture in question has
@@ -656,8 +689,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             self.push(Low::BeginCommands)?;
             let inst = self.push(Low::CopyBufferToBuffer {
                 source_buffer: map_write,
-                size: sizeu64,
+                source: 0,
                 target_buffer: regmap.buffer,
+                target: 0,
+                size: sizeu64,
             })?;
             self.info.skip_by_op.insert(inst, write_event);
             self.push(Low::EndCommands)?;
@@ -844,8 +879,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             self.push(Low::BeginCommands)?;
             self.push(Low::CopyBufferToBuffer {
                 source_buffer: regmap.buffer,
-                size: sizeu64,
+                source: 0,
                 target_buffer: map_read,
+                target: 0,
+                size: sizeu64,
             })?;
             // eprintln!("buf{:?} -> buf{:?} ({})", regmap.buffer, map_read, sizeu64);
             self.push(Low::EndCommands)?;
@@ -883,7 +920,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             let ImageBufferAssignment {
                 buffer: _,
                 texture: reg_texture,
-            } = self.buffer_plan.get(dst)?;
+            } = self.buffer_plan.get_image(dst)?;
             let descriptor = &self.buffer_plan.texture[reg_texture.0];
             let descriptor = ImageDescriptor::new(descriptor)?;
             descriptor.format
@@ -1780,6 +1817,82 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                         id: fragment,
                     },
                 })
+            }
+        }
+    }
+
+    pub(crate) fn prepare_buffer_write(
+        &mut self,
+        // The function we are using.
+        function: &super::BufferWrite,
+        // The texture we are rendering to.
+        dst: Buffer,
+    ) -> Result<(), LaunchError> {
+        self.ensure_allocate_buffer(dst)?;
+
+        match function {
+            super::BufferWrite::Zero => {
+                let buf_layout = self
+                    .buffer_plan
+                    .buffer
+                    .get(dst.0)
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                let map = self
+                    .buffer_map
+                    .get(&dst)
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                let size = buf_layout.len_u64();
+                let target_buffer = map.device;
+
+                self.push(Low::BeginCommands)?;
+                self.push(Low::ZeroBuffer {
+                    start: 0,
+                    size,
+                    target_buffer,
+                })?;
+                self.push(Low::EndCommands)?;
+                self.push(Low::RunTopCommand)?;
+
+                Ok(())
+            }
+            super::BufferWrite::Put { placement, data } => {
+                let buf_layout = self
+                    .buffer_plan
+                    .buffer
+                    .get(dst.0)
+                    .cloned()
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                let map = self
+                    .buffer_map
+                    .get(&dst)
+                    .map(Clone::clone)
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                let size = buf_layout.len_u64();
+
+                let data_range = self.ingest_data(data);
+
+                let stage_buffer = DeviceBuffer(self.buffers);
+                self.push(Low::BufferInit(BufferDescriptorInit {
+                    content: data_range,
+                    usage: BufferUsage::DataBuffer,
+                }))?;
+
+                self.push(Low::BeginCommands)?;
+                self.push(Low::CopyBufferToBuffer {
+                    source_buffer: stage_buffer,
+                    source: 0,
+                    target_buffer: map.device,
+                    target: placement.start as u64,
+                    size,
+                })?;
+                self.push(Low::EndCommands)?;
+                self.push(Low::RunTopCommand)?;
+
+                Ok(())
             }
         }
     }
