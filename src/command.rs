@@ -2067,7 +2067,7 @@ impl CommandBuffer {
 
             let ImageBufferAssignment { buffer: _, texture } = image_buffers
                 .borrow_mut()
-                .alloc_texture_for(&descriptor, liveness);
+                .alloc_texture_for(&descriptor, liveness, Register(idx));
 
             Ok(texture)
         };
@@ -2088,7 +2088,9 @@ impl CommandBuffer {
 
             let len = descriptor.monomorphize(tys);
             let ByteBufferAssignment { buffer } =
-                image_buffers.borrow_mut().alloc_buffer_for(len, liveness);
+                image_buffers
+                    .borrow_mut()
+                    .alloc_buffer_for(len, liveness, Register(idx));
 
             Ok(buffer)
         };

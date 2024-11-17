@@ -240,12 +240,14 @@ pub enum QuadTarget {
 pub struct ImageBufferPlan {
     pub(crate) texture: Vec<Descriptor>,
     pub(crate) buffer: Vec<BufferLayout>,
-    pub(crate) by_register: Vec<ImageBufferAssignment>,
+    pub(crate) by_register: HashMap<Register, RegisterAssignment>,
     pub(crate) by_layout: HashMap<ByteLayout, Texture>,
 }
 
+/// The *definitional* size of a buffer. On the device each can be described as a pure linear u64
+/// size but here we also retain the derivation.
 #[derive(Clone, Debug)]
-enum BufferLayout {
+pub(crate) enum BufferLayout {
     Linear(u64),
     Texture(ByteLayout),
 }
@@ -257,6 +259,12 @@ pub struct ImagePoolPlan {
     pub(crate) plan: HashMap<Register, PoolKey>,
     /// Maps pool images to the texture in the buffer list.
     pub(crate) buffer: HashMap<PoolKey, Texture>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum RegisterAssignment {
+    Image(ImageBufferAssignment),
+    Buffer(ByteBufferAssignment),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1010,6 +1018,7 @@ impl ImageBufferPlan {
         &mut self,
         desc: &Descriptor,
         _: Range<usize>,
+        register: Register,
     ) -> ImageBufferAssignment {
         // FIXME: we could de-duplicate textures using liveness information.
         let texture = Texture(self.texture.len());
@@ -1018,31 +1027,50 @@ impl ImageBufferPlan {
         self.buffer.push(BufferLayout::Texture(desc.layout.clone()));
         self.by_layout.insert(desc.layout.clone(), texture);
         let assigned = ImageBufferAssignment { buffer, texture };
-        self.by_register.push(assigned);
+        self.by_register
+            .insert(register, RegisterAssignment::Image(assigned));
         assigned
     }
 
-    pub(crate) fn alloc_buffer_for(&mut self, len: u64, _: Range<usize>) -> ByteBufferAssignment {
+    pub(crate) fn alloc_buffer_for(
+        &mut self,
+        len: u64,
+        _: Range<usize>,
+        register: Register,
+    ) -> ByteBufferAssignment {
         let buffer = Buffer(self.buffer.len());
         self.buffer.push(BufferLayout::Linear(len));
-        ByteBufferAssignment { buffer }
+        let assigned = ByteBufferAssignment { buffer };
+        self.by_register
+            .insert(register, RegisterAssignment::Buffer(assigned));
+        assigned
     }
 
-    pub(crate) fn get_image(&self, idx: Register) -> Result<ImageBufferAssignment, LaunchError> {
+    pub(crate) fn get_register_resources(
+        &self,
+        idx: Register,
+    ) -> Result<RegisterAssignment, LaunchError> {
         self.by_register
-            .get(idx.0)
-            .ok_or_else(|| {
-                eprintln!("{idx:?}");
-                LaunchError::InternalCommandError(line!())
-            })
-            .map(ImageBufferAssignment::clone)
+            .get(&idx)
+            .ok_or_else(|| LaunchError::InternalCommandError(line!()))
+            .map(RegisterAssignment::clone)
+    }
+
+    pub(crate) fn get_register_texture(&self, idx: Register) -> Result<Texture, LaunchError> {
+        match self.get_register_resources(idx)? {
+            RegisterAssignment::Image(image) => Ok(image.texture),
+            _ => Err(LaunchError::InternalCommandError(line!())),
+        }
     }
 
     pub(crate) fn get_info(
         &self,
         idx: Register,
     ) -> Result<ImageBufferDescriptors<'_>, LaunchError> {
-        let assigned = self.get_image(idx)?;
+        let RegisterAssignment::Image(assigned) = self.get_register_resources(idx)? else {
+            return Err(LaunchError::InternalCommandError(line!()));
+        };
+
         Ok(self.describe(&assigned))
     }
 
@@ -1476,13 +1504,16 @@ impl Program {
                     encoder.copy_texture_to_staging(dst_texture)?;
                 }
                 High::Copy { src, dst } => {
-                    let &RegisterMap {
+                    let &RegisterMap::Image {
                         buffer: source_buffer,
                         ref buffer_layout,
                         ..
                     } = encoder.allocate_register(*src)?;
+
                     let size = buffer_layout.u64_len();
-                    let target_buffer = encoder.allocate_register(*dst)?.buffer;
+                    let target_buffer = match encoder.allocate_register(*dst)? {
+                        RegisterMap::Image { buffer, .. } => *buffer,
+                    };
 
                     encoder.copy_staging_to_buffer(*src)?;
 
@@ -1527,9 +1558,10 @@ impl Program {
                                 encoder.ensure_allocate_texture(texture)?;
                                 encoder.copy_staging_to_buffer(register)?;
                                 let descriptor = &function.image_buffers.texture[texture.0];
+                                let RegisterMap::Image { buffer, .. } = regmap;
 
                                 io_buffers.push(CallImageArgument {
-                                    buffer: regmap.buffer,
+                                    buffer,
                                     descriptor: descriptor.clone(),
                                     in_io,
                                 });
@@ -1539,9 +1571,10 @@ impl Program {
                                 encoder.ensure_allocate_texture(texture)?;
                                 let descriptor = &function.image_buffers.texture[texture.0];
                                 post_textures.push(register);
+                                let RegisterMap::Image { buffer, .. } = regmap;
 
                                 io_buffers.push(CallImageArgument {
-                                    buffer: regmap.buffer,
+                                    buffer,
                                     descriptor: descriptor.clone(),
                                     in_io,
                                 });
@@ -1634,17 +1667,20 @@ impl Launcher<'_> {
     ///
     /// Returns an error if the register does not specify an input, or when there is no image under
     /// the key in the pool, or when the image in the pool does not match the declared format.
-    pub fn bind(mut self, Register(reg): Register, img: PoolKey) -> Result<Self, LaunchError> {
+    pub fn bind(mut self, reg: Register, img: PoolKey) -> Result<Self, LaunchError> {
         if self.pool.entry(img).is_none() {
             return Err(LaunchError::InternalCommandError(line!()));
         }
 
-        let Texture(texture) = match self.main.image_buffers.by_register.get(reg) {
-            Some(assigned) => assigned.texture,
-            None => return Err(LaunchError::InternalCommandError(line!())),
+        let RegisterAssignment::Image(ImageBufferAssignment {
+            texture: Texture(texture),
+            ..
+        }) = self.main.image_buffers.get_register_resources(reg)?
+        else {
+            return Err(LaunchError::InternalCommandError(line!()));
         };
 
-        self.pool_plan.plan.insert(Register(reg), img);
+        self.pool_plan.plan.insert(reg, img);
         self.pool_plan.buffer.insert(img, Texture(texture));
 
         Ok(self)
@@ -1658,10 +1694,14 @@ impl Launcher<'_> {
     pub fn bind_remaining_outputs(mut self) -> Result<Self, LaunchError> {
         for high in &self.program.ops {
             if let High::Output { src: register, dst } = *high {
-                let assigned = &self.main.image_buffers.by_register[register.0];
-                let descriptor = &self.main.image_buffers.texture[assigned.texture.0];
-                let key = self.pool_plan.choose_output(&mut *self.pool, descriptor);
-                self.pool_plan.plan.insert(dst, key);
+                match self.main.image_buffers.get_register_resources(register)? {
+                    RegisterAssignment::Image(assigned) => {
+                        let descriptor = &self.main.image_buffers.texture[assigned.texture.0];
+                        let key = self.pool_plan.choose_output(&mut *self.pool, descriptor);
+                        self.pool_plan.plan.insert(dst, key);
+                    }
+                    RegisterAssignment::Buffer(_) => todo!("No such output yet"),
+                }
             }
         }
 
