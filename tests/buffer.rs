@@ -37,7 +37,16 @@ fn run_from_buffer(pool: &mut Pool) {
 
     let descriptor = Descriptor::with_srgb_image(&image::DynamicImage::new_luma8(2, 2));
 
-    let buffer = commands.buffer_init(&[0xff, 0xff, 0x00, 0xff]);
+    // So. What is going on here, why is this a description for a 2x2 image?
+    //
+    // It's an implementation detail and not necessarily intended to work this way. First note that
+    // all buffers we want to copy must be aligned to the buffer copy size which is `4`. Then, the
+    // layout of a buffer on the GPU is texel-row-by-row where the row itself is also highly
+    // aligned, to 256 to be exact. Hence, the first two pixels here occupy two bytes but the first
+    // row occupies 256. We must also pad the second row to a multiple of the copy size.
+    let mut a = [0xff; 260];
+    a[256] = 0x00;
+    let buffer = commands.buffer_init(&a);
 
     let result = commands
         .from_buffer(buffer, descriptor)

@@ -1106,7 +1106,7 @@ impl ImagePoolPlan {
 }
 
 impl BufferLayout {
-    fn len_u64(&self) -> u64 {
+    fn u64_len(&self) -> u64 {
         match self {
             &BufferLayout::Linear(len) => len,
             BufferLayout::Texture(tex) => u64::from(tex.height) * tex.row_stride,
@@ -1449,7 +1449,7 @@ impl Program {
                     encoder.push_operand(texture)?;
                 }
                 &High::Uninit { dst } => {
-                    encoder.ensure_allocate_texture(match dst {
+                    encoder.ensure_device_texture(match dst {
                         Target::Discard(texture) | Target::Load(texture) => texture,
                     })?;
 
@@ -1460,7 +1460,7 @@ impl Program {
                         Target::Discard(texture) | Target::Load(texture) => *texture,
                     };
 
-                    encoder.ensure_allocate_texture(dst_texture)?;
+                    encoder.ensure_device_texture(dst_texture)?;
                     let dst_view = encoder.texture_view(dst_texture)?;
 
                     let ops = match dst {
@@ -1504,18 +1504,32 @@ impl Program {
                     encoder.copy_texture_to_staging(dst_texture)?;
                 }
                 High::Copy { src, dst } => {
-                    let &RegisterMap::Image {
-                        buffer: source_buffer,
-                        ref buffer_layout,
-                        ..
-                    } = encoder.allocate_register(*src)?;
-
-                    let size = buffer_layout.u64_len();
-                    let target_buffer = match encoder.allocate_register(*dst)? {
-                        RegisterMap::Image { buffer, .. } => *buffer,
+                    let size;
+                    let source_buffer = match encoder.allocate_register(*src)? {
+                        &RegisterMap::Image {
+                            buffer,
+                            ref buffer_layout,
+                            ..
+                        } => {
+                            size = buffer_layout.u64_len();
+                            encoder.copy_staging_to_buffer(*src)?;
+                            buffer
+                        }
+                        &RegisterMap::Buffer {
+                            buffer,
+                            ref buffer_layout,
+                            ..
+                        } => {
+                            size = buffer_layout.u64_len();
+                            buffer
+                        }
                     };
 
-                    encoder.copy_staging_to_buffer(*src)?;
+                    let target_buffer = match encoder.allocate_register(*dst)? {
+                        RegisterMap::Image { buffer, .. } | RegisterMap::Buffer { buffer, .. } => {
+                            *buffer
+                        }
+                    };
 
                     encoder.push(Low::BeginCommands)?;
                     encoder.push(Low::CopyBufferToBuffer {
@@ -1528,7 +1542,9 @@ impl Program {
                     encoder.push(Low::EndCommands)?;
                     encoder.push(Low::RunTopCommand)?;
 
-                    encoder.copy_buffer_to_staging(*dst)?;
+                    if let RegisterMap::Image { .. } = encoder.allocate_register(*dst)? {
+                        encoder.copy_buffer_to_staging(*dst)?;
+                    }
                 }
                 High::WriteInto { dst, fn_ } => {
                     encoder.prepare_buffer_write(fn_, *dst)?;
@@ -1555,10 +1571,11 @@ impl Program {
                         match param {
                             &CallBinding::InTexture { texture, register } => {
                                 let regmap = encoder.allocate_register(register)?.clone();
-                                encoder.ensure_allocate_texture(texture)?;
+                                encoder.ensure_device_texture(texture)?;
                                 encoder.copy_staging_to_buffer(register)?;
                                 let descriptor = &function.image_buffers.texture[texture.0];
-                                let RegisterMap::Image { buffer, .. } = regmap;
+                                let (RegisterMap::Image { buffer, .. }
+                                | RegisterMap::Buffer { buffer, .. }) = regmap;
 
                                 io_buffers.push(CallImageArgument {
                                     buffer,
@@ -1568,10 +1585,11 @@ impl Program {
                             }
                             &CallBinding::OutTexture { texture, register } => {
                                 let regmap = encoder.allocate_register(register)?.clone();
-                                encoder.ensure_allocate_texture(texture)?;
+                                encoder.ensure_device_texture(texture)?;
                                 let descriptor = &function.image_buffers.texture[texture.0];
                                 post_textures.push(register);
-                                let RegisterMap::Image { buffer, .. } = regmap;
+                                let (RegisterMap::Image { buffer, .. }
+                                | RegisterMap::Buffer { buffer, .. }) = regmap;
 
                                 io_buffers.push(CallImageArgument {
                                     buffer,

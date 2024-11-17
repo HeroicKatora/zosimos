@@ -8,8 +8,8 @@ use crate::command::Register;
 use crate::pool::Pool;
 use crate::program::{
     BindGroupDescriptor, BindGroupLayoutDescriptor, BindingResource, Buffer, BufferDescriptor,
-    BufferDescriptorInit, BufferInitContent, BufferLayout, BufferUsage, Capabilities,
-    ColorAttachmentDescriptor, DeviceBuffer, DeviceTexture, Event, FragmentState,
+    BufferDescriptorInit, BufferInitContent, BufferLayout, BufferUsage, ByteBufferAssignment,
+    Capabilities, ColorAttachmentDescriptor, DeviceBuffer, DeviceTexture, Event, FragmentState,
     ImageBufferAssignment, ImageBufferPlan, ImageDescriptor, ImagePoolPlan, Initializer,
     Instruction, Knob, KnobDescriptor, LaunchError, Low, PipelineLayoutDescriptor,
     PipelineLayoutKey, PrimitiveState, RegisterAssignment, RenderPassDescriptor,
@@ -135,6 +135,11 @@ pub(crate) struct ExecutableInfo {
 /// encoder process.
 #[derive(Clone, Debug)]
 pub(crate) enum RegisterMap {
+    Buffer {
+        reg_buffer: Buffer,
+        buffer: DeviceBuffer,
+        buffer_layout: BufferLayout,
+    },
     Image {
         reg_texture: Texture,
         texture: DeviceTexture,
@@ -467,7 +472,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         match ty {
             RegisterAssignment::Image(assign) => self.ensure_allocate_image(idx, assign),
-            RegisterAssignment::Buffer(assign) => self.ensure_allocate_buffer(assign.buffer),
+            RegisterAssignment::Buffer(assign) => self.ensure_allocate_buffer(idx, assign),
         }
     }
 
@@ -524,7 +529,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             )
         };
 
-        let texture = self.ensure_allocate_texture(reg_texture)?;
+        let texture = self.ensure_device_texture(reg_texture)?;
         let staging = self
             .staging_map
             .get(&reg_texture)
@@ -562,7 +567,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(())
     }
 
-    pub(crate) fn ensure_allocate_texture(
+    pub(crate) fn ensure_device_texture(
         &mut self,
         reg_texture: Texture,
     ) -> Result<DeviceTexture, LaunchError> {
@@ -615,9 +620,34 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(texture)
     }
 
-    fn ensure_allocate_buffer(&mut self, buffer: Buffer) -> Result<(), LaunchError> {
-        if self.buffer_map.contains_key(&buffer) {
+    fn ensure_allocate_buffer(
+        &mut self,
+        idx: Register,
+        assign: ByteBufferAssignment,
+    ) -> Result<(), LaunchError> {
+        if self.register_map.contains_key(&idx) {
             return Ok(());
+        }
+
+        let ByteBufferAssignment { buffer } = assign;
+        let device = self.ensure_device_buffer(buffer)?;
+        let layout = &self.buffer_plan.buffer[buffer.0];
+
+        self.register_map.insert(
+            idx,
+            RegisterMap::Buffer {
+                buffer: device,
+                reg_buffer: buffer,
+                buffer_layout: layout.clone(),
+            },
+        );
+
+        Ok(())
+    }
+
+    fn ensure_device_buffer(&mut self, buffer: Buffer) -> Result<DeviceBuffer, LaunchError> {
+        if let Some(map) = self.buffer_map.get(&buffer) {
+            return Ok(map.device);
         }
 
         let plan = self
@@ -629,7 +659,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let device = DeviceBuffer(self.buffers);
         self.push(Low::Buffer(BufferDescriptor {
-            size: plan.len_u64(),
+            size: plan.u64_len(),
             usage: BufferUsage::DataBuffer,
         }))?;
 
@@ -641,7 +671,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             },
         );
 
-        Ok(())
+        Ok(device)
     }
 
     fn ingest_image_data(&mut self, idx: Register) -> Result<Texture, LaunchError> {
@@ -740,7 +770,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             buffer,
             byte_layout,
             ..
-        } = self.allocate_register(idx)?.clone();
+        } = self.allocate_register(idx)?.clone()
+        else {
+            unreachable!("Buffers are not copied to staging");
+        };
 
         let (size, target_texture);
         if let Some(staging) = staging {
@@ -873,7 +906,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             buffer,
             byte_layout,
             ..
-        } = self.allocate_register(idx)?.clone();
+        } = self.allocate_register(idx)?.clone()
+        else {
+            unreachable!("Buffers are not copied to staging, requested {:?}", idx);
+        };
 
         let (size, source_texture);
         if let Some(staging) = staging {
@@ -917,7 +953,10 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             buffer_layout,
             byte_layout,
             ..
-        } = regmap;
+        } = regmap
+        else {
+            unreachable!("non-image outputs not yet implemented");
+        };
 
         let size = self.buffer_plan.get_info(idx)?.descriptor.size();
         let sizeu64 = buffer_layout.u64_len();
@@ -961,7 +1000,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         idx: Register,
         dst: Register,
     ) -> Result<(), LaunchError> {
-        let RegisterMap::Image { reg_texture, .. } = self.allocate_register(idx)?.clone();
+        let RegisterMap::Image { reg_texture, .. } = self.allocate_register(idx)?.clone() else {
+            // Can not render to non-image targets.
+            return Err(LaunchError::InternalCommandError(line!()));
+        };
+
         let target_image = self.ingest_image_data(dst)?;
         self.render_map.insert(dst, target_image);
 
@@ -1875,7 +1918,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // The texture we are rendering to.
         dst: Buffer,
     ) -> Result<(), LaunchError> {
-        self.ensure_allocate_buffer(dst)?;
+        self.ensure_device_buffer(dst)?;
 
         match function {
             super::BufferWrite::Zero => {
@@ -1890,7 +1933,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     .get(&dst)
                     .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
-                let size = buf_layout.len_u64();
+                let size = buf_layout.u64_len();
                 let target_buffer = map.device;
 
                 self.push(Low::BeginCommands)?;
@@ -1918,7 +1961,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     .map(Clone::clone)
                     .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
-                let size = buf_layout.len_u64();
+                let size = buf_layout.u64_len();
 
                 let data_range = self.ingest_data(data);
 
@@ -2052,8 +2095,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     }
 }
 
-impl RegisterMap {
-}
+impl RegisterMap {}
 
 fn shader_include_to_spirv_static(src: Cow<'static, [u8]>) -> Cow<'static, [u32]> {
     if let Cow::Borrowed(src) = src {
