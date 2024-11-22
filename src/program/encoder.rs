@@ -1798,7 +1798,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     .map(|data| BufferBind::Planned { data })
                     .unwrap_or(BufferBind::None);
 
-                self.plan_knob(*knob, &fragment_bind_data)?;
+                self.plan_knob_buffer(*knob, &fragment_bind_data)?;
                 let arguments = shader.num_args();
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
@@ -1947,7 +1947,11 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
                 Ok(())
             }
-            super::BufferWrite::Put { placement, data } => {
+            super::BufferWrite::Put {
+                placement,
+                data,
+                knob,
+            } => {
                 let buf_layout = self
                     .buffer_plan
                     .buffer
@@ -1964,6 +1968,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 let size = buf_layout.u64_len();
 
                 let data_range = self.ingest_data(data);
+
+                self.plan_knob_data_range(*knob, data_range.clone())?;
 
                 let stage_buffer = DeviceBuffer(self.buffers);
                 self.push(Low::BufferInit(BufferDescriptorInit {
@@ -1987,7 +1993,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         }
     }
 
-    fn plan_knob(
+    fn plan_knob_buffer(
         &mut self,
         knob: Option<Knob>,
         fragment_bind_data: &BufferBind,
@@ -2000,6 +2006,18 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // Only `planned` bindings can be knob controlled!
         let BufferBind::Planned { data } = fragment_bind_data else {
             return Err(LaunchError::InternalCommandError(line!()));
+        };
+
+        self.plan_knob_data_range(Some(knob), data.clone())
+    }
+
+    fn plan_knob_data_range(
+        &mut self,
+        knob: Option<Knob>,
+        data: Range<usize>,
+    ) -> Result<(), LaunchError> {
+        let Some(knob) = knob else {
+            return Ok(());
         };
 
         self.info.knobs.insert(

@@ -222,7 +222,6 @@ pub(crate) enum ConstructOp {
 #[derive(Clone, Debug)]
 pub(crate) enum BufferInitOp {
     FromData {
-        size: u64,
         placement: core::ops::Range<usize>,
         data: Arc<[u8]>,
     },
@@ -841,6 +840,9 @@ impl CommandBuffer {
     }
 
     /// Construct an image buffer a buffer already allocated in device memory.
+    ///
+    /// Note that the buffer must describe the image as it is allocated in the (encoded) transfer
+    /// buffer of the device memory. That is, each row is padded and aligned.
     pub fn from_buffer(
         &mut self,
         buffer_reg: Register,
@@ -850,8 +852,12 @@ impl CommandBuffer {
             return Err(CommandError::TYPE_ERR);
         };
 
-        let required_size = u64::from(descriptor.layout.height)
-            .checked_mul(descriptor.layout.row_stride)
+        let gpu_layout = descriptor
+            .to_aligned()
+            .ok_or_else(|| CommandError::INVALID_CALL)?;
+
+        let required_size = u64::from(gpu_layout.height)
+            .checked_mul(gpu_layout.row_stride)
             .ok_or_else(|| CommandError::TYPE_ERR)?;
 
         match buffer.size {
@@ -1659,6 +1665,10 @@ impl CommandBuffer {
     ///
     /// The binary value will be copied into a buffer held by the execution state. If you intend to
     /// modify that buffer with each execution, see [`Self::with_knob`] and [`WithKnob::buffer_init`].
+    ///
+    /// FIXME: late errors depending on `wgpu` since we copy the buffer and that requires it to be
+    /// a multiple of `4`. This contradicts the notion that the hardware is chosen at a later
+    /// stage.. We should instead compute?
     pub fn buffer_init(&mut self, init: &[u8]) -> Register {
         use core::convert::TryInto as _;
         let size: u64 = init.len().try_into().unwrap();
@@ -1668,7 +1678,6 @@ impl CommandBuffer {
                 size: Generic::Concrete(size),
             },
             op: BufferInitOp::FromData {
-                size,
                 placement: 0..init.len(),
                 data: Arc::from(init),
             },
@@ -1682,7 +1691,6 @@ impl CommandBuffer {
                 size: Generic::Concrete(len),
             },
             op: BufferInitOp::FromData {
-                size: len,
                 placement: 0..0,
                 data: Arc::default(),
             },
@@ -1690,14 +1698,22 @@ impl CommandBuffer {
     }
 
     /// Construct a buffer representing *encoded* image data.
+    ///
+    /// FIXME: semantics of `Ok` depend on `wgpu`. This contradicts the notion that the hardware is
+    /// chosen at a later stage..
     pub fn buffer_from_image(&mut self, register: Register) -> Result<Register, CommandError> {
         let RegisterDescription::Texture(tex) = self.describe_reg(register) else {
             return Err(CommandError::BAD_REGISTER);
         };
 
         let len = match tex.as_concrete() {
-            Some(descriptor) => descriptor.to_canvas().u64_len(),
-            // FIXME: better diagnostic or allow this?
+            Some(descriptor) => descriptor
+                .u64_gpu_len()
+                // Well can this even happen? A concrete image with no layout on the GPU?
+                .ok_or_else(|| CommandError::INVALID_CALL)?,
+            // FIXME: better diagnostic or allow this? We can't guarantee if this will error or not
+            // and we can not give a concrete length for the buffer. Both must be decided in
+            // some way
             None => return Err(CommandError::BAD_REGISTER),
         };
 
@@ -1808,8 +1824,9 @@ impl WithKnob<'_> {
         self.regular_with_knob(move |cmd| cmd.bilinear(describe, distribution))
     }
 
+    /// See [`CommandBuffer::buffer_init`].
     pub fn buffer_init(&mut self, init: &[u8]) -> Result<Register, CommandError> {
-        todo!()
+        self.regular_with_knob(move |cmd| Ok(cmd.buffer_init(init)))
     }
 
     /*Should be knob'able but we currently do not generate the vertex coordinate buffer, i.e. sampled
@@ -2201,11 +2218,7 @@ impl CommandBuffer {
                     let buffer = realize_buffer(idx, op)?;
 
                     match buf_op {
-                        BufferInitOp::FromData {
-                            size: _,
-                            placement,
-                            data,
-                        } => {
+                        BufferInitOp::FromData { placement, data } => {
                             high_ops.push(High::WriteInto {
                                 dst: buffer,
                                 fn_: BufferWrite::Zero,
@@ -2216,6 +2229,7 @@ impl CommandBuffer {
                                 fn_: BufferWrite::Put {
                                     placement: placement.clone(),
                                     data: data.clone(),
+                                    knob,
                                 },
                             });
                         }

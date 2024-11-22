@@ -116,14 +116,19 @@ impl Descriptor {
 
     pub(crate) fn to_aligned(&self) -> Option<ByteLayout> {
         let bytes_per_row = (self.layout.texel_stride as u32).checked_mul(self.layout.width)?;
-        let bytes_per_row =
-            (bytes_per_row / 256 + u32::from(bytes_per_row % 256 != 0)).checked_mul(256)?;
+        let bytes_per_row = bytes_per_row.next_multiple_of(256);
+
         Some(ByteLayout {
             texel_stride: self.texel.bits.bytes(),
             width: self.layout.width,
             height: self.layout.height,
             row_stride: bytes_per_row.into(),
         })
+    }
+
+    pub(crate) fn u64_gpu_len(&self) -> Option<u64> {
+        let layout = self.to_aligned()?;
+        layout.row_stride.checked_mul(layout.height.into())
     }
 
     pub(crate) fn to_canvas(&self) -> CanvasLayout {

@@ -226,6 +226,7 @@ pub(crate) enum BufferWrite {
     Put {
         placement: Range<usize>,
         data: Arc<[u8]>,
+        knob: Option<Knob>,
     },
 }
 
