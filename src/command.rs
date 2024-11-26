@@ -7,8 +7,8 @@ use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
     BufferWrite, ByteBufferAssignment, CallBinding, CompileError, Frame, Function, FunctionLinked,
-    High, ImageBufferAssignment, ImageBufferPlan, ImageDescriptor, Initializer, Knob,
-    ParameterizedFragment, Program, QuadTarget, Target, Texture,
+    High, ImageBufferAssignment, ImageBufferPlan, ImageDescriptor, Initializer, Knob, KnobUser,
+    ParameterizedFragment, Program, QuadTarget, RegisterAssignment, Target, Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
@@ -21,7 +21,7 @@ use image_canvas::layout::{SampleParts, Texel};
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A reference to one particular value.
@@ -52,7 +52,7 @@ pub struct CommandBuffer {
     symbols: Vec<CommandSignature>,
     tys: Vec<GenericDescriptor>,
     /// Commands that consume a statically initialized buffer, which we can adjust at launch time.
-    knobs: HashSet<Register>,
+    knobs: HashMap<Register, KnobKind>,
 }
 
 /// Refers to a generic argument declaration.
@@ -175,6 +175,14 @@ enum Op {
         rhs: Register,
         op: BufferBinaryOp,
         desc: GenericBuffer,
+    },
+}
+
+enum KnobKind {
+    Runtime,
+    Buffer {
+        buffer: Register,
+        range: core::ops::Range<u64>,
     },
 }
 
@@ -599,6 +607,10 @@ pub struct WithKnob<'lt> {
 #[allow(dead_code)]
 pub struct WithBuffer<'lt> {
     inner: &'lt mut CommandBuffer,
+    guaranteed_len: u64,
+    start: u64,
+    /// The register supplying the buffer value.
+    register: Register,
 }
 
 /// A register that may be mapped to a knob.
@@ -1650,12 +1662,26 @@ impl CommandBuffer {
         WithKnob { inner: self }
     }
 
-    /// FIXME!! Implement this with a mechanism similar to `with_knob` but here we can probably use
-    /// a different set of calls. Where it would be necessary to do indirect paint calls it'll get
-    /// more complicated in the translation stage (need new `Low` ops) but it should be simple for
-    /// a few other calls.
-    pub fn with_buffer(&mut self) -> WithBuffer<'_> {
-        todo!()
+    /// Similar to `with_knob` but here we can use a different set of calls.
+    ///
+    /// The next parameterized operation is called with its parameter structure copied from the
+    /// given buffer, instead of parameters supplied statically in the command buffer.
+    ///
+    /// Where it would be necessary to do indirect paint calls it'll get more complicated in the
+    /// translation stage (need new `Low` ops) but it should be simple for a few other calls.
+    pub fn with_buffer(&mut self, register: Register) -> Result<WithBuffer<'_>, CommandError> {
+        let buffer = self.describe_reg(register).as_buffer()?;
+
+        let len = buffer.as_concrete().ok_or(CommandError {
+            inner: CommandErrorKind::ConcreteDescriptorRequired,
+        })?;
+
+        Ok(WithBuffer {
+            inner: self,
+            guaranteed_len: len,
+            start: 0,
+            register,
+        })
     }
 }
 
@@ -1764,11 +1790,14 @@ impl WithKnob<'_> {
         fn_: impl FnOnce(&mut CommandBuffer) -> Result<Register, CommandError>,
     ) -> Result<Register, CommandError> {
         let register = fn_(&mut self.inner)?;
-        self.inner.knobs.insert(register);
+        self.inner.knobs.insert(register, KnobKind::Runtime);
         Ok(register)
     }
 
     /// See [`CommandBuffer::chromatic_adaptation`].
+    ///
+    /// FIXME: untested, does this make sense? Knob controls the color transformation matrix
+    /// directly, not semantically.
     pub fn chromatic_adaptation(
         &mut self,
         src: Register,
@@ -1779,6 +1808,8 @@ impl WithKnob<'_> {
     }
 
     /// See [`CommandBuffer::inscribe`].
+    ///
+    /// FIXME: untested, does this make sense?
     pub fn inscribe(
         &mut self,
         below: Register,
@@ -1848,6 +1879,105 @@ impl WithKnob<'_> {
         }
 
     */
+}
+
+impl WithBuffer<'_> {
+    /// Wrap commands that generate one register instruction, that is parameterized by the buffer.
+    fn regular_with_buffer(
+        &mut self,
+        len: u64,
+        fn_: impl FnOnce(&mut CommandBuffer) -> Result<Register, CommandError>,
+    ) -> Result<Register, CommandError> {
+        if self.guaranteed_len < len {
+            return Err(CommandError::INVALID_CALL);
+        }
+
+        let register = fn_(&mut self.inner)?;
+
+        self.inner.knobs.insert(
+            register,
+            KnobKind::Buffer {
+                buffer: self.register,
+                range: 0..len,
+            },
+        );
+
+        Ok(register)
+    }
+
+    /// Change the start of the buffer region being passed as dynamic value.
+    pub fn with_start(self, start: u64) -> Result<Self, CommandError> {
+        if start % 4 != 0 {
+            return Err(CommandError::INVALID_CALL);
+        }
+
+        Ok(WithBuffer { start: 4, ..self })
+    }
+
+    /// See [`CommandBuffer::chromatic_adaptation`].
+    pub fn chromatic_adaptation(
+        &mut self,
+        src: Register,
+        method: ChromaticAdaptationMethod,
+        target: Whitepoint,
+    ) -> Result<Register, CommandError> {
+        self.regular_with_buffer(core::mem::size_of::<[f32; 12]>() as u64, move |cmd| {
+            cmd.chromatic_adaptation(src, method, target)
+        })
+    }
+
+    /// See [`CommandBuffer::solid_rgba`].
+    pub fn solid_rgba(
+        &mut self,
+        describe: Descriptor,
+        color: [f32; 4],
+    ) -> Result<Register, CommandError> {
+        self.regular_with_buffer(core::mem::size_of::<[f32; 4]>() as u64, move |cmd| {
+            cmd.solid_rgba(describe, color)
+        })
+    }
+
+    /// See [`CommandBuffer::distribution_normal2d`].
+    pub fn distribution_normal2d(
+        &mut self,
+        describe: Descriptor,
+        distribution: shaders::DistributionNormal2d,
+    ) -> Result<Register, CommandError> {
+        self.regular_with_buffer(core::mem::size_of::<[f32; 8]>() as u64, move |cmd| {
+            cmd.distribution_normal2d(describe, distribution)
+        })
+    }
+
+    /// See [`CommandBuffer::distribution_fractal_noise`].
+    pub fn distribution_fractal_noise(
+        &mut self,
+        describe: Descriptor,
+        distribution: shaders::FractalNoise,
+    ) -> Result<Register, CommandError> {
+        #[repr(C)]
+        #[repr(align(8))]
+        struct _ForSizePurpose {
+            _0: [f32; 2],
+            _1: f32,
+            _2: f32,
+            _3: u32,
+        }
+
+        self.regular_with_buffer(core::mem::size_of::<_ForSizePurpose>() as u64, move |cmd| {
+            cmd.distribution_fractal_noise(describe, distribution)
+        })
+    }
+
+    /// See [`CommandBuffer::bilinear`].
+    pub fn bilinear(
+        &mut self,
+        describe: Descriptor,
+        distribution: Bilinear,
+    ) -> Result<Register, CommandError> {
+        self.regular_with_buffer(core::mem::size_of::<[[f32; 4]; 6]>() as u64, move |cmd| {
+            cmd.bilinear(describe, distribution)
+        })
+    }
 }
 
 /// Turn a command buffer into a `Program`.
@@ -2119,10 +2249,21 @@ impl CommandBuffer {
 
             let idx_reg = Register(idx);
 
-            let knob = if command.knobs.contains(&idx_reg) {
-                Some(mono.next_knob(idx_reg))
-            } else {
-                None
+            let knob = match command.knobs.get(&idx_reg) {
+                Some(KnobKind::Runtime) => KnobUser::Runtime(mono.next_knob(idx_reg)),
+                Some(KnobKind::Buffer { buffer, range }) => {
+                    let byte_assignment =
+                        match image_buffers.borrow().get_register_resources(*buffer) {
+                            Ok(RegisterAssignment::Buffer(buffer)) => buffer,
+                            _ => return Err(CompileError::NotYetImplemented),
+                        };
+
+                    KnobUser::Buffer {
+                        buffer: byte_assignment.buffer,
+                        range: range.clone(),
+                    }
+                }
+                None => KnobUser::None,
             };
 
             match op {
@@ -2229,7 +2370,13 @@ impl CommandBuffer {
                                 fn_: BufferWrite::Put {
                                     placement: placement.clone(),
                                     data: data.clone(),
-                                    knob,
+                                    knob: match knob {
+                                        KnobUser::None => None,
+                                        KnobUser::Runtime(idx) => Some(idx),
+                                        _ => unreachable!(
+                                            "Buffer init from buffer does not make sense"
+                                        ),
+                                    },
                                 },
                             });
                         }
@@ -2394,7 +2541,7 @@ impl CommandBuffer {
                                         invocation: FragmentShaderInvocation::PaintOnTop(
                                             PaintOnTopKind::Copy,
                                         ),
-                                        knob,
+                                        knob: knob.clone(),
                                     },
                                 },
                             });
@@ -2451,7 +2598,7 @@ impl CommandBuffer {
                                         invocation: FragmentShaderInvocation::PaintOnTop(
                                             PaintOnTopKind::Copy,
                                         ),
-                                        knob,
+                                        knob: knob.clone(),
                                     },
                                 },
                             });
@@ -2892,6 +3039,13 @@ impl GenericDescriptor {
 }
 
 impl GenericBuffer {
+    pub fn as_concrete(&self) -> Option<u64> {
+        match self.size {
+            Generic::Concrete(val) => Some(val),
+            Generic::Generic(_) => None,
+        }
+    }
+
     pub fn monomorphize(&self, decl: &[Descriptor]) -> u64 {
         match self.size {
             Generic::Concrete(val) => val,

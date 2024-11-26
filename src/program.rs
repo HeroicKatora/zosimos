@@ -142,7 +142,20 @@ pub(crate) enum Target {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ParameterizedFragment {
     pub(crate) invocation: shaders::FragmentShaderInvocation,
-    pub(crate) knob: Option<Knob>,
+    pub(crate) knob: KnobUser,
+}
+
+/// A data portion that is dynamically changed, in some way.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum KnobUser {
+    /// The data is static.
+    None,
+
+    /// The data is optionally overridden as a runtime parameter.
+    Runtime(Knob),
+
+    /// The data is copied from an existing previously filled buffer.
+    Buffer { buffer: Buffer, range: Range<u64> },
 }
 
 /// Describes a function call in more common terms.

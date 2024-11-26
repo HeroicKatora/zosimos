@@ -2,7 +2,7 @@
 #[path = "util.rs"]
 mod util;
 
-use zosimos::command::{CommandBuffer, RegisterKnob};
+use zosimos::command::{Bilinear, CommandBuffer, RegisterKnob};
 use zosimos::pool::Pool;
 use zosimos::program::Program;
 use zosimos::{buffer::Descriptor, program::Capabilities};
@@ -32,6 +32,8 @@ fn buffer_interop() {
     run_from_buffer(&mut pool);
 
     run_from_buffer_knob(&mut pool);
+
+    run_bilinear(&mut pool);
 }
 
 fn run_from_buffer(pool: &mut Pool) {
@@ -112,4 +114,34 @@ fn run_from_buffer_knob(pool: &mut Pool) {
 
     let image = pool.entry(result).unwrap();
     util::assert_reference(image.into(), "from_buffer-with-knob.crc.png");
+}
+
+fn run_bilinear(pool: &mut Pool) {
+    let mut commands = CommandBuffer::default();
+
+    let descriptor = Descriptor::with_srgb_image(&image::DynamicImage::new_rgba8(256, 256));
+
+    let a: [[f32; 4]; 6] = [
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.7, 1.0],
+        [0.0, 0.0, 0.3, 1.0],
+        [0.0, 1.0, 0.3, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+
+    let buffer = commands.buffer_init(bytemuck::bytes_of(&a));
+
+    let result = commands
+        .with_buffer(buffer)
+        .expect("Buffer valid for with_buffer")
+        .bilinear(descriptor, Bilinear::default())
+        .expect("Buffer valid for this image descriptor");
+
+    let (output, _outformat) = commands.output(result).expect("Valid for output");
+
+    let result = run_once_with_output(commands, pool, vec![], retire_with_one_image(output));
+
+    let image = pool.entry(result).unwrap();
+    util::assert_reference(image.into(), "bilinear_from_buffer.crc.png");
 }

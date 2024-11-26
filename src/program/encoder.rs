@@ -22,6 +22,8 @@ use crate::{run, shaders};
 use image_canvas::layout::RowLayoutDescription;
 use wgpu::StoreOp;
 
+use super::KnobUser;
+
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
 #[derive(Default)]
 pub(crate) struct Encoder<Instructions: ExtendOne<Low> = Vec<Low>> {
@@ -130,6 +132,16 @@ pub(crate) struct ExecutableInfo {
     pub(crate) knobs: HashMap<Knob, KnobDescriptor>,
 }
 
+#[must_use = "Knob must be handled to apply its effects."]
+pub enum KnobUsage {
+    /// The knob does not need to be used further.
+    Noop,
+    CopyFrom {
+        buffer: DeviceBuffer,
+        range: Range<u64>,
+    },
+}
+
 /// The GPU buffers associated with a register.
 /// Supplements the buffer_plan by giving direct mappings to each device resource index in an
 /// encoder process.
@@ -220,6 +232,8 @@ struct SimpleRenderPipelineDescriptor<'data> {
     fragment_texture: TextureBind,
     /// Texture for (set 2, binding 0)
     fragment_bind_data: BufferBind<'data>,
+    /// How the fragment bind buffer is being filled.
+    fragment_knob: KnobUsage,
     /// The vertex shader to use.
     vertex: ShaderBind,
     /// The fragment shader to use.
@@ -1048,6 +1062,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 },
                 fragment_texture: TextureBind::Textures(arguments as usize),
                 fragment_bind_data,
+                fragment_knob: KnobUsage::Noop,
                 vertex: ShaderBind::ShaderMain(vertex),
                 fragment: ShaderBind::ShaderMain(fragment),
             })?
@@ -1580,6 +1595,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn make_bound_buffer(
         &mut self,
         bind: BufferBind<'_>,
+        knob: KnobUsage,
         layout_idx: usize,
     ) -> Result<Option<usize>, LaunchError> {
         let buffer = match bind {
@@ -1602,6 +1618,30 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 DeviceBuffer(buffer)
             }
         };
+
+        match knob {
+            KnobUsage::Noop => {}
+            KnobUsage::CopyFrom {
+                buffer: source,
+                range,
+            } => {
+                debug_assert!(
+                    range.end >= range.start,
+                    "knob is an internal, consistent property"
+                );
+
+                self.push(Low::BeginCommands)?;
+                self.push(Low::CopyBufferToBuffer {
+                    source_buffer: source,
+                    source: range.start,
+                    target_buffer: buffer,
+                    target: 0,
+                    size: range.end - range.start,
+                })?;
+                self.push(Low::EndCommands)?;
+                self.push(Low::RunTopCommand)?;
+            }
+        }
 
         let group = self.bind_groups;
         let descriptor = BindGroupDescriptor {
@@ -1640,11 +1680,19 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         };
 
         let vertex_layout = self.make_quad_bind_group();
-        let vertex_bind = self.make_bound_buffer(descriptor.vertex_bind_data, vertex_layout)?;
+        let vertex_bind = self.make_bound_buffer(
+            descriptor.vertex_bind_data,
+            /* we do not permit knob for the vertex data */ KnobUsage::Noop,
+            vertex_layout,
+        )?;
 
         // FIXME: this builds the layout even when it is not required.
         let vertex_layout = self.make_generic_fragment_bind_group();
-        let fragment_bind = self.make_bound_buffer(descriptor.fragment_bind_data, vertex_layout)?;
+        let fragment_bind = self.make_bound_buffer(
+            descriptor.fragment_bind_data,
+            descriptor.fragment_knob,
+            vertex_layout,
+        )?;
 
         Ok(SimpleRenderPipeline {
             pipeline,
@@ -1777,6 +1825,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     },
                     fragment_texture: TextureBind::Textures(1),
                     fragment_bind_data: BufferBind::None,
+                    // FIXME: see knob'able data.
+                    fragment_knob: KnobUsage::Noop,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
@@ -1798,7 +1848,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     .map(|data| BufferBind::Planned { data })
                     .unwrap_or(BufferBind::None);
 
-                self.plan_knob_buffer(*knob, &fragment_bind_data)?;
+                let fragment_knob = self.plan_knob_buffer(knob, &fragment_bind_data)?;
                 let arguments = shader.num_args();
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
@@ -1808,6 +1858,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     },
                     fragment_texture: TextureBind::Textures(arguments as usize),
                     fragment_bind_data,
+                    fragment_knob,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
@@ -1847,6 +1898,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
                     },
+                    fragment_knob: KnobUsage::Noop,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::Shader {
                         // FIXME: for some weird reason this MUST be `main` instead of the true
@@ -1898,6 +1950,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
                     },
+                    fragment_knob: KnobUsage::Noop,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::Shader {
                         // FIXME: for some weird reason this MUST be `main` instead of the true
@@ -1966,10 +2019,17 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
                 let size = buf_layout.u64_len();
-
                 let data_range = self.ingest_data(data);
 
-                self.plan_knob_data_range(*knob, data_range.clone())?;
+                let knob = match knob {
+                    None => KnobUser::None,
+                    Some(knob_id) => KnobUser::Runtime(*knob_id),
+                };
+
+                match self.plan_knob_data_range(&knob, data_range.clone())? {
+                    KnobUsage::Noop => {}
+                    KnobUsage::CopyFrom { .. } => unreachable!("not with any knob user"),
+                }
 
                 let stage_buffer = DeviceBuffer(self.buffers);
                 self.push(Low::BufferInit(BufferDescriptorInit {
@@ -1995,12 +2055,12 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     fn plan_knob_buffer(
         &mut self,
-        knob: Option<Knob>,
+        knob: &KnobUser,
         fragment_bind_data: &BufferBind,
-    ) -> Result<(), LaunchError> {
+    ) -> Result<KnobUsage, LaunchError> {
         // Nothing to plan.
-        let Some(knob) = knob else {
-            return Ok(());
+        if let KnobUser::None = knob {
+            return Ok(KnobUsage::Noop);
         };
 
         // Only `planned` bindings can be knob controlled!
@@ -2008,26 +2068,35 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             return Err(LaunchError::InternalCommandError(line!()));
         };
 
-        self.plan_knob_data_range(Some(knob), data.clone())
+        self.plan_knob_data_range(knob, data.clone())
     }
 
     fn plan_knob_data_range(
         &mut self,
-        knob: Option<Knob>,
+        knob: &KnobUser,
         data: Range<usize>,
-    ) -> Result<(), LaunchError> {
-        let Some(knob) = knob else {
-            return Ok(());
-        };
+    ) -> Result<KnobUsage, LaunchError> {
+        match knob {
+            KnobUser::None => return Ok(KnobUsage::Noop),
+            &KnobUser::Runtime(knob) => {
+                self.info.knobs.insert(
+                    knob,
+                    KnobDescriptor {
+                        range: data.clone(),
+                    },
+                );
 
-        self.info.knobs.insert(
-            knob,
-            KnobDescriptor {
-                range: data.clone(),
-            },
-        );
+                Ok(KnobUsage::Noop)
+            }
+            KnobUser::Buffer { buffer, range } => {
+                let device = self.ensure_device_buffer(*buffer)?;
 
-        Ok(())
+                Ok(KnobUsage::CopyFrom {
+                    buffer: device,
+                    range: range.clone(),
+                })
+            }
+        }
     }
 
     /// Ingest the data into the encoder's active buffer data.
