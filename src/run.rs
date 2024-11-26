@@ -14,7 +14,7 @@ use std::sync::{
     Arc,
 };
 
-use crate::buffer::{BufferLayout, ByteLayout, Descriptor};
+use crate::buffer::{ByteLayout, CanvasLayout, Descriptor};
 use crate::command::{Register, RegisterKnob};
 use crate::pool::{
     BufferKey, Gpu, GpuKey, ImageData, PipelineKey, Pool, PoolImage, PoolKey, ShaderKey, TextureKey,
@@ -892,8 +892,10 @@ impl Executable {
                 }
                 Low::CopyBufferToBuffer {
                     source_buffer,
-                    size: _,
+                    source: _,
                     target_buffer,
+                    target: _,
+                    size: _,
                 } => {
                     let idx = queue;
                     let _ = write!(&mut cons, " queue_{};", idx);
@@ -2110,20 +2112,22 @@ impl Host {
             }
             &Low::CopyBufferToBuffer {
                 source_buffer,
-                size,
+                source,
                 target_buffer,
+                target,
+                size,
             } => {
                 let encoder = match &mut self.command_encoder {
                     Some(encoder) => encoder,
                     None => return Err(StepError::InvalidInstruction(line!())),
                 };
 
-                let source = match self.descriptors.buffers.get(source_buffer.0) {
+                let source_buf = match self.descriptors.buffers.get(source_buffer.0) {
                     Some(source) => source,
                     None => return Err(StepError::InvalidInstruction(line!())),
                 };
 
-                let target = match self.descriptors.buffers.get(target_buffer.0) {
+                let target_buf = match self.descriptors.buffers.get(target_buffer.0) {
                     Some(target) => target,
                     None => return Err(StepError::InvalidInstruction(line!())),
                 };
@@ -2138,7 +2142,26 @@ impl Host {
                 // eprintln!(" Target: {:?}", target_buffer.0);
                 // eprintln!(" Size: {:?}", size);
 
-                encoder.copy_buffer_to_buffer(source, 0, target, 0, size);
+                encoder.copy_buffer_to_buffer(source_buf, source, target_buf, target, size);
+
+                Ok(Submissions::default())
+            }
+            Low::ZeroBuffer {
+                start,
+                size,
+                target_buffer,
+            } => {
+                let encoder = match &mut self.command_encoder {
+                    Some(encoder) => encoder,
+                    None => return Err(StepError::InvalidInstruction(line!())),
+                };
+
+                let target = match self.descriptors.buffers.get(target_buffer.0) {
+                    Some(target) => target,
+                    None => return Err(StepError::InvalidInstruction(line!())),
+                };
+
+                encoder.clear_buffer(target, *start, Some(*size));
 
                 Ok(Submissions::default())
             }
@@ -3258,7 +3281,7 @@ where
 pub(crate) fn copy_host_to_buffer(
     source: &[u8],
     target: &mut [u8],
-    source_layout: &BufferLayout,
+    source_layout: &CanvasLayout,
     target_layout: ByteLayout,
 ) {
     let width = target_layout.width;

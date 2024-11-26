@@ -155,6 +155,12 @@ fn main() -> Result<(), BuildError> {
             entry: "main",
             name_overwrite: None,
         },
+        SimpleSource {
+            path: "src/shaders/flat_field.frag",
+            kind: ShaderKind::Fragment,
+            entry: "main",
+            name_overwrite: None,
+        },
     ];
 
     let compiler = Compiler::new().unwrap();

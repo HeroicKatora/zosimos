@@ -2,13 +2,13 @@ mod dynamic;
 
 pub use self::dynamic::{ShaderCommand, ShaderData, ShaderSource};
 
-use crate::buffer::{BufferLayout, ByteLayout, ChannelPosition, Descriptor, TexelExt};
+use crate::buffer::{ByteLayout, CanvasLayout, ChannelPosition, Descriptor, TexelExt};
 use crate::color_matrix::RowMatrix;
 use crate::pool::PoolImage;
 use crate::program::{
-    CallBinding, CompileError, Frame, Function, FunctionLinked, High, ImageBufferAssignment,
-    ImageBufferPlan, ImageDescriptor, Initializer, Knob, ParameterizedFragment, Program,
-    QuadTarget, Target, Texture,
+    BufferWrite, ByteBufferAssignment, CallBinding, CompileError, Frame, Function, FunctionLinked,
+    High, ImageBufferAssignment, ImageBufferPlan, ImageDescriptor, Initializer, Knob, KnobUser,
+    ParameterizedFragment, Program, QuadTarget, RegisterAssignment, Target, Texture,
 };
 pub use crate::shaders::bilinear::Shader as Bilinear;
 pub use crate::shaders::distribution_normal2d::Shader as DistributionNormal2d;
@@ -21,7 +21,7 @@ use image_canvas::layout::{SampleParts, Texel};
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A reference to one particular value.
@@ -52,7 +52,7 @@ pub struct CommandBuffer {
     symbols: Vec<CommandSignature>,
     tys: Vec<GenericDescriptor>,
     /// Commands that consume a statically initialized buffer, which we can adjust at launch time.
-    knobs: HashSet<Register>,
+    knobs: HashMap<Register, KnobKind>,
 }
 
 /// Refers to a generic argument declaration.
@@ -142,7 +142,7 @@ enum Op {
         op: BinaryOp,
         desc: GenericDescriptor,
     },
-    Dynamic {
+    DynamicImage {
         call: OperandDynKind,
         /// The planned shader invocation.
         command: ShaderInvocation,
@@ -160,6 +160,29 @@ enum Op {
         invocation: Register,
         /// The result's type monomorphized as called.
         desc: GenericDescriptor,
+    },
+    BufferInit {
+        op: BufferInitOp,
+        desc: GenericBuffer,
+    },
+    BufferUnary {
+        src: Register,
+        op: BufferUnaryOp,
+        desc: GenericBuffer,
+    },
+    BufferBinary {
+        lhs: Register,
+        rhs: Register,
+        op: BufferBinaryOp,
+        desc: GenericBuffer,
+    },
+}
+
+enum KnobKind {
+    Runtime,
+    Buffer {
+        buffer: Register,
+        range: core::ops::Range<u64>,
     },
 }
 
@@ -200,6 +223,27 @@ pub(crate) enum ConstructOp {
     DistributionNoise(shaders::FractalNoise),
     /// A color to repeat on pixels.
     Solid([f32; 4]),
+    /// An existing buffer to use.
+    FromBuffer(Register),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum BufferInitOp {
+    FromData {
+        placement: core::ops::Range<usize>,
+        data: Arc<[u8]>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum BufferUnaryOp {
+    FromImage {},
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum BufferBinaryOp {
+    /// Combine two buffers by overlaying one over the contents of the other, at a fixed location.
+    Overlay { at: u64 },
 }
 
 #[derive(Clone, Debug)]
@@ -559,6 +603,16 @@ pub struct WithKnob<'lt> {
     inner: &'lt mut CommandBuffer,
 }
 
+/// Schedule instructions with parameters already in GPU memory.
+#[allow(dead_code)]
+pub struct WithBuffer<'lt> {
+    inner: &'lt mut CommandBuffer,
+    guaranteed_len: u64,
+    start: u64,
+    /// The register supplying the buffer value.
+    register: Register,
+}
+
 /// A register that may be mapped to a knob.
 ///
 /// A `knob` is the identifier of a region of memory _in the linked program_, associated with some
@@ -795,6 +849,43 @@ impl CommandBuffer {
         let descriptor = img.descriptor();
         self.input(descriptor)
             .expect("Pool image descriptor should be valid")
+    }
+
+    /// Construct an image buffer a buffer already allocated in device memory.
+    ///
+    /// Note that the buffer must describe the image as it is allocated in the (encoded) transfer
+    /// buffer of the device memory. That is, each row is padded and aligned.
+    pub fn from_buffer(
+        &mut self,
+        buffer_reg: Register,
+        descriptor: Descriptor,
+    ) -> Result<Register, CommandError> {
+        let RegisterDescription::Buffer(buffer) = self.describe_reg(buffer_reg) else {
+            return Err(CommandError::TYPE_ERR);
+        };
+
+        let gpu_layout = descriptor
+            .to_aligned()
+            .ok_or_else(|| CommandError::INVALID_CALL)?;
+
+        let required_size = u64::from(gpu_layout.height)
+            .checked_mul(gpu_layout.row_stride)
+            .ok_or_else(|| CommandError::TYPE_ERR)?;
+
+        match buffer.size {
+            Generic::Concrete(sz) if sz >= required_size => {}
+            Generic::Concrete(_) => {
+                return Err(CommandError::INVALID_CALL);
+            }
+            _ => {
+                return Err(CommandError::UNIMPLEMENTED);
+            }
+        }
+
+        Ok(self.push(Op::Construct {
+            desc: descriptor.into(),
+            op: ConstructOp::FromBuffer(buffer_reg),
+        }))
     }
 
     /// Select a rectangular part of an image.
@@ -1570,6 +1661,126 @@ impl CommandBuffer {
     pub fn with_knob(&mut self) -> WithKnob<'_> {
         WithKnob { inner: self }
     }
+
+    /// Similar to `with_knob` but here we can use a different set of calls.
+    ///
+    /// The next parameterized operation is called with its parameter structure copied from the
+    /// given buffer, instead of parameters supplied statically in the command buffer.
+    ///
+    /// Where it would be necessary to do indirect paint calls it'll get more complicated in the
+    /// translation stage (need new `Low` ops) but it should be simple for a few other calls.
+    pub fn with_buffer(&mut self, register: Register) -> Result<WithBuffer<'_>, CommandError> {
+        let buffer = self.describe_reg(register).as_buffer()?;
+
+        let len = buffer.as_concrete().ok_or(CommandError {
+            inner: CommandErrorKind::ConcreteDescriptorRequired,
+        })?;
+
+        Ok(WithBuffer {
+            inner: self,
+            guaranteed_len: len,
+            start: 0,
+            register,
+        })
+    }
+}
+
+/// Commands that operate on buffers.
+impl CommandBuffer {
+    /// Construct a buffer by initializing it with data from memory.
+    ///
+    /// The binary value will be copied into a buffer held by the execution state. If you intend to
+    /// modify that buffer with each execution, see [`Self::with_knob`] and [`WithKnob::buffer_init`].
+    ///
+    /// FIXME: late errors depending on `wgpu` since we copy the buffer and that requires it to be
+    /// a multiple of `4`. This contradicts the notion that the hardware is chosen at a later
+    /// stage.. We should instead compute?
+    pub fn buffer_init(&mut self, init: &[u8]) -> Register {
+        use core::convert::TryInto as _;
+        let size: u64 = init.len().try_into().unwrap();
+
+        self.push(Op::BufferInit {
+            desc: GenericBuffer {
+                size: Generic::Concrete(size),
+            },
+            op: BufferInitOp::FromData {
+                placement: 0..init.len(),
+                data: Arc::from(init),
+            },
+        })
+    }
+
+    /// Construct a buffer that is fully zeroed from memory.
+    pub fn buffer_zero(&mut self, len: u64) -> Register {
+        self.push(Op::BufferInit {
+            desc: GenericBuffer {
+                size: Generic::Concrete(len),
+            },
+            op: BufferInitOp::FromData {
+                placement: 0..0,
+                data: Arc::default(),
+            },
+        })
+    }
+
+    /// Construct a buffer representing *encoded* image data.
+    ///
+    /// FIXME: semantics of `Ok` depend on `wgpu`. This contradicts the notion that the hardware is
+    /// chosen at a later stage..
+    pub fn buffer_from_image(&mut self, register: Register) -> Result<Register, CommandError> {
+        let RegisterDescription::Texture(tex) = self.describe_reg(register) else {
+            return Err(CommandError::BAD_REGISTER);
+        };
+
+        let len = match tex.as_concrete() {
+            Some(descriptor) => descriptor
+                .u64_gpu_len()
+                // Well can this even happen? A concrete image with no layout on the GPU?
+                .ok_or_else(|| CommandError::INVALID_CALL)?,
+            // FIXME: better diagnostic or allow this? We can't guarantee if this will error or not
+            // and we can not give a concrete length for the buffer. Both must be decided in
+            // some way
+            None => return Err(CommandError::BAD_REGISTER),
+        };
+
+        Ok(self.push(Op::BufferUnary {
+            src: register,
+            desc: GenericBuffer {
+                size: Generic::Concrete(len),
+            },
+            op: BufferUnaryOp::FromImage {},
+        }))
+    }
+
+    /// Construct a buffer by overlaying one on top of another.
+    ///
+    /// The output buffer is sized according to the underlying buffer. Overflowed data will be
+    /// discarded.
+    pub fn buffer_overlay(
+        &mut self,
+        under: Register,
+        at: u64,
+        over: Register,
+    ) -> Result<Register, CommandError> {
+        let RegisterDescription::Buffer(buf) = self.describe_reg(under) else {
+            return Err(CommandError::BAD_REGISTER);
+        };
+
+        let RegisterDescription::Buffer(_) = self.describe_reg(over) else {
+            return Err(CommandError::BAD_REGISTER);
+        };
+
+        // FIXME: generate warnings if out of bounds? There is no use cloning a buffer that I can
+        // see right now, it's all still the exact same content.
+        Ok(self.push(Op::BufferBinary {
+            lhs: under,
+            rhs: over,
+            desc: GenericBuffer {
+                size: buf.size.clone(),
+            },
+            op: BufferBinaryOp::Overlay { at },
+        }))
+    }
 }
 
 impl WithKnob<'_> {
@@ -1579,11 +1790,14 @@ impl WithKnob<'_> {
         fn_: impl FnOnce(&mut CommandBuffer) -> Result<Register, CommandError>,
     ) -> Result<Register, CommandError> {
         let register = fn_(&mut self.inner)?;
-        self.inner.knobs.insert(register);
+        self.inner.knobs.insert(register, KnobKind::Runtime);
         Ok(register)
     }
 
     /// See [`CommandBuffer::chromatic_adaptation`].
+    ///
+    /// FIXME: untested, does this make sense? Knob controls the color transformation matrix
+    /// directly, not semantically.
     pub fn chromatic_adaptation(
         &mut self,
         src: Register,
@@ -1594,6 +1808,8 @@ impl WithKnob<'_> {
     }
 
     /// See [`CommandBuffer::inscribe`].
+    ///
+    /// FIXME: untested, does this make sense?
     pub fn inscribe(
         &mut self,
         below: Register,
@@ -1639,6 +1855,11 @@ impl WithKnob<'_> {
         self.regular_with_knob(move |cmd| cmd.bilinear(describe, distribution))
     }
 
+    /// See [`CommandBuffer::buffer_init`].
+    pub fn buffer_init(&mut self, init: &[u8]) -> Result<Register, CommandError> {
+        self.regular_with_knob(move |cmd| Ok(cmd.buffer_init(init)))
+    }
+
     /*Should be knob'able but we currently do not generate the vertex coordinate buffer, i.e. sampled
      * 2d parameterization, in a manner that permits adding a knob.
 
@@ -1658,6 +1879,105 @@ impl WithKnob<'_> {
         }
 
     */
+}
+
+impl WithBuffer<'_> {
+    /// Wrap commands that generate one register instruction, that is parameterized by the buffer.
+    fn regular_with_buffer(
+        &mut self,
+        len: u64,
+        fn_: impl FnOnce(&mut CommandBuffer) -> Result<Register, CommandError>,
+    ) -> Result<Register, CommandError> {
+        if self.guaranteed_len < len {
+            return Err(CommandError::INVALID_CALL);
+        }
+
+        let register = fn_(&mut self.inner)?;
+
+        self.inner.knobs.insert(
+            register,
+            KnobKind::Buffer {
+                buffer: self.register,
+                range: 0..len,
+            },
+        );
+
+        Ok(register)
+    }
+
+    /// Change the start of the buffer region being passed as dynamic value.
+    pub fn with_start(self, start: u64) -> Result<Self, CommandError> {
+        if start % 4 != 0 {
+            return Err(CommandError::INVALID_CALL);
+        }
+
+        Ok(WithBuffer { start: 4, ..self })
+    }
+
+    /// See [`CommandBuffer::chromatic_adaptation`].
+    pub fn chromatic_adaptation(
+        &mut self,
+        src: Register,
+        method: ChromaticAdaptationMethod,
+        target: Whitepoint,
+    ) -> Result<Register, CommandError> {
+        self.regular_with_buffer(core::mem::size_of::<[f32; 12]>() as u64, move |cmd| {
+            cmd.chromatic_adaptation(src, method, target)
+        })
+    }
+
+    /// See [`CommandBuffer::solid_rgba`].
+    pub fn solid_rgba(
+        &mut self,
+        describe: Descriptor,
+        color: [f32; 4],
+    ) -> Result<Register, CommandError> {
+        self.regular_with_buffer(core::mem::size_of::<[f32; 4]>() as u64, move |cmd| {
+            cmd.solid_rgba(describe, color)
+        })
+    }
+
+    /// See [`CommandBuffer::distribution_normal2d`].
+    pub fn distribution_normal2d(
+        &mut self,
+        describe: Descriptor,
+        distribution: shaders::DistributionNormal2d,
+    ) -> Result<Register, CommandError> {
+        self.regular_with_buffer(core::mem::size_of::<[f32; 8]>() as u64, move |cmd| {
+            cmd.distribution_normal2d(describe, distribution)
+        })
+    }
+
+    /// See [`CommandBuffer::distribution_fractal_noise`].
+    pub fn distribution_fractal_noise(
+        &mut self,
+        describe: Descriptor,
+        distribution: shaders::FractalNoise,
+    ) -> Result<Register, CommandError> {
+        #[repr(C)]
+        #[repr(align(8))]
+        struct _ForSizePurpose {
+            _0: [f32; 2],
+            _1: f32,
+            _2: f32,
+            _3: u32,
+        }
+
+        self.regular_with_buffer(core::mem::size_of::<_ForSizePurpose>() as u64, move |cmd| {
+            cmd.distribution_fractal_noise(describe, distribution)
+        })
+    }
+
+    /// See [`CommandBuffer::bilinear`].
+    pub fn bilinear(
+        &mut self,
+        describe: Descriptor,
+        distribution: Bilinear,
+    ) -> Result<Register, CommandError> {
+        self.regular_with_buffer(core::mem::size_of::<[[f32; 4]; 6]>() as u64, move |cmd| {
+            cmd.bilinear(describe, distribution)
+        })
+    }
 }
 
 /// Turn a command buffer into a `Program`.
@@ -1791,7 +2111,7 @@ impl CommandBuffer {
         let mut last_use = vec![0; steps];
         let mut first_use = vec![steps; steps];
 
-        let mut image_buffers = ImageBufferPlan::default();
+        let image_buffers = core::cell::RefCell::new(ImageBufferPlan::default());
 
         // Liveness analysis.
         for (back_idx, op) in ops.iter().rev().enumerate() {
@@ -1799,7 +2119,8 @@ impl CommandBuffer {
             match op {
                 Op::Input { .. }
                 | Op::Construct { .. }
-                | Op::Dynamic {
+                | Op::BufferInit { .. }
+                | Op::DynamicImage {
                     call: OperandDynKind::Construct,
                     ..
                 } => {}
@@ -1814,9 +2135,12 @@ impl CommandBuffer {
                 &Op::Unary {
                     src: Register(src), ..
                 }
-                | &Op::Dynamic {
+                | &Op::DynamicImage {
                     call: OperandDynKind::Unary(Register(src)),
                     ..
+                }
+                | &Op::BufferUnary {
+                    src: Register(src), ..
                 } => {
                     last_use[src] = last_use[src].max(idx);
                     first_use[src] = first_use[src].min(idx);
@@ -1826,7 +2150,12 @@ impl CommandBuffer {
                     rhs: Register(rhs),
                     ..
                 }
-                | &Op::Dynamic {
+                | &Op::BufferBinary {
+                    lhs: Register(lhs),
+                    rhs: Register(rhs),
+                    ..
+                }
+                | &Op::DynamicImage {
                     call:
                         OperandDynKind::Binary {
                             lhs: Register(lhs),
@@ -1866,7 +2195,7 @@ impl CommandBuffer {
         let mut signature_in: Vec<Register> = vec![];
         let mut signature_out: Vec<Register> = vec![];
 
-        let mut realize_texture = |idx, op: &Op| {
+        let realize_texture = |idx, op: &Op| {
             let liveness = first_use[idx]..last_use[idx];
 
             // FIXME: not all our High ops actually allocate textures..
@@ -1879,14 +2208,38 @@ impl CommandBuffer {
                     Register(idx)
                 })
                 .as_texture()
-                .expect("A non-output register");
+                .expect("A texture register");
 
             let descriptor = descriptor.monomorphize(tys);
 
-            let ImageBufferAssignment { buffer: _, texture } =
-                image_buffers.allocate_for(&descriptor, liveness);
+            let ImageBufferAssignment { buffer: _, texture } = image_buffers
+                .borrow_mut()
+                .alloc_texture_for(&descriptor, liveness, Register(idx));
 
             Ok(texture)
+        };
+
+        let realize_buffer = |idx, op: &Op| {
+            let liveness = first_use[idx]..last_use[idx];
+
+            let descriptor = command
+                .describe_reg(if let Op::Output { src } = op {
+                    *src
+                } else if let Op::Render { src } = op {
+                    *src
+                } else {
+                    Register(idx)
+                })
+                .as_buffer()
+                .expect("A buffer register");
+
+            let len = descriptor.monomorphize(tys);
+            let ByteBufferAssignment { buffer } =
+                image_buffers
+                    .borrow_mut()
+                    .alloc_buffer_for(len, liveness, Register(idx));
+
+            Ok(buffer)
         };
 
         for (idx, op) in ops.iter().enumerate() {
@@ -1896,10 +2249,21 @@ impl CommandBuffer {
 
             let idx_reg = Register(idx);
 
-            let knob = if command.knobs.contains(&idx_reg) {
-                Some(mono.next_knob(idx_reg))
-            } else {
-                None
+            let knob = match command.knobs.get(&idx_reg) {
+                Some(KnobKind::Runtime) => KnobUser::Runtime(mono.next_knob(idx_reg)),
+                Some(KnobKind::Buffer { buffer, range }) => {
+                    let byte_assignment =
+                        match image_buffers.borrow().get_register_resources(*buffer) {
+                            Ok(RegisterAssignment::Buffer(buffer)) => buffer,
+                            _ => return Err(CompileError::NotYetImplemented),
+                        };
+
+                    KnobUser::Buffer {
+                        buffer: byte_assignment.buffer,
+                        range: range.clone(),
+                    }
+                }
+                None => KnobUser::None,
             };
 
             match op {
@@ -1935,7 +2299,7 @@ impl CommandBuffer {
 
                     match construct_op {
                         &ConstructOp::DistributionNormal(ref distribution) => {
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment {
@@ -1947,8 +2311,12 @@ impl CommandBuffer {
                                 },
                             })
                         }
+                        &ConstructOp::FromBuffer(src) => {
+                            // Well we realized the texture, now just initialize it.
+                            high_ops.push(High::Copy { src, dst: idx_reg });
+                        }
                         ConstructOp::DistributionNoise(ref noise_params) => {
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment {
@@ -1960,7 +2328,7 @@ impl CommandBuffer {
                                 },
                             })
                         }
-                        ConstructOp::Bilinear(bilinear) => high_ops.push(High::Construct {
+                        ConstructOp::Bilinear(bilinear) => high_ops.push(High::DrawInto {
                             dst: Target::Discard(texture),
                             fn_: Initializer::PaintFullScreen {
                                 shader: ParameterizedFragment {
@@ -1971,7 +2339,7 @@ impl CommandBuffer {
                                 },
                             },
                         }),
-                        &ConstructOp::Solid(color) => high_ops.push(High::Construct {
+                        &ConstructOp::Solid(color) => high_ops.push(High::DrawInto {
                             dst: Target::Discard(texture),
                             fn_: Initializer::PaintFullScreen {
                                 shader: ParameterizedFragment {
@@ -1983,6 +2351,36 @@ impl CommandBuffer {
                     }
 
                     reg_to_texture.insert(idx_reg, texture);
+                }
+                Op::BufferInit {
+                    op: buf_op,
+                    desc: _,
+                } => {
+                    let buffer = realize_buffer(idx, op)?;
+
+                    match buf_op {
+                        BufferInitOp::FromData { placement, data } => {
+                            high_ops.push(High::WriteInto {
+                                dst: buffer,
+                                fn_: BufferWrite::Zero,
+                            });
+
+                            high_ops.push(High::WriteInto {
+                                dst: buffer,
+                                fn_: BufferWrite::Put {
+                                    placement: placement.clone(),
+                                    data: data.clone(),
+                                    knob: match knob {
+                                        KnobUser::None => None,
+                                        KnobUser::Runtime(idx) => Some(idx),
+                                        _ => unreachable!(
+                                            "Buffer init from buffer does not make sense"
+                                        ),
+                                    },
+                                },
+                            });
+                        }
+                    }
                 }
                 Op::Unary {
                     desc: _,
@@ -1996,7 +2394,7 @@ impl CommandBuffer {
                             let target =
                                 Rectangle::with_width_height(region.width(), region.height());
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[src],
@@ -2025,7 +2423,7 @@ impl CommandBuffer {
                             // eprintln!("{:?}", matrix);
 
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment {
@@ -2055,7 +2453,7 @@ impl CommandBuffer {
                             // back to the non-linear electrical space.
                             // We could do this directly from one matrix to another or try using an
                             // ephemeral intermediate attachment?
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment {
@@ -2068,7 +2466,7 @@ impl CommandBuffer {
                         UnaryOp::Extract { channel: _ } => {
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
 
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     // This will grab the right channel, that is all of them.
@@ -2089,7 +2487,7 @@ impl CommandBuffer {
                             let invocation = derivative.method.to_shader(derivative.direction)?;
 
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment { invocation, knob },
@@ -2132,7 +2530,7 @@ impl CommandBuffer {
                             let affine_matrix = RowMatrix::new(affine.transformation);
 
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[lhs],
@@ -2143,13 +2541,13 @@ impl CommandBuffer {
                                         invocation: FragmentShaderInvocation::PaintOnTop(
                                             PaintOnTopKind::Copy,
                                         ),
-                                        knob,
+                                        knob: knob.clone(),
                                     },
                                 },
                             });
 
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Load(texture),
                                 fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[rhs],
@@ -2172,7 +2570,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
 
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment {
@@ -2189,7 +2587,7 @@ impl CommandBuffer {
                         }
                         BinaryOp::Inscribe { placement } => {
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
                                 fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[lhs],
@@ -2200,13 +2598,13 @@ impl CommandBuffer {
                                         invocation: FragmentShaderInvocation::PaintOnTop(
                                             PaintOnTopKind::Copy,
                                         ),
-                                        knob,
+                                        knob: knob.clone(),
                                     },
                                 },
                             });
 
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Load(texture),
                                 fn_: Initializer::PaintToSelection {
                                     texture: reg_to_texture[rhs],
@@ -2226,7 +2624,7 @@ impl CommandBuffer {
                             high_ops.push(High::PushOperand(reg_to_texture[lhs]));
                             high_ops.push(High::PushOperand(reg_to_texture[rhs]));
 
-                            high_ops.push(High::Construct {
+                            high_ops.push(High::DrawInto {
                                 dst: Target::Load(texture),
                                 fn_: Initializer::PaintFullScreen {
                                     shader: ParameterizedFragment {
@@ -2242,7 +2640,7 @@ impl CommandBuffer {
 
                     reg_to_texture.insert(Register(idx), texture);
                 }
-                Op::Dynamic { call, command, .. } => {
+                Op::DynamicImage { call, command, .. } => {
                     let texture = realize_texture(idx, op)?;
                     let (op_unary, op_binary, arguments);
 
@@ -2277,7 +2675,7 @@ impl CommandBuffer {
 
                     // This always 'constructs' an output texture. The image we render to is new,
                     // no matter how many arguments are being inserted.
-                    high_ops.push(High::Construct {
+                    high_ops.push(High::DrawInto {
                         dst: Target::Discard(texture),
                         fn_: Initializer::PaintFullScreen {
                             shader: ParameterizedFragment {
@@ -2365,7 +2763,7 @@ impl CommandBuffer {
 
         Ok(FunctionLinked {
             ops: start..end,
-            image_buffers,
+            image_buffers: image_buffers.into_inner(),
             signature_registers,
         })
     }
@@ -2383,7 +2781,10 @@ impl CommandBuffer {
             | Some(Op::Construct { desc, .. })
             | Some(Op::Unary { desc, .. })
             | Some(Op::Binary { desc, .. })
-            | Some(Op::Dynamic { desc, .. }) => RegisterDescription::Texture(desc),
+            | Some(Op::DynamicImage { desc, .. }) => RegisterDescription::Texture(desc),
+            Some(Op::BufferInit { desc, .. })
+            | Some(Op::BufferUnary { desc, .. })
+            | Some(Op::BufferBinary { desc, .. }) => RegisterDescription::Buffer(desc),
         }
     }
 
@@ -2404,7 +2805,7 @@ impl CommandBuffer {
 /// 3. Create a new entry on the command buffer.
 /// 4. Not yet performed: (Validate the SPIR-V module inputs against the data definition)
 impl CommandBuffer {
-    /// Record a _constructor_.
+    /// Record a _constructor_, with a user-supplied shader.
     pub fn construct_dynamic(&mut self, dynamic: &dyn ShaderCommand) -> Register {
         let mut data = vec![];
         let mut content = None;
@@ -2415,7 +2816,7 @@ impl CommandBuffer {
             content: &mut content,
         });
 
-        self.push(Op::Dynamic {
+        self.push(Op::DynamicImage {
             call: OperandDynKind::Construct,
             // FIXME: maybe this conversion should be delayed.
             // In particular, converting source to SPIR-V may take some form of 'compiler' argument
@@ -2434,6 +2835,7 @@ impl CommandBuffer {
         })
     }
 
+    /// Record a unary operator, with a user-supplied shader.
     pub fn unary_dynamic(
         &mut self,
         op: Register,
@@ -2453,7 +2855,7 @@ impl CommandBuffer {
             content: &mut content,
         });
 
-        let out_reg = self.push(Op::Dynamic {
+        let out_reg = self.push(Op::DynamicImage {
             call: OperandDynKind::Unary(op),
             // FIXME: maybe this conversion should be delayed.
             // In particular, converting source to SPIR-V may take some form of 'compiler' argument
@@ -2473,9 +2875,61 @@ impl CommandBuffer {
 
         Ok(out_reg)
     }
+
+    /// Record a binary operator, with a user-supplied shader.
+    pub fn binary_dynamic(
+        &mut self,
+        lhs: Register,
+        rhs: Register,
+        dynamic: &dyn ShaderCommand,
+    ) -> Result<Register, CommandError> {
+        let _input_descriptor = match self.describe_reg(lhs) {
+            RegisterDescription::Texture(desc) => desc,
+            _ => return Err(CommandError::INVALID_CALL),
+        };
+
+        let _input_descriptor = match self.describe_reg(rhs) {
+            RegisterDescription::Texture(desc) => desc,
+            _ => return Err(CommandError::INVALID_CALL),
+        };
+
+        let mut data = vec![];
+        let mut content = None;
+
+        let source = dynamic.source();
+        let desc = dynamic.data(ShaderData {
+            data_buffer: &mut data,
+            content: &mut content,
+        });
+
+        let out_reg = self.push(Op::DynamicImage {
+            call: OperandDynKind::Binary { lhs, rhs },
+            // FIXME: maybe this conversion should be delayed.
+            // In particular, converting source to SPIR-V may take some form of 'compiler' argument
+            // that's only available during `compile` phase.
+            command: ShaderInvocation {
+                spirv: match source {
+                    ShaderSource::SpirV(spirv) => spirv,
+                },
+                shader_data: match content {
+                    None => None,
+                    Some(c) => Some(c.as_slice(&data).into()),
+                },
+                num_args: 2,
+            },
+            desc: desc.into(),
+        });
+
+        Ok(out_reg)
+    }
 }
 
 impl CommandSignature {
+    /// Verify if a signature matches an other command signature.
+    ///
+    /// That is, whether the subtyping relationship of all its bounds and the argument allows using
+    /// one in place of the other declared type. This checks if `self` contains all bounds that
+    /// occur in `actual`.
     pub fn is_declaration_of(&self, actual: &CommandSignature) -> bool {
         if self.vars.len() != actual.vars.len() {
             return false;
@@ -2584,6 +3038,22 @@ impl GenericDescriptor {
     }
 }
 
+impl GenericBuffer {
+    pub fn as_concrete(&self) -> Option<u64> {
+        match self.size {
+            Generic::Concrete(val) => Some(val),
+            Generic::Generic(_) => None,
+        }
+    }
+
+    pub fn monomorphize(&self, decl: &[Descriptor]) -> u64 {
+        match self.size {
+            Generic::Concrete(val) => val,
+            Generic::Generic(var) => decl[var.0].to_canvas().u64_len(),
+        }
+    }
+}
+
 impl From<Descriptor> for GenericDescriptor {
     fn from(desc: Descriptor) -> Self {
         let size = desc.size();
@@ -2600,6 +3070,13 @@ impl<'lt> RegisterDescription<'lt> {
     pub fn as_texture(&self) -> Result<&'lt GenericDescriptor, CommandError> {
         match self {
             RegisterDescription::Texture(tex) => Ok(tex),
+            _ => Err(CommandError::BAD_REGISTER),
+        }
+    }
+
+    pub fn as_buffer(&self) -> Result<&'lt GenericBuffer, CommandError> {
+        match self {
+            RegisterDescription::Buffer(tex) => Ok(tex),
             _ => Err(CommandError::BAD_REGISTER),
         }
     }
@@ -2973,8 +3450,8 @@ impl From<&'_ ByteLayout> for Rectangle {
     }
 }
 
-impl From<&'_ BufferLayout> for Rectangle {
-    fn from(buffer: &BufferLayout) -> Rectangle {
+impl From<&'_ CanvasLayout> for Rectangle {
+    fn from(buffer: &CanvasLayout) -> Rectangle {
         Rectangle::with_width_height(buffer.width(), buffer.height())
     }
 }

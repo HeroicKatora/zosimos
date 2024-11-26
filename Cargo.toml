@@ -60,6 +60,9 @@ version = "1"
 features = ["macros", "rt-multi-thread"]
 
 [[test]]
+name = "buffer"
+
+[[test]]
 name = "blend"
 
 [[test]]

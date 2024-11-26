@@ -3,23 +3,26 @@ use core::{num::NonZeroU64, ops::Range};
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use crate::buffer::{BufferLayout, ByteLayout};
+use crate::buffer::{ByteLayout, CanvasLayout, Descriptor};
 use crate::command::Register;
 use crate::pool::Pool;
 use crate::program::{
     BindGroupDescriptor, BindGroupLayoutDescriptor, BindingResource, Buffer, BufferDescriptor,
-    BufferDescriptorInit, BufferInitContent, BufferUsage, Capabilities, ColorAttachmentDescriptor,
-    DeviceBuffer, DeviceTexture, Event, FragmentState, ImageBufferAssignment, ImageBufferPlan,
-    ImageDescriptor, ImagePoolPlan, Initializer, Instruction, Knob, KnobDescriptor, LaunchError,
-    Low, PipelineLayoutDescriptor, PipelineLayoutKey, PrimitiveState, RenderPassDescriptor,
+    BufferDescriptorInit, BufferInitContent, BufferLayout, BufferUsage, ByteBufferAssignment,
+    Capabilities, ColorAttachmentDescriptor, DeviceBuffer, DeviceTexture, Event, FragmentState,
+    ImageBufferAssignment, ImageBufferPlan, ImageDescriptor, ImagePoolPlan, Initializer,
+    Instruction, Knob, KnobDescriptor, LaunchError, Low, PipelineLayoutDescriptor,
+    PipelineLayoutKey, PrimitiveState, RegisterAssignment, RenderPassDescriptor,
     RenderPipelineDescriptor, RenderPipelineKey, SamplerDescriptor, ShaderDescriptor,
     ShaderDescriptorKey, Texture, TextureDescriptor, TextureViewDescriptor, VertexState,
 };
 use crate::util::ExtendOne;
 use crate::{run, shaders};
 
-use image_canvas::layout::{CanvasLayout, RowLayoutDescription};
+use image_canvas::layout::RowLayoutDescription;
 use wgpu::StoreOp;
+
+use super::KnobUser;
 
 /// The encoder tracks the supposed state of `run::Descriptors` without actually executing them.
 #[derive(Default)]
@@ -129,35 +132,52 @@ pub(crate) struct ExecutableInfo {
     pub(crate) knobs: HashMap<Knob, KnobDescriptor>,
 }
 
+#[must_use = "Knob must be handled to apply its effects."]
+pub enum KnobUsage {
+    /// The knob does not need to be used further.
+    Noop,
+    CopyFrom {
+        buffer: DeviceBuffer,
+        range: Range<u64>,
+    },
+}
+
 /// The GPU buffers associated with a register.
 /// Supplements the buffer_plan by giving direct mappings to each device resource index in an
 /// encoder process.
 #[derive(Clone, Debug)]
-pub(crate) struct RegisterMap {
-    pub(crate) reg_texture: Texture,
-    pub(crate) texture: DeviceTexture,
-    pub(crate) reg_buffer: Buffer,
-    pub(crate) buffer: DeviceBuffer,
-    /// A device buffer with (COPY_DST | MAP_READ) for reading back the texture.
-    pub(crate) map_read: Option<DeviceBuffer>,
-    /// A device buffer with (COPY_SRC | MAP_WRITE) for initialization the texture.
-    pub(crate) map_write: Option<DeviceBuffer>,
-    /// A device texture for (de-)normalizing the texture contents.
-    pub(crate) staging: Option<DeviceTexture>,
-    /// The layout of the buffer.
-    /// This might differ from the layout of the corresponding pool image because it must adhere to
-    /// the layout requirements of the device. For example, the alignment of each row must be
-    /// divisible by 256 etc.
-    pub(crate) buffer_layout: BufferLayout,
-    /// The byte (row-wise) descriptor for the buffer layout.
-    /// Same caveat applies, this must be padded to alignments. Note that all currently supported
-    /// wgpu formats have a row-wise layout. When and if this changes, turn this field into an enum
-    /// instead?
-    pub(crate) byte_layout: ByteLayout,
-    /// The format of the non-staging texture.
-    pub(crate) texture_format: TextureDescriptor,
-    /// The format of the staging texture.
-    pub(crate) staging_format: Option<TextureDescriptor>,
+pub(crate) enum RegisterMap {
+    Buffer {
+        reg_buffer: Buffer,
+        buffer: DeviceBuffer,
+        buffer_layout: BufferLayout,
+    },
+    Image {
+        reg_texture: Texture,
+        texture: DeviceTexture,
+        reg_buffer: Buffer,
+        buffer: DeviceBuffer,
+        /// A device buffer with (COPY_DST | MAP_READ) for reading back the texture.
+        map_read: Option<DeviceBuffer>,
+        /// A device buffer with (COPY_SRC | MAP_WRITE) for initialization the texture.
+        map_write: Option<DeviceBuffer>,
+        /// A device texture for (de-)normalizing the texture contents.
+        staging: Option<DeviceTexture>,
+        /// The layout of the buffer.
+        /// This might differ from the layout of the corresponding pool image because it must adhere to
+        /// the layout requirements of the device. For example, the alignment of each row must be
+        /// divisible by 256 etc.
+        buffer_layout: CanvasLayout,
+        /// The byte (row-wise) descriptor for the buffer layout.
+        /// Same caveat applies, this must be padded to alignments. Note that all currently supported
+        /// wgpu formats have a row-wise layout. When and if this changes, turn this field into an enum
+        /// instead?
+        byte_layout: ByteLayout,
+        /// The format of the non-staging texture.
+        texture_format: TextureDescriptor,
+        /// The format of the staging texture.
+        staging_format: Option<TextureDescriptor>,
+    },
 }
 
 /// The gpu texture associated with the image.
@@ -212,6 +232,8 @@ struct SimpleRenderPipelineDescriptor<'data> {
     fragment_texture: TextureBind,
     /// Texture for (set 2, binding 0)
     fragment_bind_data: BufferBind<'data>,
+    /// How the fragment bind buffer is being filled.
+    fragment_knob: KnobUsage,
     /// The vertex shader to use.
     vertex: ShaderBind,
     /// The fragment shader to use.
@@ -391,7 +413,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             Low::WriteImageToTexture { .. }
             | Low::CopyBufferToTexture { .. }
             | Low::CopyTextureToBuffer { .. }
-            | Low::CopyBufferToBuffer { .. } => {
+            | Low::CopyBufferToBuffer { .. }
+            | Low::ZeroBuffer { .. } => {
                 if !self.is_in_command_encoder {
                     return Err(LaunchError::InternalCommandError(line!()));
                 }
@@ -459,10 +482,23 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// from self but access it 'later' in the function; will be fixed with Polonius). Thus one
     /// should prefer to call `allocate_register` instead.
     fn ensure_allocate_register(&mut self, idx: Register) -> Result<(), LaunchError> {
+        let ty = self.buffer_plan.get_register_resources(idx)?;
+
+        match ty {
+            RegisterAssignment::Image(assign) => self.ensure_allocate_image(idx, assign),
+            RegisterAssignment::Buffer(assign) => self.ensure_allocate_buffer(idx, assign),
+        }
+    }
+
+    fn ensure_allocate_image(
+        &mut self,
+        idx: Register,
+        assign: ImageBufferAssignment,
+    ) -> Result<(), LaunchError> {
         let ImageBufferAssignment {
             buffer: reg_buffer,
             texture: reg_texture,
-        } = self.buffer_plan.get(idx)?;
+        } = assign;
 
         if self.register_map.get(&idx).is_some() {
             return Ok(());
@@ -507,13 +543,15 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             )
         };
 
-        let texture = self.ensure_allocate_texture(reg_texture)?;
+        let texture = self.ensure_device_texture(reg_texture)?;
         let staging = self
             .staging_map
             .get(&reg_texture)
             .map(|staging| staging.device);
 
-        let map_entry = RegisterMap {
+        let desc = Descriptor::from(&buffer_layout);
+
+        let map_entry = RegisterMap::Image {
             reg_buffer,
             buffer,
             reg_texture,
@@ -527,25 +565,23 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             staging_format,
         };
 
-        // TODO do a match instead?
-        let in_map = self
-            .register_map
+        self.register_map
             .entry(idx)
+            .and_modify(|in_map| in_map.clone_from(&map_entry))
             .or_insert_with(|| map_entry.clone());
-        *in_map = map_entry.clone();
 
         self.buffer_map.insert(
             reg_buffer,
             BufferMap {
                 device: buffer,
-                layout: in_map.buffer_layout.clone(),
+                layout: BufferLayout::Texture(desc.layout),
             },
         );
 
         Ok(())
     }
 
-    pub(crate) fn ensure_allocate_texture(
+    pub(crate) fn ensure_device_texture(
         &mut self,
         reg_texture: Texture,
     ) -> Result<DeviceTexture, LaunchError> {
@@ -598,8 +634,65 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(texture)
     }
 
+    fn ensure_allocate_buffer(
+        &mut self,
+        idx: Register,
+        assign: ByteBufferAssignment,
+    ) -> Result<(), LaunchError> {
+        if self.register_map.contains_key(&idx) {
+            return Ok(());
+        }
+
+        let ByteBufferAssignment { buffer } = assign;
+        let device = self.ensure_device_buffer(buffer)?;
+        let layout = &self.buffer_plan.buffer[buffer.0];
+
+        self.register_map.insert(
+            idx,
+            RegisterMap::Buffer {
+                buffer: device,
+                reg_buffer: buffer,
+                buffer_layout: layout.clone(),
+            },
+        );
+
+        Ok(())
+    }
+
+    fn ensure_device_buffer(&mut self, buffer: Buffer) -> Result<DeviceBuffer, LaunchError> {
+        if let Some(map) = self.buffer_map.get(&buffer) {
+            return Ok(map.device);
+        }
+
+        let plan = self
+            .buffer_plan
+            .buffer
+            .get(buffer.0)
+            .map(Clone::clone)
+            .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+        let device = DeviceBuffer(self.buffers);
+        self.push(Low::Buffer(BufferDescriptor {
+            size: plan.u64_len(),
+            usage: BufferUsage::DataBuffer,
+        }))?;
+
+        self.buffer_map.insert(
+            buffer,
+            BufferMap {
+                device,
+                layout: plan,
+            },
+        );
+
+        Ok(device)
+    }
+
     fn ingest_image_data(&mut self, idx: Register) -> Result<Texture, LaunchError> {
-        let texture = self.buffer_plan.get(idx)?.texture;
+        let texture = match self.buffer_plan.get_register_resources(idx)? {
+            RegisterAssignment::Image(image) => image.texture,
+            _ => return Err(LaunchError::InternalCommandError(line!())),
+        };
 
         // FIXME: We are conflating `texture` and the index in the execution's vector of IO
         // buffers. That is, we have an entry there even when the register/texture in question has
@@ -622,24 +715,36 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let write_event = self.make_event();
         self.input_map.insert(idx, source_image);
 
-        let descriptor = &self.buffer_plan.texture[regmap.reg_texture.0];
+        let RegisterMap::Image {
+            reg_texture,
+            buffer,
+            buffer_layout,
+            byte_layout,
+            map_write,
+            ..
+        } = regmap
+        else {
+            unreachable!("non-image inputs not yet implemented");
+        };
+
+        let descriptor = &self.buffer_plan.texture[reg_texture.0];
         let size = descriptor.size();
 
         // See below, required for direct buffer-to-buffer copy.
-        let sizeu64 = regmap.buffer_layout.u64_len();
+        let sizeu64 = buffer_layout.u64_len();
 
         // FIXME: if it is a simple copy we can use regmap.buffer directly.
-        let target_buffer = regmap.map_write.unwrap_or(regmap.buffer);
+        let target_buffer = map_write.unwrap_or(buffer);
 
         // FIXME: should we validate size here as well for better errors?
         // Potentially all errors are internal so it might not matter.
         let inst = self.push(Low::WriteImageToBuffer {
-            copy_dst_buffer: regmap.buffer,
+            copy_dst_buffer: buffer,
             source_image,
             size,
             offset: (0, 0),
             target_buffer,
-            target_layout: regmap.byte_layout,
+            target_layout: byte_layout,
             write_event,
         })?;
 
@@ -652,12 +757,14 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // FIXME: if we're reading from a texture, then we do not need this copy at all.
         // However, this fact is only known at runtime. So, should we defer running the
         // CopyBufferToBuffer instead to the runtime?
-        if let Some(map_write) = regmap.map_write {
+        if let Some(map_write) = map_write {
             self.push(Low::BeginCommands)?;
             let inst = self.push(Low::CopyBufferToBuffer {
                 source_buffer: map_write,
+                source: 0,
+                target_buffer: buffer,
+                target: 0,
                 size: sizeu64,
-                target_buffer: regmap.buffer,
             })?;
             self.info.skip_by_op.insert(inst, write_event);
             self.push(Low::EndCommands)?;
@@ -670,16 +777,26 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     /// Copy from memory visible buffer to the texture.
     pub(crate) fn copy_buffer_to_staging(&mut self, idx: Register) -> Result<(), LaunchError> {
-        let regmap = self.allocate_register(idx)?.clone();
+        let RegisterMap::Image {
+            staging,
+            staging_format,
+            texture,
+            buffer,
+            byte_layout,
+            ..
+        } = self.allocate_register(idx)?.clone()
+        else {
+            unreachable!("Buffers are not copied to staging");
+        };
 
         let (size, target_texture);
-        if let Some(staging) = regmap.staging {
+        if let Some(staging) = staging {
             target_texture = staging;
-            let (width, height) = regmap.staging_format.as_ref().unwrap().size;
+            let (width, height) = staging_format.as_ref().unwrap().size;
             size = (width.get(), height.get());
         } else {
             // .… or directly to the target buffer if we have no staging.
-            target_texture = regmap.texture;
+            target_texture = texture;
             size = self.buffer_plan.get_info(idx)?.descriptor.size();
         };
 
@@ -687,8 +804,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyBufferToTexture {
-            source_buffer: regmap.buffer,
-            source_layout: regmap.byte_layout,
+            source_buffer: buffer,
+            source_layout: byte_layout,
             offset: (0, 0),
             size,
             target_texture,
@@ -796,15 +913,25 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
     /// Copy from texture to the memory buffer.
     pub(crate) fn copy_staging_to_buffer(&mut self, idx: Register) -> Result<(), LaunchError> {
-        let regmap = self.allocate_register(idx)?.clone();
+        let RegisterMap::Image {
+            staging,
+            staging_format,
+            texture,
+            buffer,
+            byte_layout,
+            ..
+        } = self.allocate_register(idx)?.clone()
+        else {
+            unreachable!("Buffers are not copied to staging, requested {:?}", idx);
+        };
 
         let (size, source_texture);
-        if let Some(staging) = regmap.staging {
+        if let Some(staging) = staging {
             source_texture = staging;
-            let (width, height) = regmap.staging_format.as_ref().unwrap().size;
+            let (width, height) = staging_format.as_ref().unwrap().size;
             size = (width.get(), height.get());
         } else {
-            source_texture = regmap.texture;
+            source_texture = texture;
             size = self.buffer_plan.get_info(idx)?.descriptor.size();
         };
 
@@ -815,8 +942,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             source_texture,
             offset: (0, 0),
             size,
-            target_buffer: regmap.buffer,
-            target_layout: regmap.byte_layout,
+            target_buffer: buffer,
+            target_layout: byte_layout,
         })?;
         self.push(Low::EndCommands)?;
         self.plan_run_top_command();
@@ -834,18 +961,31 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let target_image = self.ingest_image_data(dst)?;
         self.output_map.insert(dst, target_image);
 
-        let size = self.buffer_plan.get_info(idx)?.descriptor.size();
-        let sizeu64 = regmap.buffer_layout.u64_len();
+        let RegisterMap::Image {
+            map_read,
+            buffer,
+            buffer_layout,
+            byte_layout,
+            ..
+        } = regmap
+        else {
+            unreachable!("non-image outputs not yet implemented");
+        };
 
-        let source_buffer = regmap.map_read.unwrap_or(regmap.buffer);
+        let size = self.buffer_plan.get_info(idx)?.descriptor.size();
+        let sizeu64 = buffer_layout.u64_len();
+
+        let source_buffer = map_read.unwrap_or(buffer);
 
         // FIXME: might happen at next call within another command encoder..
-        if let Some(map_read) = regmap.map_read {
+        if let Some(map_read) = map_read {
             self.push(Low::BeginCommands)?;
             self.push(Low::CopyBufferToBuffer {
-                source_buffer: regmap.buffer,
-                size: sizeu64,
+                source_buffer: buffer,
+                source: 0,
                 target_buffer: map_read,
+                target: 0,
+                size: sizeu64,
             })?;
             // eprintln!("buf{:?} -> buf{:?} ({})", regmap.buffer, map_read, sizeu64);
             self.push(Low::EndCommands)?;
@@ -858,9 +998,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         // However, this fact is only known at runtime. So, should we defer running the
         // CopyBufferToBuffer instead to the runtime?
         self.push(Low::ReadBuffer {
-            copy_src_buffer: regmap.buffer,
+            copy_src_buffer: buffer,
             source_buffer,
-            source_layout: regmap.byte_layout,
+            source_layout: byte_layout,
             size,
             offset: (0, 0),
             target_image,
@@ -874,23 +1014,24 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         idx: Register,
         dst: Register,
     ) -> Result<(), LaunchError> {
-        let regmap = self.allocate_register(idx)?.clone();
+        let RegisterMap::Image { reg_texture, .. } = self.allocate_register(idx)?.clone() else {
+            // Can not render to non-image targets.
+            return Err(LaunchError::InternalCommandError(line!()));
+        };
+
         let target_image = self.ingest_image_data(dst)?;
         self.render_map.insert(dst, target_image);
 
         // FIXME: have the caller provide this directly?
         let dst_format = {
-            let ImageBufferAssignment {
-                buffer: _,
-                texture: reg_texture,
-            } = self.buffer_plan.get(dst)?;
+            let reg_texture = self.buffer_plan.get_register_texture(dst)?;
             let descriptor = &self.buffer_plan.texture[reg_texture.0];
             let descriptor = ImageDescriptor::new(descriptor)?;
             descriptor.format
         };
 
-        self.copy_staging_to_texture(regmap.reg_texture)?;
-        self.operands.push(regmap.reg_texture);
+        self.copy_staging_to_texture(reg_texture)?;
+        self.operands.push(reg_texture);
         let pipeline = {
             let shader =
                 shaders::FragmentShaderInvocation::PaintOnTop(shaders::PaintOnTopKind::Copy);
@@ -921,6 +1062,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 },
                 fragment_texture: TextureBind::Textures(arguments as usize),
                 fragment_bind_data,
+                fragment_knob: KnobUsage::Noop,
                 vertex: ShaderBind::ShaderMain(vertex),
                 fragment: ShaderBind::ShaderMain(fragment),
             })?
@@ -1453,6 +1595,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     fn make_bound_buffer(
         &mut self,
         bind: BufferBind<'_>,
+        knob: KnobUsage,
         layout_idx: usize,
     ) -> Result<Option<usize>, LaunchError> {
         let buffer = match bind {
@@ -1475,6 +1618,30 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 DeviceBuffer(buffer)
             }
         };
+
+        match knob {
+            KnobUsage::Noop => {}
+            KnobUsage::CopyFrom {
+                buffer: source,
+                range,
+            } => {
+                debug_assert!(
+                    range.end >= range.start,
+                    "knob is an internal, consistent property"
+                );
+
+                self.push(Low::BeginCommands)?;
+                self.push(Low::CopyBufferToBuffer {
+                    source_buffer: source,
+                    source: range.start,
+                    target_buffer: buffer,
+                    target: 0,
+                    size: range.end - range.start,
+                })?;
+                self.push(Low::EndCommands)?;
+                self.push(Low::RunTopCommand)?;
+            }
+        }
 
         let group = self.bind_groups;
         let descriptor = BindGroupDescriptor {
@@ -1513,11 +1680,19 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         };
 
         let vertex_layout = self.make_quad_bind_group();
-        let vertex_bind = self.make_bound_buffer(descriptor.vertex_bind_data, vertex_layout)?;
+        let vertex_bind = self.make_bound_buffer(
+            descriptor.vertex_bind_data,
+            /* we do not permit knob for the vertex data */ KnobUsage::Noop,
+            vertex_layout,
+        )?;
 
         // FIXME: this builds the layout even when it is not required.
         let vertex_layout = self.make_generic_fragment_bind_group();
-        let fragment_bind = self.make_bound_buffer(descriptor.fragment_bind_data, vertex_layout)?;
+        let fragment_bind = self.make_bound_buffer(
+            descriptor.fragment_bind_data,
+            descriptor.fragment_knob,
+            vertex_layout,
+        )?;
 
         Ok(SimpleRenderPipeline {
             pipeline,
@@ -1650,6 +1825,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     },
                     fragment_texture: TextureBind::Textures(1),
                     fragment_bind_data: BufferBind::None,
+                    // FIXME: see knob'able data.
+                    fragment_knob: KnobUsage::Noop,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
@@ -1671,7 +1848,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     .map(|data| BufferBind::Planned { data })
                     .unwrap_or(BufferBind::None);
 
-                self.plan_knob(*knob, &fragment_bind_data)?;
+                let fragment_knob = self.plan_knob_buffer(knob, &fragment_bind_data)?;
                 let arguments = shader.num_args();
 
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
@@ -1681,6 +1858,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     },
                     fragment_texture: TextureBind::Textures(arguments as usize),
                     fragment_bind_data,
+                    fragment_knob,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::ShaderMain(fragment),
                 })
@@ -1720,6 +1898,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
                     },
+                    fragment_knob: KnobUsage::Noop,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::Shader {
                         // FIXME: for some weird reason this MUST be `main` instead of the true
@@ -1771,6 +1950,7 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     fragment_bind_data: BufferBind::Set {
                         data: bytemuck::cast_slice(&buffer[..]),
                     },
+                    fragment_knob: KnobUsage::Noop,
                     vertex: ShaderBind::ShaderMain(vertex),
                     fragment: ShaderBind::Shader {
                         // FIXME: for some weird reason this MUST be `main` instead of the true
@@ -1784,14 +1964,103 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         }
     }
 
-    fn plan_knob(
+    pub(crate) fn prepare_buffer_write(
         &mut self,
-        knob: Option<Knob>,
-        fragment_bind_data: &BufferBind,
+        // The function we are using.
+        function: &super::BufferWrite,
+        // The texture we are rendering to.
+        dst: Buffer,
     ) -> Result<(), LaunchError> {
+        self.ensure_device_buffer(dst)?;
+
+        match function {
+            super::BufferWrite::Zero => {
+                let buf_layout = self
+                    .buffer_plan
+                    .buffer
+                    .get(dst.0)
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                let map = self
+                    .buffer_map
+                    .get(&dst)
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                let size = buf_layout.u64_len();
+                let target_buffer = map.device;
+
+                self.push(Low::BeginCommands)?;
+                self.push(Low::ZeroBuffer {
+                    start: 0,
+                    size,
+                    target_buffer,
+                })?;
+                self.push(Low::EndCommands)?;
+                self.push(Low::RunTopCommand)?;
+
+                Ok(())
+            }
+            super::BufferWrite::Put {
+                placement,
+                data,
+                knob,
+            } => {
+                let buf_layout = self
+                    .buffer_plan
+                    .buffer
+                    .get(dst.0)
+                    .cloned()
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                let map = self
+                    .buffer_map
+                    .get(&dst)
+                    .map(Clone::clone)
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
+
+                let size = buf_layout.u64_len();
+                let data_range = self.ingest_data(data);
+
+                let knob = match knob {
+                    None => KnobUser::None,
+                    Some(knob_id) => KnobUser::Runtime(*knob_id),
+                };
+
+                match self.plan_knob_data_range(&knob, data_range.clone())? {
+                    KnobUsage::Noop => {}
+                    KnobUsage::CopyFrom { .. } => unreachable!("not with any knob user"),
+                }
+
+                let stage_buffer = DeviceBuffer(self.buffers);
+                self.push(Low::BufferInit(BufferDescriptorInit {
+                    content: data_range,
+                    usage: BufferUsage::DataBuffer,
+                }))?;
+
+                self.push(Low::BeginCommands)?;
+                self.push(Low::CopyBufferToBuffer {
+                    source_buffer: stage_buffer,
+                    source: 0,
+                    target_buffer: map.device,
+                    target: placement.start as u64,
+                    size,
+                })?;
+                self.push(Low::EndCommands)?;
+                self.push(Low::RunTopCommand)?;
+
+                Ok(())
+            }
+        }
+    }
+
+    fn plan_knob_buffer(
+        &mut self,
+        knob: &KnobUser,
+        fragment_bind_data: &BufferBind,
+    ) -> Result<KnobUsage, LaunchError> {
         // Nothing to plan.
-        let Some(knob) = knob else {
-            return Ok(());
+        if let KnobUser::None = knob {
+            return Ok(KnobUsage::Noop);
         };
 
         // Only `planned` bindings can be knob controlled!
@@ -1799,14 +2068,35 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             return Err(LaunchError::InternalCommandError(line!()));
         };
 
-        self.info.knobs.insert(
-            knob,
-            KnobDescriptor {
-                range: data.clone(),
-            },
-        );
+        self.plan_knob_data_range(knob, data.clone())
+    }
 
-        Ok(())
+    fn plan_knob_data_range(
+        &mut self,
+        knob: &KnobUser,
+        data: Range<usize>,
+    ) -> Result<KnobUsage, LaunchError> {
+        match knob {
+            KnobUser::None => return Ok(KnobUsage::Noop),
+            &KnobUser::Runtime(knob) => {
+                self.info.knobs.insert(
+                    knob,
+                    KnobDescriptor {
+                        range: data.clone(),
+                    },
+                );
+
+                Ok(KnobUsage::Noop)
+            }
+            KnobUser::Buffer { buffer, range } => {
+                let device = self.ensure_device_buffer(*buffer)?;
+
+                Ok(KnobUsage::CopyFrom {
+                    buffer: device,
+                    range: range.clone(),
+                })
+            }
+        }
     }
 
     /// Ingest the data into the encoder's active buffer data.
@@ -1891,6 +2181,8 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         Ok(())
     }
 }
+
+impl RegisterMap {}
 
 fn shader_include_to_spirv_static(src: Cow<'static, [u8]>) -> Cow<'static, [u32]> {
     if let Cow::Borrowed(src) = src {
