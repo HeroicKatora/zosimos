@@ -1540,7 +1540,6 @@ impl Host {
                 let group = self
                     .descriptors
                     .bind_group_layout(desc, &mut entry_buffer)?;
-                // eprintln!("Made {}: {:?}", self.descriptors.bind_group_layouts.len(), group);
                 let group = gpu.with_gpu(|gpu| gpu.device().create_bind_group_layout(&group));
                 self.descriptors.bind_group_layouts.push(group);
                 Ok(Submissions::default())
@@ -1550,7 +1549,6 @@ impl Host {
                 let group =
                     self.descriptors
                         .bind_group(desc, &mut entry_buffer, &mut self.debug)?;
-                // eprintln!("{}: {:?}", desc.layout_idx, group);
                 let group = gpu.with_gpu(|gpu| gpu.device().create_bind_group(&group));
                 self.descriptors.bind_groups.push(group);
                 Ok(Submissions::default())
@@ -2019,9 +2017,6 @@ impl Host {
                 ping.await
                     .map_err(|wgpu::BufferAsyncError| StepError::InvalidInstruction(line!()))?;
 
-                // eprintln!("WriteImageToBuffer");
-                // eprintln!(" Source: {:?}", source_image.0);
-                // eprintln!(" Target: {:?}", target_buffer.0);
                 let mut data = slice.get_mapped_range_mut();
 
                 // We've checked that this image can be seen as host bytes.
@@ -2063,14 +2058,6 @@ impl Host {
                     height: size.1,
                     depth_or_array_layers: 1,
                 };
-
-                // eprintln!("CopyBufferToTexture");
-                // eprintln!(" Source: {:?}", source_buffer);
-                // eprintln!(" Target: {:?}", target_texture);
-
-                // eprintln!("{:?}", buffer);
-                // eprintln!("{:?}", texture);
-                // eprintln!(" {:?}", extent);
 
                 encoder.copy_buffer_to_texture(buffer, texture, extent);
 
@@ -2136,11 +2123,6 @@ impl Host {
                     .buffer_use(source_buffer, TextureInitState::UseRead);
                 self.debug
                     .buffer_use(target_buffer, TextureInitState::WriteTo);
-
-                // eprintln!("CopyBufferToBuffer");
-                // eprintln!(" Source: {:?}", source_buffer.0);
-                // eprintln!(" Target: {:?}", target_buffer.0);
-                // eprintln!(" Size: {:?}", size);
 
                 encoder.copy_buffer_to_buffer(source_buf, source, target_buf, target, size);
 
@@ -2414,7 +2396,6 @@ impl Descriptors {
         debug: &mut Debug,
     ) -> Result<wgpu::BindingResource<'_>, StepError> {
         use program::BindingResource::{Buffer, Sampler, TextureView};
-        // eprintln!("{:?}", desc);
         match *desc {
             Buffer {
                 buffer_idx,
@@ -2487,7 +2468,6 @@ impl Descriptors {
         &self,
         desc: &program::ColorAttachmentDescriptor,
     ) -> Result<wgpu::RenderPassColorAttachment<'_>, StepError> {
-        // eprintln!("Attaching {:?}", desc);
         Ok(wgpu::RenderPassColorAttachment {
             view: self
                 .texture_views
@@ -2592,7 +2572,6 @@ impl Descriptors {
     ) -> Result<wgpu::FragmentState<'_>, StepError> {
         buf.clear();
         buf.extend(desc.targets.iter().cloned().map(Some));
-        // eprintln!("{:?}", buf);
         Ok(wgpu::FragmentState {
             module: self
                 .shaders
@@ -2639,7 +2618,6 @@ impl Descriptors {
 
 impl Machine {
     pub(crate) fn new(exec: &Executable) -> Self {
-        // eprintln!("{:#?}", exec.instructions);
         let range = exec.info.functions[&exec.entry_point].range.clone();
         Machine::with_instructions(exec.instructions.clone(), range)
     }

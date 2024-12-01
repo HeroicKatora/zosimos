@@ -595,7 +595,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let texture = {
             let texture = self.textures;
-            // eprintln!("Texture {:?} {:?}", texture, &texture_format);
             self.push(Low::Texture(texture_format.clone()))?;
             DeviceTexture(texture)
         };
@@ -800,8 +799,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             size = self.buffer_plan.get_info(idx)?.descriptor.size();
         };
 
-        // eprintln!("!!! Copying {:?}: to {:?}", idx, target_texture);
-
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyBufferToTexture {
             source_buffer: buffer,
@@ -810,7 +807,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             size,
             target_texture,
         })?;
-        // eprintln!("buf{:?} -> tex{:?} ({:?})", regmap.buffer, regmap.texture, size);
 
         self.push(Low::EndCommands)?;
         // TODO: maybe also don't run it immediately?
@@ -824,7 +820,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
     /// quantization happens as part of the pipeline.
     pub(crate) fn copy_staging_to_texture(&mut self, idx: Texture) -> Result<(), LaunchError> {
         if let Some(staging) = self.staging_map.get(&idx) {
-            // eprintln!("{} {:?}", idx.0, staging);
             // Try to use the cached version of this pipeline.
             let pipeline = if let Some(&pipeline) = self.staged_to_pipelines.get(&idx) {
                 pipeline
@@ -867,7 +862,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         if let Some(staging) = self.staging_map.get(&idx) {
             let texture = staging.device;
 
-            // eprintln!("{} {:?}", idx.0, staging);
             // Try to use the cached version of this pipeline.
             let pipeline = if let Some(&pipeline) = self.staged_from_pipelines.get(&idx) {
                 pipeline
@@ -935,8 +929,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             size = self.buffer_plan.get_info(idx)?.descriptor.size();
         };
 
-        // eprintln!("!!! Copying {:?}: from {:?}", idx, source_texture);
-
         self.push(Low::BeginCommands)?;
         self.push(Low::CopyTextureToBuffer {
             source_texture,
@@ -987,11 +979,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                 target: 0,
                 size: sizeu64,
             })?;
-            // eprintln!("buf{:?} -> buf{:?} ({})", regmap.buffer, map_read, sizeu64);
             self.push(Low::EndCommands)?;
             self.plan_run_top_command();
         }
-        // eprintln!("buf{:?} -> img{:?} ({:?})", source_buffer, target_image, size);
 
         self.plan_gpu_effects_visible()?;
         // FIXME: if we're reading out to a texture, then we do not need this copy at all.
@@ -1103,7 +1093,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
 
         let id = self.texture_views;
         self.push(Low::TextureView(descriptor))?;
-        // eprintln!("Texture {:?} (Device {:?}) in View {:?}", dst, texture, id);
 
         Ok(id)
     }
@@ -1404,13 +1393,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         let format = match desc.pipeline_target {
             PipelineTarget::Texture(texture) => {
                 let format = self.texture_map[&texture].format.format;
-                // eprintln!("Target texture {:?} with format {:?}", texture, format);
                 format
             }
-            PipelineTarget::PreComputedGroup { target_format } => {
-                // eprintln!("Target attachment with format {:?}", target_format);
-                target_format
-            }
+            PipelineTarget::PreComputedGroup { target_format } => target_format,
         };
 
         let (vertex, vertex_entry_point) = match desc.vertex {
@@ -1670,13 +1655,9 @@ impl<I: ExtendOne<Low>> Encoder<I> {
             TextureBind::Textures(0) => None,
             &TextureBind::Textures(count) => {
                 let group = self.make_bind_group_sampled_texture(count)?;
-                // eprintln!("Using Texture {:?} as group {:?}", texture, group);
                 Some(group)
             }
-            &TextureBind::PreComputedGroup { group, .. } => {
-                // eprintln!("Using Target Group {:?}", group);
-                Some(group)
-            }
+            &TextureBind::PreComputedGroup { group, .. } => Some(group),
         };
 
         let vertex_layout = self.make_quad_bind_group();
@@ -1930,8 +1911,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
                     Some(target),
                 )?;
 
-                // eprintln!("{:?} {:?}", parameter, buffer);
-
                 self.prepare_simple_pipeline(SimpleRenderPipelineDescriptor{
                     pipeline_target: PipelineTarget::PreComputedGroup {
                         target_format: if let Some(stage) = parameter.stage_kind() {
@@ -2174,7 +2153,6 @@ impl<I: ExtendOne<Low>> Encoder<I> {
         self.plan_gpu_effects_visible()?;
 
         if !self.operands.is_empty() {
-            // eprintln!("{:?}", self.operands.as_slice());
             return Err(LaunchError::InternalCommandError(line!()));
         }
 

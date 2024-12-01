@@ -855,7 +855,6 @@ impl ImageDescriptor {
                     .stage_kind()
                     // Unsupported format.
                     .ok_or_else(|| {
-                        eprintln!("{descriptor:?}");
                         LaunchError::InternalCommandError(line!())
                     })?;
 
@@ -1218,14 +1217,12 @@ impl Program {
             let basic_format =
                 adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8UnormSrgb);
             if !basic_format.allowed_usages.contains(ALL_TEXTURE_USAGE) {
-                // eprintln!("No rgba8 support {:?}", basic_format.allowed_usages);
                 log::info!("Missing basic format {:?}", basic_format);
                 continue;
             }
 
             let storage_format = adapter.get_texture_format_features(wgpu::TextureFormat::R32Uint);
             if !storage_format.allowed_usages.contains(STAGE_TEXTURE_USAGE) {
-                // eprintln!("No r32uint storage support {:?}", basic_format.allowed_usages);
                 log::info!("Missing basic format {:?}", storage_format);
                 continue;
             }
@@ -1436,7 +1433,10 @@ impl Program {
 
             match high {
                 &High::Done(_) => {
-                    // TODO: should deallocate textures that aren't live anymore.
+                    // TODO: should deallocate/put up for reuse textures that aren't live anymore.
+                    // But we must have a validation strategy for the liveness map, in particular
+                    // for any code changes and additions to the `High` intermediate instruction
+                    // format to avoid regressions.
                 }
                 &High::Input(dst) => {
                     // Identify how we ingest this image.
@@ -1448,14 +1448,12 @@ impl Program {
                     encoder.copy_buffer_to_staging(dst)?;
                 }
                 &High::Output { src, dst } => {
-                    // eprintln!("Output {:?} to {:?}", src, dst);
                     // Identify if we need to transform the texture from the internal format to the
                     // one actually chosen for this texture.
                     encoder.copy_staging_to_buffer(src)?;
                     encoder.copy_buffer_to_output(src, dst)?;
                 }
                 &High::Render { src, dst } => {
-                    // eprintln!("Render {:?} to {:?}", src, dst);
                     encoder.render_staging_to_output(src, dst)?;
                 }
                 &High::PushOperand(texture) => {
