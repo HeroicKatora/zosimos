@@ -36,7 +36,7 @@ version = "22.0"
 features = ["spirv"]
 
 [workspace]
-members = [".", "bin/editor"]
+members = [".", "bin/editor", "bin/sh"]
 
 
 [build-dependencies]
