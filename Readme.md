@@ -1,11 +1,37 @@
 # Zosimos
 
 A library for common image operations, so quick and embeddable that you might
-barely notice it running. At least that's the goal. The main idea is to use
-pre-built GPU pipelines, the same you will find used in video games, but to
-wrap it into an interface more familiar from CPU-based methods.
+barely notice it running. At least that's the goal. The implementation uses
+pre-built GPU pipelines, the same you will find used in video games, to wrap an
+image manipulation interface more familiar from CPU-based libraries.
 
-Planned: See <docs/roadmap.md>.
+Plan: See <docs/roadmap.md>.
+
+Ideas for contributions: See <docs/ideas.md>.
+
+## How to run
+
+This is currently a library. You can run its test suite which will also contain
+usage examples for various different editing jobs.
+
+Work-In-Progress: An interactive 'editor' interface is being sketched in
+`bin/editor`.
+
+Work-In-Progress: An non-interactive scripting interface that maps the command
+operations and whole compile process should be built in `bin/sh`. Here we will
+focus on a *batch* use case since re-use of the pipeline is a big computational
+advantage. (It remains to be seen if caches can be implemented).
+
+## Project philosophy and goals
+
+> AM/FM
+> =====
+>
+> AM/FM is an engineer's term distinguishing the inevitable clunky real-world
+> faultiness of "Actual Machines" from the power-fantasy techno-dreams of
+> "Fucking Magic." (Source: Turkey City Lexicon)
+
+For more see <docs/philosophy.md>.
 
 ## How to test
 
@@ -27,22 +53,6 @@ As an added benefit, the first call will produce a debug version of all test
 results in the form of `png` images within the [`tests/debug`](./tests/debug)
 folder.
 
-## Project philosophy and goals
-
-> AM/FM
-> =====
->
-> AM/FM is an engineer's term distinguishing the inevitable clunky real-world
-> faultiness of "Actual Machines" from the power-fantasy techno-dreams of
-> "Fucking Magic." (Source: Turkey City Lexicon)
-
-Without naming specific other solutions, relying on magic for your image
-processing needs invites the risk of many CVEs, a world of painful
-configuration, and overall slowness. Avoid all of this by relying on safe Rust,
-nice embedding, hardware acceleration and an optimizing execution engine.
-
-For more see <docs/philosophy.md>.
-
 ## How it works
 
 This project never had the goals of being a cairo alternative. Learning from
@@ -53,13 +63,3 @@ has the advantage that we might reuse memory, have intermediate results that
 are never backed by CPU accessible memory, may change certain layouts and
 sampling descriptors on the fly, and can plan execution steps and resource
 utilization transparently.
-
-# Future ideas
-
-I'm grateful if you pick any of the issues documented to explore, implement and
-demonstrate them. Feel free to grab one that tickles your interest. (And see
-'Project goals' for less concrete tasks). Keep in mind maintainability, i.e.
-try not to introduce anything incongruent to the project goals and prefer
-high-level primitives to deep integration / changes to the coammdn structure.
-
-See <docs/ideas.md>.
