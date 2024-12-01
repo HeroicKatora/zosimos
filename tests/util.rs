@@ -25,8 +25,18 @@ pub fn assert_reference_image(image: image::DynamicImage, key: &str) {
     let debug_path = Path::new(DEBUG).join(key);
 
     if std::env::var_os("ZOSIMOS_BLESS").is_some() {
+        let pre: String = std::fs::read_to_string(&output).unwrap_or_default();
+
+        let mut lines = pre.lines().map(String::from).collect::<Vec<_>>();
+        let hash = hash.to_string();
+
+        if !lines.contains(&hash) {
+            lines.push(hash);
+        }
+
         eprintln!("{}: {:?}", key, image.color());
-        std::fs::write(&output, hash.to_string()).expect("Failed to bless result");
+        std::fs::write(&output, lines.join("\n")).expect("Failed to bless result");
+
         image
             .save_with_format(&debug_path, image::ImageFormat::Png)
             .expect("Failed to read result file");
@@ -34,7 +44,7 @@ pub fn assert_reference_image(image: image::DynamicImage, key: &str) {
 
     let expected = std::fs::read_to_string(&output).expect("Failed to read result file");
 
-    if expected != hash.to_string() {
+    if !expected.lines().any(|line| line == hash.to_string()) {
         image
             .save_with_format(&debug_path, image::ImageFormat::Png)
             .expect("Failed to read result file");
