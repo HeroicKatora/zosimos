@@ -8,6 +8,7 @@ use zosimos::{
 
 use crate::serde_bindings as bindings;
 
+#[derive(Deserialize)]
 pub struct SourceCode {
     pub functions: HashMap<u64, Function>,
 }
@@ -107,5 +108,15 @@ command_fn! {
             #[serde(with = "bindings::Whitepoint")]
             target: Whitepoint,
         },
+    }
+}
+
+impl SourceCode {
+    /// Proxy for serde parsing.
+    pub fn parse<'any, P>(parser: P) -> Result<Self, P::Error>
+    where
+        P: serde::de::Deserializer<'any>,
+    {
+        <SourceCode as serde::de::Deserialize>::deserialize(parser)
     }
 }

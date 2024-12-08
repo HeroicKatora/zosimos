@@ -7,6 +7,5 @@ publish = false
 
 [dependencies]
 image-canvas = { workspace = true }
-serde = "1"
-utoipa = "4"
-zosimos = { path = "../../" }
+zosimos = { workspace = true }
+zosimos-lang = { workspace = true }
