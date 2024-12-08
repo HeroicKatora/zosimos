@@ -6,5 +6,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+image-canvas = { workspace = true }
 serde = "1"
 utoipa = "4"
+zosimos = { path = "../../" }

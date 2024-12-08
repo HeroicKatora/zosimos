@@ -2416,12 +2416,6 @@ impl CommandBuffer {
                             let output = adapt.multiply_right(adaptation.to_xyz_matrix.into());
                             let matrix = adaptation.from_xyz_matrix.multiply_right(output);
 
-                            // If you want to debug this (for comparison to reference):
-                            // eprintln!("{:?}", adaptation.to_xyz_matrix);
-                            // eprintln!("{:?}", adaptation.from_xyz_matrix);
-                            // eprintln!("{:?}", adapt);
-                            // eprintln!("{:?}", matrix);
-
                             high_ops.push(High::PushOperand(reg_to_texture[src]));
                             high_ops.push(High::DrawInto {
                                 dst: Target::Discard(texture),
