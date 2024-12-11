@@ -1,9 +1,10 @@
 I'm grateful if you pick any of the issues documented to explore, implement and
 demonstrate them. Feel free to grab one that tickles your interest. However,
-these are vague concepts that I do not see myself focussing on directly. For
-contributions keep in mind maintainability, i.e. try not to introduce anything
-incongruent to the project goals and prefer high-level primitives to deep
-integration / changes to the coammnd structure.
+these are vague concepts that I do not see myself focussing on directly.
+
+For contributions keep in mind maintainability, i.e. try not to introduce
+anything incongruent to the project goals and prefer high-level primitives to
+deep integration / changes to the command structure.
 
 ## Cool stuff with WASM as computation
 

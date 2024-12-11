@@ -7,14 +7,32 @@ We want documentation on <http://docs.rs/zosimos>.
 - [x] Functions in the `command` module, stack-based control flow.
 - [x] Generics in the `command` module, monomorphizing when lowering into a
   `Program`.
-- [ ] Better testing and an exhaustive support matrix.
-- [ ] More operators based on a non-statically typed operator infrastructure
+- [ ] A better testing approach and an exhaustive support matrix.
+  - [ ] Which color spaces are supported.
+  - [ ] Validation for the discovered resource requirements and the `Limits`
+    structure returned from a program evaluation. Since this is used during the
+    selection of an adapter and device, the mechanism for propagating these
+    plays a crucial role in the interoperability.
+  - [ ] More devices to verify the hashing exhaustiveness. Or changes that make
+    it redundant. Can we eliminate all device-dependent outputs by construction
+    without disastrously compromising the performance?
+- [.] More operators based on a non-statically typed operator infrastructure
   including binary and unary operators just derived from their shader.
   Investigate the ergonomics by changing some explicitly enumerated built-ins
   that could be runtime.
-- [ ] Non-Linear control flow, possibly scalar runtime values and a concept of
-  dynamic host-side buffers. In particular, a read-back operation that isn't an
-  output so that hooks can be written.
+  - [ ] Proper trait bounds on parameters.
+- [ ] An explicit treatment of the 'working color space'. Some operators that
+  operate on channels are completely oblivious to whether the image is passed
+  in a special channel encoding. For instance, an Oklab may be passed as Lab or
+  LCh or even as RGB. Indeed, it may be desired to offer this choice! Also note
+  that images with no defined color space may be passed to some images,
+  necessitating the 'ad-hoc' ascription of a working color space to images.
+
+  The list of supported working color spaces need not consider all texel
+  encodings, indeed it currently is effectively a single entry, `["RGB"]`. But
+  this excludes some images from use and with the trait bounds above could be
+  neatly expressed for binary operators that need a consistent one for both
+  inputs.
 
 ## Medium term
 
@@ -51,6 +69,9 @@ We want documentation on <http://docs.rs/zosimos>.
   philosophy) and such hooks serialize the execution unnecessarily, in some
   situations the user may fine cost acceptable for the gain of arbitrarily
   executing intermediate Rust / host / CPU code.
+- [ ] Non-Linear control flow, possibly scalar runtime values and a concept of
+  dynamic host-side buffers. In particular, a read-back operation that isn't an
+  output so that hooks can be written.
 
 ## Long term
 - [ ] Oversized images. It's no problem for almost arbitrarily large textures
