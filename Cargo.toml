@@ -15,9 +15,7 @@ version = "0.25.0"
 default-features = false
 
 [dependencies.image-canvas]
-version = "0.4.2"
-git = "https://github.com/image-rs/canvas"
-rev = "cd28c93a73ca71a70f2a3919cb8faef369272259"
+workspace = true
 
 [dependencies.log]
 version = "0.4"
@@ -34,10 +32,6 @@ default-features = false
 [dependencies.wgpu]
 version = "22.0"
 features = ["spirv"]
-
-[workspace]
-members = [".", "bin/editor"]
-
 
 [build-dependencies]
 shaderc = "0.8"
@@ -101,3 +95,15 @@ crc32fast.opt-level = 3
 miniz_oxide.opt-level = 3
 png.opt-level = 3
 flate2.opt-level = 3
+
+[workspace]
+members = [".", "bin/editor", "bin/sh", "lib/lang"]
+
+[workspace.dependencies.image-canvas]
+version = "0.4.2"
+git = "https://github.com/image-rs/canvas"
+rev = "cd28c93a73ca71a70f2a3919cb8faef369272259"
+[workspace.dependencies.zosimos]
+path = "."
+[workspace.dependencies.zosimos-lang]
+path = "lib/lang"

@@ -1,0 +1,11 @@
+[package]
+name = "zosimos-sh"
+description = "A shell for the zosimos image suite"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+image-canvas = { workspace = true }
+zosimos = { workspace = true }
+zosimos-lang = { workspace = true }

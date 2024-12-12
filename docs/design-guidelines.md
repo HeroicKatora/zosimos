@@ -1,3 +1,10 @@
+This document explains the targets by which the authors intend to evaluate the
+design and implementation quality of the software. That is, *how* will
+conflicting goals be resolved, *how* will items be prioritized, *how* are
+decisions being made, *which* processes do exist?
+
+# Philosphy
+
 Initially and for the forseeable future we will require _at least some_ device
 and driver supported by any of `wgpu`'s backend. We will try to keep the basic
 interface agnostic of that specific though and might offer a pure CPU-based
