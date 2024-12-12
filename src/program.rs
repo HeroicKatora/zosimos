@@ -854,9 +854,7 @@ impl ImageDescriptor {
                 let stage_kind = parameter
                     .stage_kind()
                     // Unsupported format.
-                    .ok_or_else(|| {
-                        LaunchError::InternalCommandError(line!())
-                    })?;
+                    .ok_or_else(|| LaunchError::InternalCommandError(line!()))?;
 
                 staging = Some(StagingDescriptor {
                     stage_kind,
