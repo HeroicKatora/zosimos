@@ -114,9 +114,16 @@ impl Descriptor {
         Some(this)
     }
 
+    /// Create the highly row-aligned layout with the same row bytes.
+    ///
+    /// This can overflow as it uses more bytes than the underlying flexible CPU layout. Returns
+    /// `None` when this occurs.
     pub(crate) fn to_aligned(&self) -> Option<ByteLayout> {
         let bytes_per_row = (self.layout.texel_stride as u32).checked_mul(self.layout.width)?;
         let bytes_per_row = bytes_per_row.next_multiple_of(256);
+
+        // Verify the total byte count can still be expressed as u64.
+        let _ = bytes_per_row.checked_mul(self.layout.height)?;
 
         Some(ByteLayout {
             texel_stride: self.texel.bits.bytes(),
@@ -126,11 +133,13 @@ impl Descriptor {
         })
     }
 
+    /// Calculate the necessary length to represent this on the GPU.
     pub(crate) fn u64_gpu_len(&self) -> Option<u64> {
         let layout = self.to_aligned()?;
         layout.row_stride.checked_mul(layout.height.into())
     }
 
+    /// Convert to the underlying `image-canvas` layout for the host.
     pub(crate) fn to_canvas(&self) -> CanvasLayout {
         self.try_to_canvas()
             .expect("To be validated on construction")
@@ -171,6 +180,17 @@ impl Descriptor {
     /// Calculate the number of texels in width and height dimension.
     pub fn size(&self) -> (u32, u32) {
         (self.layout.width, self.layout.height)
+    }
+}
+
+impl ByteLayout {
+    /// Calculate the length in bytes, wrapping on overflow.
+    ///
+    /// The layout contained in a `Descriptor` for instance is pre-verified not to wrap when it is
+    /// used in a command buffer. In this case the length is also the mathematical length.
+    /// Otherwise you'll need to verify this for yourself.
+    pub fn wrapping_len(&self) -> u64 {
+        u64::from(self.height).wrapping_mul(self.row_stride)
     }
 }
 
@@ -333,6 +353,12 @@ impl ImageBuffer {
     pub fn with_layout(layout: &CanvasLayout) -> Self {
         let inner = Canvas::new(layout.clone());
         ImageBuffer { inner }
+    }
+
+    /// Allocate a new image buffer given its layout.
+    pub fn with_descriptor(descriptor: &Descriptor) -> Self {
+        let layout = descriptor.to_canvas();
+        Self::with_layout(&layout)
     }
 
     pub fn layout(&self) -> &CanvasLayout {
